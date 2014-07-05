@@ -20,19 +20,24 @@ const char *xen_compile_time(void)
     return XEN_COMPILE_TIME;
 }
 
-const char *xen_compile_by(void)
+const char *xen_compile_system_distribution(void)
 {
-    return XEN_COMPILE_BY;
+    return XEN_COMPILE_SYSTEM_DISTRIBUTION;
 }
 
-const char *xen_compile_domain(void)
+const char *xen_compile_system_maintainer_local(void)
 {
-    return XEN_COMPILE_DOMAIN;
+    return XEN_COMPILE_SYSTEM_MAINTAINER_LOCAL;
 }
 
-const char *xen_compile_host(void)
+const char *xen_compile_system_maintainer_domain(void)
 {
-    return XEN_COMPILE_HOST;
+    return XEN_COMPILE_SYSTEM_MAINTAINER_DOMAIN;
+}
+
+const char *xen_compile_system_version(void)
+{
+    return XEN_COMPILE_SYSTEM_VERSION;
 }
 
 const char *xen_compiler(void)
@@ -58,11 +63,6 @@ const char *xen_extra_version(void)
 const char *xen_changeset(void)
 {
     return XEN_CHANGESET;
-}
-
-const char *xen_banner(void)
-{
-    return XEN_BANNER;
 }
 
 const char *xen_deny(void)
@@ -99,10 +99,11 @@ unsigned int __ro_after_init xen_build_id_len;
 
 void print_version(void)
 {
-    printk("Xen version %d.%d%s (%s@%s) (%s) %s %s\n",
+    printk("Xen version %d.%d%s (%s %s) (%s@%s) (%s) %s %s\n",
            xen_major_version(), xen_minor_version(), xen_extra_version(),
-           xen_compile_by(), xen_compile_domain(), xen_compiler(),
-           xen_build_info(), xen_compile_date());
+           xen_compile_system_distribution(), xen_compile_system_version(),
+           xen_compile_system_maintainer_local(), xen_compile_system_maintainer_domain(),
+           xen_compiler(), xen_build_info(), xen_compile_date());
 
     printk("Latest ChangeSet: %s\n", xen_changeset());
 

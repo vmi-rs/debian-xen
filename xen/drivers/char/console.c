@@ -1134,10 +1134,8 @@ void __init console_init_preirq(void)
 
     conring_flush(flags);
 
-    /* HELLO WORLD --- start-of-day banner text. */
-    nrspin_lock(&console_lock);
-    __putstr(xen_banner());
-    nrspin_unlock(&console_lock);
+    /* HELLO WORLD --- start-of-day banner text.  The Debian version banner
+       is emitted by print_version() below. */
 
     /* Locate the buildid, if possible. */
     xen_build_init();
