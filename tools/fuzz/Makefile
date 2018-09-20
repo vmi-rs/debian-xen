@@ -3,7 +3,10 @@ include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS-y :=
 SUBDIRS-y += libelf
-SUBDIRS-y += x86_instruction_emulator
+
+#SUBDIRS-y += x86_instruction_emulator
+# This does not compile with Debian's userland compile options,
+# which include fortify etc.
 
 SUBDIRS-$(CONFIG_X86_64) += cpu-policy
 
