@@ -69,4 +69,4 @@ XEN_JSON_LIBS       := @YAJL_LIBS@ @libjsonc_LIBS@
 
 FILE_OFFSET_BITS    := @FILE_OFFSET_BITS@
 
-CONFIG_PV_SHIM      := @pvshim@
+CONFIG_PV_SHIM      ?= @pvshim@
