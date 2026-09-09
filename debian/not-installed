@@ -34,3 +34,7 @@ etc/xen/README.incompatibilities
 # If someone wants this, suggestions from ocaml experts on what
 # to ship where would be welcome.
 usr/local/lib/ocaml
+
+# Upstream unit-test binaries, built under the versioned libexec tests
+# directory.  We do not ship them in any package.
+usr/lib/xen-*/tests/*

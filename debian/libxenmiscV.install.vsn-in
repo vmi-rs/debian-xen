@@ -1,6 +1,7 @@
 usr/lib/*/libxenctrl.so.*
 usr/lib/*/libxenguest.so.*
 usr/lib/*/libxenlight.so.*
+usr/lib/*/libxenmanage.so.*
 usr/lib/*/libxenstat.so.*
 usr/lib/*/libxenvchan.so.*
 usr/lib/*/libxlutil.so.*
