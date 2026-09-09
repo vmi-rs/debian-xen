@@ -1,8 +1,22 @@
-xen (4.22.0-1) UNRELEASED; urgency=medium
+xen (4.22.0-1) unstable; urgency=medium
 
+  Significant changes:
   * Update to new upstream version 4.22.0.
 
- -- Petr Beneš <w.benny@outlook.com>  Wed, 09 Sep 2026 02:27:07 +0200
+  Changes related to upgrading to Xen 4.22:
+  * debian/control: adjust to 4.22
+  * Refresh remaining patches:
+    - Update "Display Debian package version in hypervisor log" after
+      upstream moved the start-of-day banner out of
+      xen/drivers/char/console.c.
+    - Drop obsolete qemu-traditional handling from "give meaningful error
+      message if qemu device model is unavailable" because qemu-traditional
+      was removed upstream.
+  * debian/libxenmiscV.install.vsn-in: ship libxenmanage.so.* in
+    libxenmisc4.22.
+  * debian/not-installed: exclude upstream test binaries.
+
+ -- Petr Beneš <w.benny@outlook.com>  Wed, 09 Sep 2026 02:27:42 +0200
 
 xen (4.20.3+127-gc42374a105-1) unstable; urgency=medium
 
