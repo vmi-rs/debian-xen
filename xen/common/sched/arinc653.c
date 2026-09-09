@@ -1,5 +1,4 @@
 /******************************************************************************
- * sched_arinc653.c
  *
  * An ARINC653-compatible scheduling algorithm for use in Xen.
  *
@@ -220,6 +219,7 @@ static void update_schedule_units(const struct scheduler *ops)
                       SCHED_PRIV(ops)->schedule[i].unit_id);
 }
 
+#ifdef CONFIG_SYSCTL
 /**
  * This function is called by the adjust_global scheduler hook to put
  * in place a new ARINC653 schedule.
@@ -334,6 +334,7 @@ arinc653_sched_get(
 
     return 0;
 }
+#endif /* CONFIG_SYSCTL */
 
 /**************************************************************************
  * Scheduler callback functions                                           *
@@ -409,10 +410,10 @@ a653sched_alloc_udata(const struct scheduler *ops, struct sched_unit *unit,
     spin_lock_irqsave(&sched_priv->lock, flags);
 
     /*
-     * Add every one of dom0's units to the schedule, as long as there are
-     * slots available.
+     * Add every one of the control domain's units to the schedule, as long as
+     * there are slots available.
      */
-    if ( unit->domain->domain_id == 0 )
+    if ( is_control_domain(unit->domain) && !is_idle_domain(unit->domain) )
     {
         entry = sched_priv->num_schedule_entries;
 
@@ -586,6 +587,9 @@ a653sched_do_schedule(
      */
     BUG_ON(now >= sched_priv->next_major_frame);
 
+    /* Return the amount of time the next domain has to run. */
+    prev->next_time = sched_priv->next_switch_time - now;
+
     spin_unlock_irqrestore(&sched_priv->lock, flags);
 
     /* Tasklet work (which runs in idle UNIT context) overrides all else. */
@@ -597,11 +601,7 @@ a653sched_do_schedule(
          && (sched_unit_master(new_task) != cpu) )
         new_task = IDLETASK(cpu);
 
-    /*
-     * Return the amount of time the next domain has to run and the address
-     * of the selected task's UNIT structure.
-     */
-    prev->next_time = sched_priv->next_switch_time - now;
+    /* Also return the address of the selected task's UNIT structure. */
     prev->next_task = new_task;
     new_task->migrated = false;
 
@@ -660,6 +660,7 @@ a653_switch_sched(struct scheduler *new_ops, unsigned int cpu,
     return &sr->_lock;
 }
 
+#ifdef CONFIG_SYSCTL
 /**
  * Xen scheduler callback function to perform a global (not domain-specific)
  * adjustment. It is used by the ARINC 653 scheduler to put in place a new
@@ -699,6 +700,7 @@ a653sched_adjust_global(const struct scheduler *ops,
 
     return rc;
 }
+#endif /* CONFIG_SYSCTL */
 
 /**
  * This structure defines our scheduler for Xen.
@@ -733,7 +735,9 @@ static const struct scheduler sched_arinc653_def = {
     .switch_sched   = a653_switch_sched,
 
     .adjust         = NULL,
+#ifdef CONFIG_SYSCTL
     .adjust_global  = a653sched_adjust_global,
+#endif
 
     .dump_settings  = NULL,
     .dump_cpu_state = NULL,

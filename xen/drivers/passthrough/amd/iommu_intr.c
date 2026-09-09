@@ -132,7 +132,7 @@ static int get_intremap_requestor_id(int seg, int bdf)
 static unsigned int alloc_intremap_entry(const struct amd_iommu *iommu,
                                          unsigned int bdf, unsigned int nr)
 {
-    const struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(iommu->seg);
+    const struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(iommu->sbdf.seg);
     unsigned long *inuse = ivrs_mappings[bdf].intremap_inuse;
     unsigned int nr_ents =
         intremap_table_entries(ivrs_mappings[bdf].intremap_table, iommu);
@@ -167,7 +167,7 @@ static union irte_ptr get_intremap_entry(const struct amd_iommu *iommu,
                                          unsigned int bdf, unsigned int index)
 {
     union irte_ptr table = {
-        .ptr = get_ivrs_mappings(iommu->seg)[bdf].intremap_table
+        .ptr = get_ivrs_mappings(iommu->sbdf.seg)[bdf].intremap_table
     };
 
     ASSERT(table.ptr && (index < intremap_table_entries(table.ptr, iommu)));
@@ -184,7 +184,7 @@ static void free_intremap_entry(const struct amd_iommu *iommu,
                                 unsigned int bdf, unsigned int index)
 {
     union irte_ptr entry = get_intremap_entry(iommu, bdf, index);
-    struct ivrs_mappings *ivrs = get_ivrs_mappings(iommu->seg);
+    struct ivrs_mappings *ivrs = get_ivrs_mappings(iommu->sbdf.seg);
 
     if ( iommu->ctrl.ga_en )
     {
@@ -281,8 +281,8 @@ static int update_intremap_entry_from_ioapic(
     unsigned int dest, offset;
     bool fresh = false;
 
-    req_id = get_intremap_requestor_id(iommu->seg, bdf);
-    lock = get_intremap_lock(iommu->seg, req_id);
+    req_id = get_intremap_requestor_id(iommu->sbdf.seg, bdf);
+    lock = get_intremap_lock(iommu->sbdf.seg, req_id);
 
     delivery_mode = rte->delivery_mode;
     vector = rte->vector;
@@ -323,7 +323,8 @@ void cf_check amd_iommu_ioapic_update_ire(
     unsigned int apic, unsigned int pin, uint64_t rte)
 {
     struct IO_APIC_route_entry new_rte;
-    int seg, bdf, rc;
+    pci_sbdf_t sbdf;
+    int rc;
     struct amd_iommu *iommu;
     unsigned int idx;
 
@@ -335,20 +336,19 @@ void cf_check amd_iommu_ioapic_update_ire(
     new_rte.raw = rte;
 
     /* get device id of ioapic devices */
-    bdf = ioapic_sbdf[idx].bdf;
-    seg = ioapic_sbdf[idx].seg;
-    iommu = find_iommu_for_device(seg, bdf);
+    sbdf = ioapic_sbdf[idx].sbdf;
+    iommu = find_iommu_for_device(sbdf);
     if ( !iommu )
     {
         AMD_IOMMU_WARN("failed to find IOMMU for IO-APIC @ %04x:%04x\n",
-                       seg, bdf);
+                       sbdf.seg, sbdf.bdf);
         __ioapic_write_entry(apic, pin, true, new_rte);
         return;
     }
 
     /* Update interrupt remapping entry */
     rc = update_intremap_entry_from_ioapic(
-             bdf, iommu, &new_rte,
+             sbdf.bdf, iommu, &new_rte,
              &ioapic_sbdf[idx].pin_2_idx[pin]);
 
     if ( rc )
@@ -369,7 +369,8 @@ unsigned int cf_check amd_iommu_read_ioapic_from_ire(
     unsigned int offset;
     unsigned int val = __io_apic_read(apic, reg);
     unsigned int pin = (reg - 0x10) / 2;
-    uint16_t seg, bdf, req_id;
+    pci_sbdf_t sbdf;
+    uint16_t req_id;
     const struct amd_iommu *iommu;
     union irte_ptr entry;
 
@@ -381,12 +382,11 @@ unsigned int cf_check amd_iommu_read_ioapic_from_ire(
     if ( offset >= INTREMAP_MAX_ENTRIES )
         return val;
 
-    seg = ioapic_sbdf[idx].seg;
-    bdf = ioapic_sbdf[idx].bdf;
-    iommu = find_iommu_for_device(seg, bdf);
+    sbdf = ioapic_sbdf[idx].sbdf;
+    iommu = find_iommu_for_device(sbdf);
     if ( !iommu )
         return val;
-    req_id = get_intremap_requestor_id(seg, bdf);
+    req_id = get_intremap_requestor_id(sbdf.seg, sbdf.bdf);
     entry = get_intremap_entry(iommu, req_id, offset);
 
     if ( !(reg & 1) )
@@ -419,10 +419,10 @@ static int update_intremap_entry_from_msi_msg(
     unsigned int dest, offset, i;
     bool fresh = false;
 
-    req_id = get_dma_requestor_id(iommu->seg, bdf);
-    alias_id = get_intremap_requestor_id(iommu->seg, bdf);
+    req_id = get_dma_requestor_id(iommu->sbdf.seg, bdf);
+    alias_id = get_intremap_requestor_id(iommu->sbdf.seg, bdf);
 
-    lock = get_intremap_lock(iommu->seg, req_id);
+    lock = get_intremap_lock(iommu->sbdf.seg, req_id);
     spin_lock_irqsave(lock, flags);
 
     if ( msg == NULL )
@@ -486,28 +486,28 @@ static int update_intremap_entry_from_msi_msg(
      */
 
     if ( ( req_id != alias_id ) &&
-         get_ivrs_mappings(iommu->seg)[alias_id].intremap_table != NULL )
+         get_ivrs_mappings(iommu->sbdf.seg)[alias_id].intremap_table != NULL )
     {
-        BUG_ON(get_ivrs_mappings(iommu->seg)[req_id].intremap_table !=
-               get_ivrs_mappings(iommu->seg)[alias_id].intremap_table);
+        BUG_ON(get_ivrs_mappings(iommu->sbdf.seg)[req_id].intremap_table !=
+               get_ivrs_mappings(iommu->sbdf.seg)[alias_id].intremap_table);
     }
 
-    return 0;
+    return fresh;
 }
 
-static struct amd_iommu *_find_iommu_for_device(int seg, int bdf)
+static struct amd_iommu *_find_iommu_for_device(pci_sbdf_t sbdf)
 {
     struct amd_iommu *iommu;
 
     for_each_amd_iommu ( iommu )
-        if ( iommu->seg == seg && iommu->bdf == bdf )
+        if ( iommu->sbdf.sbdf == sbdf.sbdf )
             return NULL;
 
-    iommu = find_iommu_for_device(seg, bdf);
+    iommu = find_iommu_for_device(sbdf);
     if ( iommu )
         return iommu;
 
-    AMD_IOMMU_DEBUG("No IOMMU for MSI dev = %pp\n", &PCI_SBDF(seg, bdf));
+    AMD_IOMMU_DEBUG("No IOMMU for MSI dev = %pp\n", &sbdf);
     return ERR_PTR(-EINVAL);
 }
 
@@ -515,15 +515,15 @@ int cf_check amd_iommu_msi_msg_update_ire(
     struct msi_desc *msi_desc, struct msi_msg *msg)
 {
     struct pci_dev *pdev = msi_desc->dev;
-    int bdf, seg, rc;
+    pci_sbdf_t sbdf;
+    int rc;
     struct amd_iommu *iommu;
     unsigned int i, nr = 1;
     u32 data;
 
-    bdf = pdev ? pdev->sbdf.bdf : hpet_sbdf.bdf;
-    seg = pdev ? pdev->seg : hpet_sbdf.seg;
+    sbdf = pdev ? pdev->sbdf : hpet_sbdf.sbdf;
 
-    iommu = _find_iommu_for_device(seg, bdf);
+    iommu = _find_iommu_for_device(sbdf);
     if ( IS_ERR_OR_NULL(iommu) )
         return PTR_ERR(iommu);
 
@@ -532,7 +532,7 @@ int cf_check amd_iommu_msi_msg_update_ire(
 
     if ( msi_desc->remap_index >= 0 && !msg )
     {
-        update_intremap_entry_from_msi_msg(iommu, bdf, nr,
+        update_intremap_entry_from_msi_msg(iommu, sbdf.bdf, nr,
                                            &msi_desc->remap_index,
                                            NULL, NULL);
 
@@ -543,10 +543,10 @@ int cf_check amd_iommu_msi_msg_update_ire(
     if ( !msg )
         return 0;
 
-    rc = update_intremap_entry_from_msi_msg(iommu, bdf, nr,
+    rc = update_intremap_entry_from_msi_msg(iommu, sbdf.bdf, nr,
                                             &msi_desc->remap_index,
                                             msg, &data);
-    if ( !rc )
+    if ( rc >= 0 )
     {
         for ( i = 1; i < nr; ++i )
             msi_desc[i].remap_index = msi_desc->remap_index + i;
@@ -667,8 +667,7 @@ bool __init cf_check iov_supports_xt(void)
         if ( idx == MAX_IO_APICS )
             return false;
 
-        if ( !find_iommu_for_device(ioapic_sbdf[idx].seg,
-                                    ioapic_sbdf[idx].bdf) )
+        if ( !find_iommu_for_device(ioapic_sbdf[idx].sbdf) )
         {
             AMD_IOMMU_WARN("no IOMMU for IO-APIC %#x (ID %x)\n",
                            apic, IO_APIC_ID(apic));
@@ -697,14 +696,14 @@ int __init cf_check amd_setup_hpet_msi(struct msi_desc *msi_desc)
         return -ENODEV;
     }
 
-    iommu = find_iommu_for_device(hpet_sbdf.seg, hpet_sbdf.bdf);
+    iommu = find_iommu_for_device(hpet_sbdf.sbdf);
     if ( !iommu )
         return -ENXIO;
 
-    lock = get_intremap_lock(hpet_sbdf.seg, hpet_sbdf.bdf);
+    lock = get_intremap_lock(hpet_sbdf.sbdf.seg, hpet_sbdf.sbdf.bdf);
     spin_lock_irqsave(lock, flags);
 
-    msi_desc->remap_index = alloc_intremap_entry(iommu, hpet_sbdf.bdf, 1);
+    msi_desc->remap_index = alloc_intremap_entry(iommu, hpet_sbdf.sbdf.bdf, 1);
     if ( msi_desc->remap_index >= INTREMAP_MAX_ENTRIES )
     {
         msi_desc->remap_index = -1;
@@ -737,7 +736,7 @@ static void dump_intremap_table(const struct amd_iommu *iommu,
         if ( ivrs_mapping )
         {
             printk("  %pp:\n",
-                   &PCI_SBDF(iommu->seg, ivrs_mapping->dte_requestor_id));
+                   &PCI_SBDF(iommu->sbdf.seg, ivrs_mapping->dte_requestor_id));
             ivrs_mapping = NULL;
         }
 

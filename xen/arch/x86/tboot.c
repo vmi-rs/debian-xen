@@ -1,19 +1,21 @@
+#include <xen/acpi.h>
+#include <xen/domain_page.h>
 #include <xen/efi.h>
 #include <xen/init.h>
-#include <xen/types.h>
+#include <xen/iommu.h>
 #include <xen/lib.h>
 #include <xen/param.h>
-#include <xen/sched.h>
-#include <xen/domain_page.h>
-#include <xen/iommu.h>
-#include <xen/acpi.h>
 #include <xen/pfn.h>
+#include <xen/sched.h>
+#include <xen/types.h>
+
+#include <asm/e820.h>
 #include <asm/fixmap.h>
+#include <asm/msr.h>
 #include <asm/page.h>
 #include <asm/processor.h>
-#include <asm/e820.h>
-#include <asm/tboot.h>
 #include <asm/setup.h>
+#include <asm/tboot.h>
 #include <asm/trampoline.h>
 
 #include <crypto/vmac.h>
@@ -39,8 +41,8 @@ static bool __ro_after_init is_vtd;
  * TXT configuration registers (offsets from TXT_{PUB, PRIV}_CONFIG_REGS_BASE)
  */
 
-#define TXT_PUB_CONFIG_REGS_BASE       0xfed30000
-#define TXT_PRIV_CONFIG_REGS_BASE      0xfed20000
+#define TXT_PUB_CONFIG_REGS_BASE       0xfed30000U
+#define TXT_PRIV_CONFIG_REGS_BASE      0xfed20000U
 
 /* # pages for each config regs space - used by fixmap */
 #define NR_TXT_CONFIG_PAGES     ((TXT_PUB_CONFIG_REGS_BASE -                \
@@ -200,7 +202,7 @@ static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
     uint8_t nonce[16] = {};
     vmac_ctx_t ctx;
 
-    vmac_set_key((uint8_t *)key, &ctx);
+    vmac_set_key(key, &ctx);
     for_each_domain( d )
     {
         if ( !(d->options & XEN_DOMCTL_CDF_s3_integrity) )
@@ -239,7 +241,7 @@ static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
     uint8_t nonce[16] = {};
     vmac_ctx_t ctx;
 
-    vmac_set_key((uint8_t *)key, &ctx);
+    vmac_set_key(key, &ctx);
     for ( mfn = 0; mfn < max_page; mfn++ )
     {
         struct page_info *page = mfn_to_page(_mfn(mfn));
@@ -270,7 +272,7 @@ static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
     uint8_t nonce[16] = {};
     vmac_ctx_t ctx;
 
-    vmac_set_key((uint8_t *)key, &ctx);
+    vmac_set_key(key, &ctx);
     for ( sidx = 0; ; sidx = nidx )
     {
         eidx = find_next_zero_bit(pdx_group_valid, max_idx, sidx);

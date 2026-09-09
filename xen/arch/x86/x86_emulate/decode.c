@@ -387,6 +387,7 @@ static const struct ext0f38_table {
     [0x7a ... 0x7c] = { .simd_size = simd_none, .two_op = 1 },
     [0x7d ... 0x7e] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x7f] = { .simd_size = simd_packed_fp, .d8s = d8s_vl },
+    [0x80 ... 0x81] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x82] = { .simd_size = simd_other },
     [0x83] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x88] = { .simd_size = simd_packed_fp, .two_op = 1, .d8s = d8s_dq },
@@ -651,7 +652,7 @@ decode_onebyte(struct x86_emulate_state *s,
     case 0xce: /* into */
     case 0xd4: /* aam */
     case 0xd5: /* aad */
-    case 0xd6: /* salc */
+    case 0xd6: /* salc / udb */
         s->not_64bit = true;
         break;
 
@@ -744,8 +745,12 @@ decode_twobyte(struct x86_emulate_state *s,
         case 0:
             s->desc |= DstMem | SrcImplicit | Mov;
             break;
+        case 6:
+            if ( !(s->modrm_reg & 1) && mode_64bit() )
+            {
         case 2: case 4:
-            s->desc |= SrcMem16;
+                s->desc |= SrcMem16;
+            }
             break;
         }
         break;
@@ -775,12 +780,12 @@ decode_twobyte(struct x86_emulate_state *s,
         break;
 
     case 0x20: case 0x22: /* mov to/from cr */
-        if ( s->lock_prefix && vcpu_has_cr8_legacy() && s->modrm_reg == 0 )
+        if ( s->lock_prefix && vcpu_has_cr8_legacy() )
         {
-            s->modrm_reg = 8;
+            s->modrm_reg += 8;
             s->lock_prefix = false;
         }
-        fallthrough;
+        /* fall through */
     case 0x21: case 0x23: /* mov to/from dr */
         ASSERT(s->ea.type == OP_REG); /* Early operand adjustment ensures this. */
         generate_exception_if(s->lock_prefix, X86_EXC_UD);

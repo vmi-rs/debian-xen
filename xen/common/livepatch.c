@@ -107,7 +107,7 @@ static int verify_payload(const struct xen_sysctl_livepatch_upload *upload, char
     return 0;
 }
 
-bool is_patch(const void *ptr)
+bool is_patch(const void *addr)
 {
     const struct payload *data;
     bool r = false;
@@ -115,12 +115,12 @@ bool is_patch(const void *ptr)
     rcu_read_lock(&rcu_payload_lock);
     list_for_each_entry_rcu ( data, &payload_list, list )
     {
-        if ( (ptr >= data->rw_addr &&
-              ptr < (data->rw_addr + data->rw_size)) ||
-             (ptr >= data->ro_addr &&
-              ptr < (data->ro_addr + data->ro_size)) ||
-             (ptr >= data->text_addr &&
-              ptr < (data->text_addr + data->text_size)) )
+        if ( (addr >= data->rw_addr &&
+              addr < (data->rw_addr + data->rw_size)) ||
+             (addr >= data->ro_addr &&
+              addr < (data->ro_addr + data->ro_size)) ||
+             (addr >= data->text_addr &&
+              addr < (data->text_addr + data->text_size)) )
         {
             r = 1;
             break;
@@ -475,8 +475,8 @@ static int parse_buildid(const struct livepatch_elf_sec *sec,
 
 static int check_xen_buildid(const struct livepatch_elf *elf)
 {
-    const void *id;
-    unsigned int len;
+    const void *id = xen_build_id;
+    unsigned int len = xen_build_id_len;
     struct livepatch_build_id lp_id;
     const struct livepatch_elf_sec *sec =
         livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_XEN_DEPENDS);
@@ -498,13 +498,12 @@ static int check_xen_buildid(const struct livepatch_elf *elf)
         return -EINVAL;
     }
 
-    rc = xen_build_id(&id, &len);
-    if ( rc )
+    if ( !len )
     {
         printk(XENLOG_ERR LIVEPATCH
                "%s: unable to get running Xen build-id: %d\n",
                elf->name, rc);
-        return rc;
+        return -ENODATA;
     }
 
     if ( lp_id.len != len || memcmp(id, lp_id.p, len) )
@@ -665,7 +664,8 @@ static inline int livepatch_check_expectations(const struct payload *payload)
     const struct livepatch_elf_sec *__sec = livepatch_elf_sec_by_name(elf, section_name); \
     if ( !__sec )                                                                         \
         break;                                                                            \
-    if ( !section_ok(elf, __sec, sizeof(*hook)) || __sec->sec->sh_size != sizeof(*hook) ) \
+    if ( !section_ok(elf, __sec, sizeof(*(hook))) ||                                      \
+         __sec->sec->sh_size != sizeof(*(hook)) )                                         \
         return -EINVAL;                                                                   \
     hook = __sec->addr;                                                                   \
 } while (0)
@@ -679,10 +679,10 @@ static inline int livepatch_check_expectations(const struct payload *payload)
     const struct livepatch_elf_sec *__sec = livepatch_elf_sec_by_name(elf, section_name); \
     if ( !__sec )                                                                         \
         break;                                                                            \
-    if ( !section_ok(elf, __sec, sizeof(*hook)) )                                         \
+    if ( !section_ok(elf, __sec, sizeof(*(hook))) )                                       \
         return -EINVAL;                                                                   \
     hook = __sec->addr;                                                                   \
-    nhooks = __sec->sec->sh_size / sizeof(*hook);                                         \
+    nhooks = __sec->sec->sh_size / sizeof(*(hook));                                       \
 } while (0)
 
 static int prepare_payload(struct payload *payload,
@@ -903,6 +903,64 @@ static int prepare_payload(struct payload *payload,
                elf->name);
         return -EOPNOTSUPP;
 #endif
+    }
+
+    sec = livepatch_elf_sec_by_name(elf, ".alt_call_sites");
+    if ( sec )
+    {
+#ifdef CONFIG_ALTERNATIVE_CALL
+        const struct alt_call *a, *start, *end;
+
+        if ( !section_ok(elf, sec, sizeof(*a)) )
+            return -EINVAL;
+
+        /* Tolerate an empty .alt_call_sites section... */
+        if ( sec->sec->sh_size == 0 )
+            goto alt_call_done;
+
+        /* ... but otherwise, there needs to be something to alter... */
+        if ( payload->text_size == 0 )
+        {
+            printk(XENLOG_ERR LIVEPATCH "%s Alternative calls provided, but no .text\n",
+                   elf->name);
+            return -EINVAL;
+        }
+
+        start = sec->addr;
+        end = sec->addr + sec->sec->sh_size;
+
+        for ( a = start; a < end; a++ )
+        {
+            const void *orig = ALT_CALL_PTR(a);
+            size_t len = ALT_CALL_LEN(a);
+
+            /* orig must be fully within .text. */
+            if ( orig       < payload->text_addr ||
+                 len        > payload->text_size ||
+                 orig + len > payload->text_addr + payload->text_size )
+            {
+                printk(XENLOG_ERR LIVEPATCH
+                       "%s: Alternative call %p+%#zx outside payload text %p+%#zx\n",
+                       elf->name, orig, len,
+                       payload->text_addr, payload->text_size);
+                return -EINVAL;
+            }
+        }
+
+        rc = livepatch_apply_alt_calls(start, end);
+        if ( rc )
+        {
+            printk(XENLOG_ERR LIVEPATCH "%s: Applying alternative calls failed: %d\n",
+                   elf->name, rc);
+            return rc;
+        }
+
+    alt_call_done:;
+#else /* CONFIG_ALTERNATIVE_CALL */
+        printk(XENLOG_ERR LIVEPATCH "%s: Alternative calls not supported\n",
+               elf->name);
+        return -EOPNOTSUPP;
+#endif /* !CONFIG_ALTERNATIVE_CALL */
     }
 
     sec = livepatch_elf_sec_by_name(elf, ".ex_table");
@@ -1253,11 +1311,10 @@ static int livepatch_list(struct xen_sysctl_livepatch_list *list)
         return -EINVAL;
     }
 
-    list->name_total_size = 0;
-    list->metadata_total_size = 0;
     if ( list->nr )
     {
         size_t name_offset = 0, metadata_offset = 0;
+        size_t name_total_copied = 0, metadata_total_copied = 0;
 
         list_for_each_entry( data, &payload_list, list )
         {
@@ -1270,10 +1327,15 @@ static int livepatch_list(struct xen_sysctl_livepatch_list *list)
             status.rc = data->rc;
 
             name_len = strlen(data->name) + 1;
-            list->name_total_size += name_len;
-
             metadata_len = data->metadata.len;
-            list->metadata_total_size += metadata_len;
+
+            if ( (name_total_copied + name_len) > list->name_total_size ||
+                 (metadata_total_copied + metadata_len) >
+                 list->metadata_total_size )
+            {
+                rc = -ENOBUFS;
+                break;
+            }
 
             if ( !guest_handle_subrange_okay(list->name, name_offset,
                                              name_offset + name_len - 1) ||
@@ -1297,6 +1359,9 @@ static int livepatch_list(struct xen_sysctl_livepatch_list *list)
                 break;
             }
 
+            name_total_copied += name_len;
+            metadata_total_copied += metadata_len;
+
             idx++;
             name_offset += name_len;
             metadata_offset += metadata_len;
@@ -1304,9 +1369,15 @@ static int livepatch_list(struct xen_sysctl_livepatch_list *list)
             if ( (idx >= list->nr) || hypercall_preempt_check() )
                 break;
         }
+
+        list->name_total_size = name_total_copied;
+        list->metadata_total_size = metadata_total_copied;
     }
     else
     {
+        list->name_total_size = 0;
+        list->metadata_total_size = 0;
+
         list_for_each_entry( data, &payload_list, list )
         {
             list->name_total_size += strlen(data->name) + 1;
@@ -1854,7 +1925,6 @@ static void noinline do_livepatch_work(void)
                             p->name);
                     ASSERT_UNREACHABLE();
                 }
-            default:
                 break;
             }
         }
@@ -1913,7 +1983,6 @@ static int build_id_dep(struct payload *payload, bool internal)
 {
     const void *id = NULL;
     unsigned int len = 0;
-    int rc;
     const char *name = "hypervisor";
 
     ASSERT(payload->dep.len && payload->dep.p);
@@ -1921,9 +1990,10 @@ static int build_id_dep(struct payload *payload, bool internal)
     /* First time user is against hypervisor. */
     if ( internal )
     {
-        rc = xen_build_id(&id, &len);
-        if ( rc )
-            return rc;
+        id = xen_build_id;
+        len = xen_build_id_len;
+        if ( !len )
+            return -ENODATA;
     }
     else
     {
@@ -2126,30 +2196,30 @@ static int livepatch_action(struct xen_sysctl_livepatch_action *action)
     return rc;
 }
 
-int livepatch_op(struct xen_sysctl_livepatch_op *livepatch)
+int livepatch_op(struct xen_sysctl_livepatch_op *op)
 {
     int rc;
 
-    if ( (livepatch->flags & ~LIVEPATCH_FLAGS_MASK) &&
-         !(livepatch->flags & LIVEPATCH_FLAG_FORCE) )
+    if ( (op->flags & ~LIVEPATCH_FLAGS_MASK) &&
+         !(op->flags & LIVEPATCH_FLAG_FORCE) )
         return -EINVAL;
 
-    switch ( livepatch->cmd )
+    switch ( op->cmd )
     {
     case XEN_SYSCTL_LIVEPATCH_UPLOAD:
-        rc = livepatch_upload(&livepatch->u.upload);
+        rc = livepatch_upload(&op->u.upload);
         break;
 
     case XEN_SYSCTL_LIVEPATCH_GET:
-        rc = livepatch_get(&livepatch->u.get);
+        rc = livepatch_get(&op->u.get);
         break;
 
     case XEN_SYSCTL_LIVEPATCH_LIST:
-        rc = livepatch_list(&livepatch->u.list);
+        rc = livepatch_list(&op->u.list);
         break;
 
     case XEN_SYSCTL_LIVEPATCH_ACTION:
-        rc = livepatch_action(&livepatch->u.action);
+        rc = livepatch_action(&op->u.action);
         break;
 
     default:
@@ -2178,14 +2248,12 @@ static const char *state2str(unsigned int state)
 static void cf_check livepatch_printall(unsigned char key)
 {
     struct payload *data;
-    const void *binary_id = NULL;
-    unsigned int len = 0;
     unsigned int i;
 
     printk("'%c' pressed - Dumping all livepatch patches\n", key);
 
-    if ( !xen_build_id(&binary_id, &len) )
-        printk("build-id: %*phN\n", len, binary_id);
+    if ( xen_build_id_len )
+        printk("build-id: %*phN\n", xen_build_id_len, xen_build_id);
 
     if ( !spin_trylock(&payload_lock) )
     {

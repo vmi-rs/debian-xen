@@ -21,6 +21,7 @@
 #define DRIVERS__PASSTHROUGH__VTD__EXTERN_H
 
 #include "dmar.h"
+#include <xen/domain_page.h>
 #include <xen/keyhandler.h>
 
 #define VTDPREFIX "[VT-D]"
@@ -56,8 +57,7 @@ int __must_check cf_check vtd_flush_context_reg(
     uint8_t function_mask, uint64_t type, bool flush_non_present_entry);
 int __must_check cf_check vtd_flush_iotlb_reg(
     struct vtd_iommu *iommu, uint16_t did, uint64_t addr,
-    unsigned int size_order, uint64_t type, bool flush_non_present_entry,
-    bool flush_dev_iotlb);
+    unsigned int size_order, uint64_t type, bool flush_non_present_entry);
 
 struct vtd_iommu *ioapic_to_iommu(unsigned int apic_id);
 struct vtd_iommu *hpet_to_iommu(unsigned int hpet_id);
@@ -65,21 +65,9 @@ struct acpi_drhd_unit *ioapic_to_drhd(unsigned int apic_id);
 struct acpi_drhd_unit *hpet_to_drhd(unsigned int hpet_id);
 struct acpi_rhsa_unit *drhd_to_rhsa(const struct acpi_drhd_unit *drhd);
 
-struct acpi_drhd_unit *find_ats_dev_drhd(struct vtd_iommu *iommu);
-
-int ats_device(const struct pci_dev *, const struct acpi_drhd_unit *);
-
-int dev_invalidate_iotlb(struct vtd_iommu *iommu, u16 did,
-                         u64 addr, unsigned int size_order, u64 type);
-
-int __must_check qinval_device_iotlb_sync(struct vtd_iommu *iommu,
-                                          struct pci_dev *pdev,
-                                          u16 did, u16 size, u64 addr);
 
 uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node);
 void free_pgtable_maddr(u64 maddr);
-void *map_vtd_domain_page(u64 maddr);
-void unmap_vtd_domain_page(const void *va);
 int domain_context_mapping_one(struct domain *domain, struct vtd_iommu *iommu,
                                uint8_t bus, uint8_t devfn,
                                const struct pci_dev *pdev, domid_t domid,
@@ -88,6 +76,16 @@ int domain_context_unmap_one(struct domain *domain, struct vtd_iommu *iommu,
                              uint8_t bus, uint8_t devfn);
 int cf_check intel_iommu_get_reserved_device_memory(
     iommu_grdm_t *func, void *ctxt);
+
+static inline void *map_vtd_domain_page(paddr_t maddr)
+{
+    return map_domain_page(_mfn(paddr_to_pfn(maddr)));
+}
+
+static inline void unmap_vtd_domain_page(const void *va)
+{
+    unmap_domain_page(va);
+}
 
 unsigned int cf_check io_apic_read_remap_rte(
     unsigned int apic, unsigned int reg);

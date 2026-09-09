@@ -11,28 +11,31 @@
  */
 
 #include <xen/acpi.h>
+#include <xen/console.h>
+#include <xen/cpu.h>
+#include <xen/domain.h>
 #include <xen/errno.h>
 #include <xen/iocap.h>
+#include <xen/iommu.h>
 #include <xen/param.h>
 #include <xen/sched.h>
-#include <asm/acpi.h>
-#include <asm/irq.h>
-#include <xen/spinlock.h>
-#include <xen/sched.h>
-#include <xen/domain.h>
-#include <xen/console.h>
-#include <xen/iommu.h>
 #include <xen/softirq.h>
+#include <xen/spinlock.h>
 #include <xen/watchdog.h>
-#include <xen/cpu.h>
-#include <public/platform.h>
-#include <asm/tboot.h>
+
+#include <asm/acpi.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
+#include <asm/irq.h>
 #include <asm/microcode.h>
+#include <asm/mwait.h>
 #include <asm/prot-key.h>
 #include <asm/spec_ctrl.h>
+#include <asm/tboot.h>
 #include <asm/trampoline.h>
+#include <asm/traps.h>
+
+#include <public/platform.h>
 
 #include <acpi/cpufreq/cpufreq.h>
 
@@ -137,38 +140,10 @@ static void device_power_up(enum dev_power_saved saved)
     }
 }
 
-static void freeze_domains(void)
-{
-    struct domain *d;
-
-    rcu_read_lock(&domlist_read_lock);
-    /*
-     * Note that we iterate in order of domain-id. Hence we will pause dom0
-     * first which is required for correctness (as only dom0 can add domains to
-     * the domain list). Otherwise we could miss concurrently-created domains.
-     */
-    for_each_domain ( d )
-        domain_pause(d);
-    rcu_read_unlock(&domlist_read_lock);
-
-    scheduler_disable();
-}
-
-static void thaw_domains(void)
-{
-    struct domain *d;
-
-    scheduler_enable();
-
-    rcu_read_lock(&domlist_read_lock);
-    for_each_domain ( d )
-        domain_unpause(d);
-    rcu_read_unlock(&domlist_read_lock);
-}
-
 static void acpi_sleep_prepare(u32 state)
 {
     void *wakeup_vector_va;
+    paddr_t entry_pa;
 
     if ( state != ACPI_STATE_S3 )
         return;
@@ -181,10 +156,12 @@ static void acpi_sleep_prepare(u32 state)
     wakeup_vector_va = fix_to_virt(FIX_ACPI_END) +
                        PAGE_OFFSET(acpi_sinfo.wakeup_vector);
 
+    entry_pa = bootsym_phys(entry_S3);
+
     if ( acpi_sinfo.vector_width == 32 )
-        *(uint32_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
+        *(uint32_t *)wakeup_vector_va = entry_pa;
     else
-        *(uint64_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
+        *(uint64_t *)wakeup_vector_va = entry_pa;
 
     clear_fixmap(FIX_ACPI_END);
 }
@@ -212,6 +189,7 @@ static int enter_state(u32 state)
     printk(XENLOG_INFO "Preparing system for ACPI S%d state.\n", state);
 
     freeze_domains();
+    scheduler_disable();
 
     acpi_dmar_reinstate();
 
@@ -322,6 +300,7 @@ static int enter_state(u32 state)
     acpi_sleep_post(state);
     if ( hvm_cpu_up() )
         BUG();
+    mwait_idle_resume();
     cpufreq_add_cpu(0);
 
  enable_cpu:
@@ -330,6 +309,7 @@ static int enter_state(u32 state)
     mtrr_aps_sync_end();
     iommu_adjust_irq_affinities();
     acpi_dmar_zap();
+    scheduler_enable();
     thaw_domains();
     system_state = SYS_STATE_active;
     spin_unlock(&pm_lock);
@@ -448,7 +428,7 @@ static void tboot_sleep(u8 sleep_state)
     g_tboot_shared->acpi_sinfo.wakeup_vector = acpi_sinfo.wakeup_vector;
     g_tboot_shared->acpi_sinfo.vector_width = acpi_sinfo.vector_width;
     g_tboot_shared->acpi_sinfo.kernel_s3_resume_vector =
-                                              bootsym_phys(wakeup_start);
+                                              bootsym_phys(entry_S3);
 
     switch ( sleep_state )
     {

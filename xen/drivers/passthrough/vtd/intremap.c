@@ -31,7 +31,6 @@
 
 #include <asm/apic.h>
 #include <asm/io_apic.h>
-#define nr_ioapic_entries(i)  nr_ioapic_entries[i]
 
 /*
  * source validation type (SVT)
@@ -68,7 +67,7 @@ static int init_apic_pin_2_ir_idx(void)
 
     nr_pins = 0;
     for ( i = 0; i < nr_ioapics; i++ )
-        nr_pins += nr_ioapic_entries(i);
+        nr_pins += nr_ioapic_entries[i];
 
     _apic_pin_2_ir_idx = xmalloc_array(int, nr_pins);
     apic_pin_2_ir_idx = xmalloc_array(int *, nr_ioapics);
@@ -86,7 +85,7 @@ static int init_apic_pin_2_ir_idx(void)
     for ( i = 0; i < nr_ioapics; i++ )
     {
         apic_pin_2_ir_idx[i] = &_apic_pin_2_ir_idx[nr_pins];
-        nr_pins += nr_ioapic_entries(i);
+        nr_pins += nr_ioapic_entries[i];
     }
 
     return 0;
@@ -269,7 +268,7 @@ static unsigned int alloc_remap_entry(struct vtd_iommu *iommu, unsigned int nr)
 }
 
 static int remap_entry_to_ioapic_rte(
-    struct vtd_iommu *iommu, int index, struct IO_xAPIC_route_entry *old_rte)
+    struct vtd_iommu *iommu, int index, struct IO_APIC_route_entry *old_rte)
 {
     struct iremap_entry *iremap_entry = NULL, *iremap_entries;
     unsigned long flags;
@@ -317,8 +316,8 @@ static int remap_entry_to_ioapic_rte(
 }
 
 static int ioapic_rte_to_remap_entry(struct vtd_iommu *iommu,
-    int apic, unsigned int ioapic_pin, struct IO_xAPIC_route_entry *old_rte,
-    struct IO_xAPIC_route_entry new_rte)
+    int apic, unsigned int ioapic_pin, struct IO_APIC_route_entry *old_rte,
+    struct IO_APIC_route_entry new_rte)
 {
     struct iremap_entry *iremap_entry = NULL, *iremap_entries;
     struct iremap_entry new_ire;
@@ -399,8 +398,8 @@ unsigned int cf_check io_apic_read_remap_rte(
 {
     unsigned int ioapic_pin = (reg - 0x10) / 2;
     int index;
-    struct IO_xAPIC_route_entry old_rte = { };
-    int rte_upper = (reg & 1) ? 1 : 0;
+    struct IO_APIC_route_entry old_rte = {};
+    bool rte_upper = reg & 1;
     struct vtd_iommu *iommu = ioapic_to_iommu(IO_APIC_ID(apic));
 
     if ( !iommu->intremap.num ||
@@ -411,17 +410,14 @@ unsigned int cf_check io_apic_read_remap_rte(
 
     if ( remap_entry_to_ioapic_rte(iommu, index, &old_rte) )
         return __io_apic_read(apic, reg);
-
-    if ( rte_upper )
-        return (*(((u32 *)&old_rte) + 1));
-    else
-        return (*(((u32 *)&old_rte) + 0));
+    
+    return rte_upper ? old_rte.high : old_rte.low;
 }
 
 void cf_check io_apic_write_remap_rte(
     unsigned int apic, unsigned int pin, uint64_t rte)
 {
-    struct IO_xAPIC_route_entry old_rte = {}, new_rte;
+    struct IO_APIC_route_entry old_rte = {}, new_rte;
     struct vtd_iommu *iommu = ioapic_to_iommu(IO_APIC_ID(apic));
     int rc;
 
@@ -436,14 +432,12 @@ void cf_check io_apic_write_remap_rte(
     __ioapic_write_entry(apic, pin, true, old_rte);
 }
 
-static void set_msi_source_id(struct pci_dev *pdev, struct iremap_entry *ire)
+static int set_msi_source_id(const struct pci_dev *pdev,
+                             struct iremap_entry *ire)
 {
     u16 seg;
     u8 bus, devfn, secbus;
     int ret;
-
-    if ( !pdev || !ire )
-        return;
 
     seg = pdev->seg;
     bus = pdev->bus;
@@ -475,7 +469,7 @@ static void set_msi_source_id(struct pci_dev *pdev, struct iremap_entry *ire)
             set_ire_sid(ire, SVT_VERIFY_SID_SQ, SQ_ALL_16,
                         PCI_BDF(bus, devfn));
         }
-        else if ( ret == 1 ) /* find upstream bridge */
+        else if ( ret == 1 ) /* found upstream bridge */
         {
             if ( pdev_type(seg, bus, devfn) == DEV_TYPE_PCIe2PCI_BRIDGE )
                 set_ire_sid(ire, SVT_VERIFY_BUS, SQ_ALL_16,
@@ -485,16 +479,21 @@ static void set_msi_source_id(struct pci_dev *pdev, struct iremap_entry *ire)
                             PCI_BDF(bus, devfn));
         }
         else
+        {
             dprintk(XENLOG_WARNING VTDPREFIX,
-                    "d%d: no upstream bridge for %pp\n",
-                    pdev->domain->domain_id, &pdev->sbdf);
+                    "%pd: no upstream bridge for %pp\n",
+                    pdev->domain, &pdev->sbdf);
+            return -ENXIO;
+        }
         break;
 
     default:
-        dprintk(XENLOG_WARNING VTDPREFIX, "d%d: unknown(%u): %pp\n",
-                pdev->domain->domain_id, pdev->type, &pdev->sbdf);
-        break;
-   }
+        dprintk(XENLOG_WARNING VTDPREFIX, "%pd: %pp unknown device type %d\n",
+                pdev->domain, &pdev->sbdf, pdev->type);
+        return -EOPNOTSUPP;
+    }
+
+    return 0;
 }
 
 static int msi_msg_to_remap_entry(
@@ -506,9 +505,20 @@ static int msi_msg_to_remap_entry(
     unsigned int index, i, nr = 1;
     unsigned long flags;
     const struct pi_desc *pi_desc = msi_desc->pi_desc;
+    bool alloc = false;
 
-    if ( msi_desc->msi_attrib.type == PCI_CAP_ID_MSI )
-        nr = msi_desc->msi.nvec;
+    if ( pdev )
+    {
+        int rc = set_msi_source_id(pdev, &new_ire);
+
+        if ( rc )
+            return rc;
+
+        if ( msi_desc->msi_attrib.type == PCI_CAP_ID_MSI )
+            nr = msi_desc->msi.nvec;
+    }
+    else
+        set_hpet_source_id(msi_desc->hpet_id, &new_ire);
 
     spin_lock_irqsave(&iommu->intremap.lock, flags);
 
@@ -529,6 +539,7 @@ static int msi_msg_to_remap_entry(
         index = alloc_remap_entry(iommu, nr);
         for ( i = 0; i < nr; ++i )
             msi_desc[i].remap_index = index + i;
+        alloc = true;
     }
     else
         index = msi_desc->remap_index;
@@ -573,11 +584,6 @@ static int msi_msg_to_remap_entry(
         new_ire.post.p = 1;
     }
 
-    if ( pdev )
-        set_msi_source_id(pdev, &new_ire);
-    else
-        set_hpet_source_id(msi_desc->hpet_id, &new_ire);
-
     /* now construct new MSI/MSI-X rte entry */
     remap_rte = (struct msi_msg_remap_entry *)msg;
     remap_rte->address_lo.dontcare = 0;
@@ -601,7 +607,7 @@ static int msi_msg_to_remap_entry(
     unmap_vtd_domain_page(iremap_entries);
     spin_unlock_irqrestore(&iommu->intremap.lock, flags);
 
-    return 0;
+    return alloc;
 }
 
 int cf_check msi_msg_write_remap_rte(
@@ -741,7 +747,7 @@ void disable_intremap(struct vtd_iommu *iommu)
                   !(sts & DMA_GSTS_IRES), sts);
 
     /* If we are disabling Interrupt Remapping, make sure we dont stay in
-     * Extended Interrupt Mode, as this is unaffected by the Interrupt 
+     * Extended Interrupt Mode, as this is unaffected by the Interrupt
      * Remapping flag in each DMAR Global Control Register.
      * Specifically, local apics in xapic mode do not like interrupts delivered
      * in x2apic mode.  Any code turning interrupt remapping back on will set

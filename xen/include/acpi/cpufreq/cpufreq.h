@@ -20,16 +20,15 @@
 
 #include "processor_perf.h"
 
-DECLARE_PER_CPU(spinlock_t, cpufreq_statistic_lock);
-
 extern bool cpufreq_verbose;
 
 enum cpufreq_xen_opt {
     CPUFREQ_none,
     CPUFREQ_xen,
     CPUFREQ_hwp,
+    CPUFREQ_amd_cppc,
 };
-extern enum cpufreq_xen_opt cpufreq_xen_opts[2];
+extern enum cpufreq_xen_opt cpufreq_xen_opts[3];
 extern unsigned int cpufreq_xen_cnt;
 struct cpufreq_governor;
 
@@ -39,7 +38,121 @@ struct acpi_cpufreq_data {
     unsigned int arch_cpu_flags;
 };
 
-extern struct acpi_cpufreq_data *cpufreq_drv_data[NR_CPUS];
+struct hwp_drv_data {
+    union {
+        uint64_t hwp_caps;
+        struct {
+            unsigned int highest:8;
+            unsigned int guaranteed:8;
+            unsigned int most_efficient:8;
+            unsigned int lowest:8;
+            unsigned int :32;
+        } hw;
+    };
+    union hwp_request {
+        struct {
+            unsigned int min_perf:8;
+            unsigned int max_perf:8;
+            unsigned int desired:8;
+            unsigned int energy_perf:8;
+            unsigned int activity_window:10;
+            bool package_control:1;
+            unsigned int :16;
+            bool activity_window_valid:1;
+            bool energy_perf_valid:1;
+            bool desired_valid:1;
+            bool max_perf_valid:1;
+            bool min_perf_valid:1;
+        };
+        uint64_t raw;
+    } curr_req;
+    int ret;
+    uint16_t activity_window;
+    uint8_t minimum;
+    uint8_t maximum;
+    uint8_t desired;
+    uint8_t energy_perf;
+};
+
+/*
+ * Field highest_perf, nominal_perf, lowest_nonlinear_perf, and lowest_perf
+ * contain the values read from CPPC capability MSR. They represent the limits
+ * of managed performance range as well as the dynamic capability, which may
+ * change during processor operation
+ * Field highest_perf represents highest performance, which is the absolute
+ * maximum performance an individual processor may reach, assuming ideal
+ * conditions. This performance level may not be sustainable for long
+ * durations and may only be achievable if other platform components
+ * are in a specific state; for example, it may require other processors be
+ * in an idle state. This would be equivalent to the highest frequencies
+ * supported by the processor.
+ * Field nominal_perf represents maximum sustained performance level of the
+ * processor, assuming ideal operating conditions. All cores/processors are
+ * expected to be able to sustain their nominal performance state
+ * simultaneously.
+ * Field lowest_nonlinear_perf represents Lowest Nonlinear Performance, which
+ * is the lowest performance level at which nonlinear power savings are
+ * achieved. Above this threshold, lower performance levels should be
+ * generally more energy efficient than higher performance levels. So in
+ * traditional terms, this represents the P-state range of performance levels.
+ * Field lowest_perf represents the absolute lowest performance level of the
+ * platform. Selecting it may cause an efficiency penalty but should reduce
+ * the instantaneous power consumption of the processor. So in traditional
+ * terms, this represents the T-state range of performance levels.
+ *
+ * Field max_perf, min_perf, des_perf store the values for CPPC request MSR.
+ * Software passes performance goals through these fields.
+ * Field max_perf conveys the maximum performance level at which the platform
+ * may run. And it may be set to any performance value in the range
+ * [lowest_perf, highest_perf], inclusive.
+ * Field min_perf conveys the minimum performance level at which the platform
+ * may run. And it may be set to any performance value in the range
+ * [lowest_perf, highest_perf], inclusive but must be less than or equal to
+ * max_perf.
+ * Field des_perf conveys performance level Xen governor is requesting. And it
+ * may be set to any performance value in the range [min_perf, max_perf],
+ * inclusive. In active mode, des_perf must be zero.
+ * Field epp represents energy performance preference, which only has meaning
+ * when active mode is enabled. The EPP is used in the CCLK DPM controller
+ * to drive the frequency that a core is going to operate during short periods
+ * of activity, called minimum active frequency, It could contatin a range of
+ * values from 0 to 0xff. An EPP of zero sets the min active frequency to
+ * maximum frequency, while an EPP of 0xff sets the min active frequency to
+ * approxiately Idle frequency.
+ */
+struct amd_cppc_drv_data {
+    const struct xen_processor_cppc *cppc_data;
+    union {
+        uint64_t raw;
+        struct {
+            unsigned int lowest_perf:8;
+            unsigned int lowest_nonlinear_perf:8;
+            unsigned int nominal_perf:8;
+            unsigned int highest_perf:8;
+            unsigned int :32;
+        };
+    } caps;
+    union {
+        uint64_t raw;
+        struct {
+            unsigned int max_perf:8;
+            unsigned int min_perf:8;
+            unsigned int des_perf:8;
+            unsigned int epp:8;
+            unsigned int :32;
+        };
+    } req;
+
+    uint8_t epp_init;
+
+    /*
+     * Core max frequency read from PstateDef as anchor point
+     * for freq-to-perf transition
+     */
+    unsigned int pxfreq_mhz;
+
+    int err;
+};
 
 struct cpufreq_cpuinfo {
     unsigned int        max_freq;
@@ -82,6 +195,13 @@ struct cpufreq_policy {
     int8_t              turbo;  /* tristate flag: 0 for unsupported
                                  * -1 for disable, 1 for enabled
                                  * See CPUFREQ_TURBO_* below for defines */
+    unsigned int        policy; /* CPUFREQ_POLICY_* */
+
+    union {
+        struct acpi_cpufreq_data acpi;
+        struct hwp_drv_data hwp;
+        struct amd_cppc_drv_data amd_cppc;
+    }                   drv_data;
 };
 DECLARE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_policy);
 
@@ -132,6 +252,23 @@ extern int cpufreq_register_governor(struct cpufreq_governor *governor);
 extern struct cpufreq_governor *__find_governor(const char *governor);
 #define CPUFREQ_DEFAULT_GOVERNOR &cpufreq_gov_dbs
 
+/*
+ * Performance Policy
+ * If cpufreq_driver->target() exists, the ->governor decides what frequency
+ * within the limits is used. If cpufreq_driver->setpolicy() exists, these
+ * following policies are available:
+ * CPUFREQ_POLICY_PERFORMANCE represents maximum performance
+ * CPUFREQ_POLICY_POWERSAVE represents least power consumption
+ * CPUFREQ_POLICY_ONDEMAND represents no preference over performance or
+ * powersave
+ */
+#define CPUFREQ_POLICY_UNKNOWN      0
+#define CPUFREQ_POLICY_POWERSAVE    1
+#define CPUFREQ_POLICY_PERFORMANCE  2
+#define CPUFREQ_POLICY_ONDEMAND     3
+
+unsigned int cpufreq_policy_from_governor(const struct cpufreq_governor *gov);
+
 /* pass a target to the cpufreq driver */
 extern int __cpufreq_driver_target(struct cpufreq_policy *policy,
                                    unsigned int target_freq,
@@ -144,9 +281,6 @@ extern int cpufreq_driver_getavg(unsigned int cpu, unsigned int flag);
 #define CPUFREQ_TURBO_DISABLED      -1
 #define CPUFREQ_TURBO_UNSUPPORTED   0
 #define CPUFREQ_TURBO_ENABLED       1
-
-int cpufreq_update_turbo(unsigned int cpu, int new_state);
-int cpufreq_get_turbo_status(unsigned int cpu);
 
 static inline int
 __cpufreq_governor(struct cpufreq_policy *policy, unsigned int event)
@@ -252,6 +386,16 @@ void cpufreq_dbs_timer_resume(void);
 
 void intel_feature_detect(struct cpufreq_policy *policy);
 
+/*
+ * If Energy Performance Preference(epp) is supported in the platform,
+ * OSPM may write a range of values from 0(performance preference)
+ * to 0xFF(energy efficiency perference) to control the platform's
+ * energy efficiency and performance optimization policies
+ */
+#define CPPC_ENERGY_PERF_MAX_PERFORMANCE 0
+#define CPPC_ENERGY_PERF_BALANCE         0x80
+#define CPPC_ENERGY_PERF_MAX_POWERSAVE   0xff
+
 int hwp_cmdline_parse(const char *s, const char *e);
 int hwp_register_driver(void);
 #ifdef CONFIG_INTEL
@@ -260,11 +404,26 @@ bool hwp_active(void);
 static inline bool hwp_active(void) { return false; }
 #endif
 
-int get_hwp_para(unsigned int cpu,
-                 struct xen_cppc_para *cppc_para);
+int get_hwp_para(const struct cpufreq_policy *policy,
+                 struct xen_get_cppc_para *cppc_para);
 int set_hwp_para(struct cpufreq_policy *policy,
                  struct xen_set_cppc_para *set_cppc);
 
 int acpi_cpufreq_register(void);
+
+int amd_cppc_cmdline_parse(const char *s, const char *e);
+int amd_cppc_register_driver(void);
+
+/*
+ * Governor-less cpufreq driver indicates the driver doesn't rely on Xen
+ * governor to do performance tuning, mostly it has hardware built-in
+ * algorithm to calculate runtime workload and adjust cores frequency
+ * automatically, like Intel HWP, or CPPC in AMD.
+ */
+static inline bool cpufreq_is_governorless(unsigned int cpu)
+{
+    return processor_pminfo[cpu]->init && (hwp_active() ||
+                                           cpufreq_driver.setpolicy);
+}
 
 #endif /* __XEN_CPUFREQ_PM_H__ */

@@ -127,9 +127,6 @@ argo_op(unsigned int cmd, void *arg1, void *arg2, unsigned long arg3, unsigned l
 #ifdef CONFIG_PV
 iret()
 nmi_op(unsigned int cmd, void *arg)
-#ifdef CONFIG_XENOPROF
-xenoprof_op(int op, void *arg)
-#endif
 #endif /* CONFIG_PV */
 
 #ifdef CONFIG_COMPAT
@@ -184,7 +181,7 @@ mca(xen_mc_t *u_xen_mc)
 set_trap_table(const_trap_info_t *traps)
 set_gdt(xen_ulong_t *frame_list, unsigned int entries)
 set_callbacks(unsigned long event_address, unsigned long failsafe_address, unsigned long syscall_address)
-update_descriptor(uint64_t gaddr, seg_desc_t desc)
+update_descriptor(uint64_t gaddr, uint64_t desc)
 update_va_mapping(unsigned long va, uint64_t val64, unsigned long flags)
 update_va_mapping_otherdomain(unsigned long va, uint64_t val64, unsigned long flags, domid_t domid)
 #endif
@@ -194,10 +191,14 @@ kexec_op(unsigned long op, void *uarg)
 #ifdef CONFIG_IOREQ_SERVER
 dm_op(domid_t domid, unsigned int nr_bufs, xen_dm_op_buf_t *bufs)
 #endif
-#ifndef CONFIG_PV_SHIM_EXCLUSIVE
+#ifdef CONFIG_SYSCTL
 sysctl(xen_sysctl_t *u_sysctl)
-domctl(xen_domctl_t *u_domctl)
+#endif
+#if defined(CONFIG_X86) && defined(CONFIG_PAGING) && !defined(CONFIG_PV_SHIM_EXCLUSIVE)
 paging_domctl_cont(xen_domctl_t *u_domctl)
+#endif
+#ifndef CONFIG_PV_SHIM_EXCLUSIVE
+domctl(xen_domctl_t *u_domctl)
 platform_op(xen_platform_op_t *u_xenpf_op)
 #endif
 #ifdef CONFIG_HVM
@@ -265,16 +266,15 @@ xsm_op                             compat   do       compat   do       do
 nmi_op                             compat   do       -        -        -
 sched_op                           compat   do       compat   do       do
 callback_op                        compat   do       -        -        -
-#ifdef CONFIG_XENOPROF
-xenoprof_op                        compat   do       -        -        -
-#endif
 event_channel_op                   do       do       do:1     do:1     do:1
 physdev_op                         compat   do       hvm      hvm      do_arm
 #ifdef CONFIG_HVM
 hvm_op                             do       do       do       do       do
 #endif
-#ifndef CONFIG_PV_SHIM_EXCLUSIVE
+#ifdef CONFIG_SYSCTL
 sysctl                             do       do       do       do       do
+#endif
+#ifndef CONFIG_PV_SHIM_EXCLUSIVE
 domctl                             do       do       do       do       do
 #endif
 #ifdef CONFIG_KEXEC
@@ -292,7 +292,7 @@ dm_op                              compat   do       compat   do       do
 hypfs_op                           do       do       do       do       do
 #endif
 mca                                do       do       -        -        -
-#ifndef CONFIG_PV_SHIM_EXCLUSIVE
+#if defined(CONFIG_X86) && defined(CONFIG_PAGING) && !defined(CONFIG_PV_SHIM_EXCLUSIVE)
 paging_domctl_cont                 do       do       do       do       -
 #endif
 

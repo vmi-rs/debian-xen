@@ -63,6 +63,17 @@ LABEL(s3_resume)
         pushq   %rax
         lretq
 1:
+
+        GET_STACK_END(15)
+
+        /* Enable minimal CR4 features, sync cached state. */
+        mov     $XEN_MINIMAL_CR4, %eax
+        mov     %rax, STACK_CPUINFO_FIELD(cr4)(%r15)
+        mov     %rax, %cr4
+
+        /* Set up early exceptions and CET before entering C properly. */
+        call    percpu_early_traps_init
+
 #if defined(CONFIG_XEN_SHSTK) || defined(CONFIG_XEN_IBT)
         call    xen_msr_s_cet_value
         test    %eax, %eax
@@ -74,10 +85,12 @@ LABEL(s3_resume)
         wrmsr
 
         /* Enable CR4.CET. */
-        mov     $XEN_MINIMAL_CR4 | X86_CR4_CET, %ecx
+        mov     $X86_CR4_CET, %ecx
+        or      STACK_CPUINFO_FIELD(cr4)(%r15), %rcx
+        mov     %rcx, STACK_CPUINFO_FIELD(cr4)(%r15)
         mov     %rcx, %cr4
 
-        /* WARNING! call/ret now fatal (iff SHSTK) until SETSSBSY loads SSP */
+        /* WARNING! CALL/RET now fatal (iff SHSTK) until RSTORSSP loads SSP */
 
 #if defined(CONFIG_XEN_SHSTK)
         test    $CET_SHSTK_EN, %al
@@ -85,43 +98,31 @@ LABEL(s3_resume)
 
         /*
          * Restoring SSP is a little complicated, because we are intercepting
-         * an in-use shadow stack.  Write a temporary token under the stack,
-         * so SETSSBSY will successfully load a value useful for us, then
-         * reset MSR_PL0_SSP to its usual value and pop the temporary token.
+         * an in-use shadow stack.  Write a Restore Token under the stack, and
+         * use RSTORSSP to load it.  RSTORSSP converts the token to a
+         * Previous-SSP Token, which we discard.
          */
         mov     saved_ssp(%rip), %rdi
 
-        /* Construct the temporary supervisor token under SSP. */
+        /*
+         * A Restore Token's value is &token + 8 + 64BIT (bit 0).
+         * We want to put this on the shstk at SSP - 8.
+         */
+        lea     1(%rdi), %rax
         sub     $8, %rdi
+        wrssq   %rax, (%rdi)
+        rstorssp (%rdi)
 
-        /* Load it into MSR_PL0_SSP. */
-        mov     $MSR_PL0_SSP, %ecx
-        mov     %rdi, %rdx
-        shr     $32, %rdx
-        mov     %edi, %eax
-        wrmsr
-
-        /* Write the temporary token onto the shadow stack, and activate it. */
-        wrssq   %rdi, (%rdi)
-        setssbsy
-
-        /* Reset MSR_PL0_SSP back to its normal value. */
-        and     $~(STACK_SIZE - 1), %eax
-        or      $(PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8, %eax
-        wrmsr
-
-        /* Pop the temporary token off the stack. */
+        /* Discard the Previous-SSP Token from the shstk. */
         mov     $2, %eax
         incsspd %eax
 #endif /* CONFIG_XEN_SHSTK */
 .L_cet_done:
 #endif /* CONFIG_XEN_SHSTK || CONFIG_XEN_IBT */
 
-        call    load_system_tables
-
-        /* Restore CR4 from the cpuinfo block. */
-        GET_STACK_END(bx)
-        mov     STACK_CPUINFO_FIELD(cr4)(%rbx), %rax
+        /* Load all CR4 settings. */
+        mov     mmu_cr4_features(%rip), %rax
+        mov     %rax, STACK_CPUINFO_FIELD(cr4)(%r15)
         mov     %rax, %cr4
 
         call    mtrr_bp_restore

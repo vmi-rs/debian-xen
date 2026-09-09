@@ -4,6 +4,7 @@
  */
 
 #include <xen/const.h>
+#include <xen/lib.h>
 #include <xen/domain_page.h>
 #include <xen/mm.h>
 #include <xen/sizes.h>
@@ -30,6 +31,20 @@ struct ffa_endpoint_rxtx_descriptor_1_1 {
     uint32_t tx_region_offs;
 };
 
+/*
+ * Our rx/tx buffers shared with the SPMC. FFA_RXTX_PAGE_COUNT is the
+ * number of pages used in each of these buffers.
+ * Each buffer has its own lock to protect from concurrent usage.
+ *
+ * Note that the SPMC is also tracking the ownership of our RX buffer so
+ * for calls which uses our RX buffer to deliver a result we must do an
+ * FFA_RX_RELEASE to let the SPMC know that we're done with the buffer.
+ */
+static void *ffa_spmc_rx __read_mostly;
+static void *ffa_spmc_tx __read_mostly;
+static DEFINE_SPINLOCK(ffa_spmc_rx_lock);
+static DEFINE_SPINLOCK(ffa_spmc_tx_lock);
+
 static int32_t ffa_rxtx_map(paddr_t tx_addr, paddr_t rx_addr,
                             uint32_t page_count)
 {
@@ -41,10 +56,10 @@ static int32_t ffa_rxtx_unmap(uint16_t id)
     return ffa_simple_call(FFA_RXTX_UNMAP, ((uint64_t)id) << 16, 0, 0, 0);
 }
 
-uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
+int32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
 			     register_t rx_addr, uint32_t page_count)
 {
-    uint32_t ret = FFA_RET_INVALID_PARAMETERS;
+    int32_t ret = FFA_RET_INVALID_PARAMETERS;
     struct domain *d = current->domain;
     struct ffa_ctx *ctx = d->arch.tee;
     struct page_info *tx_pg;
@@ -66,20 +81,31 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
         rx_addr &= UINT32_MAX;
     }
 
-    if ( page_count > FFA_MAX_RXTX_PAGE_COUNT )
+    if ( page_count > FFA_MAX_RXTX_PAGE_COUNT || !page_count )
     {
-        printk(XENLOG_ERR "ffa: RXTX_MAP: error: %u pages requested (limit %u)\n",
-               page_count, FFA_MAX_RXTX_PAGE_COUNT);
+        gdprintk(XENLOG_DEBUG,
+                 "ffa: RXTX_MAP: error: %u pages requested (limit %u)\n",
+                 page_count, FFA_MAX_RXTX_PAGE_COUNT);
         return FFA_RET_INVALID_PARAMETERS;
     }
 
+    if ( !IS_ALIGNED(tx_addr, FFA_PAGE_SIZE) ||
+         !IS_ALIGNED(rx_addr, FFA_PAGE_SIZE) )
+        return FFA_RET_INVALID_PARAMETERS;
+
+    spin_lock(&ctx->rx_lock);
+    spin_lock(&ctx->tx_lock);
+
     /* Already mapped */
     if ( ctx->rx )
-        return FFA_RET_DENIED;
+    {
+        ret = FFA_RET_DENIED;
+        goto err_unlock_rxtx;
+    }
 
     tx_pg = get_page_from_gfn(d, gfn_x(gaddr_to_gfn(tx_addr)), &t, P2M_ALLOC);
     if ( !tx_pg )
-        return FFA_RET_INVALID_PARAMETERS;
+        goto err_unlock_rxtx;
 
     /* Only normal RW RAM for now */
     if ( t != p2m_ram_rw )
@@ -95,11 +121,17 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
 
     tx = __map_domain_page_global(tx_pg);
     if ( !tx )
+    {
+        ret = FFA_RET_NO_MEMORY;
         goto err_put_rx_pg;
+    }
 
     rx = __map_domain_page_global(rx_pg);
     if ( !rx )
+    {
+        ret = FFA_RET_NO_MEMORY;
         goto err_unmap_tx;
+    }
 
     /*
      * Transmit the RX/TX buffer information to the SPM if acquire is supported
@@ -112,12 +144,14 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
         struct ffa_mem_region *mem_reg;
 
         /* All must fit in our TX buffer */
-        BUILD_BUG_ON(sizeof(*rxtx_desc) + sizeof(*mem_reg) * 2 +
+        BUILD_BUG_ON(ROUNDUP(sizeof(*rxtx_desc), 8) +
+                     sizeof(*mem_reg) * 2 +
                      sizeof(struct ffa_address_range) * 2 >
                      FFA_MAX_RXTX_PAGE_COUNT * FFA_PAGE_SIZE);
 
-        spin_lock(&ffa_tx_buffer_lock);
-        rxtx_desc = ffa_tx;
+        rxtx_desc = ffa_rxtx_spmc_tx_acquire();
+        if ( !rxtx_desc )
+            goto err_unmap_rx;
 
         /*
          * We have only one page for each so we pack everything:
@@ -128,13 +162,13 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
          */
         rxtx_desc->sender_id = ffa_get_vm_id(d);
         rxtx_desc->reserved = 0;
-        rxtx_desc->rx_region_offs = sizeof(*rxtx_desc);
-        rxtx_desc->tx_region_offs = sizeof(*rxtx_desc) +
+        rxtx_desc->rx_region_offs = ROUNDUP(sizeof(*rxtx_desc), 8);
+        rxtx_desc->tx_region_offs = rxtx_desc->rx_region_offs +
                                     offsetof(struct ffa_mem_region,
                                              address_range_array[1]);
 
         /* rx buffer */
-        mem_reg = ffa_tx + sizeof(*rxtx_desc);
+        mem_reg = (void *)rxtx_desc + rxtx_desc->rx_region_offs;
         mem_reg->total_page_count = 1;
         mem_reg->address_range_count = 1;
         mem_reg->reserved = 0;
@@ -144,7 +178,7 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
         mem_reg->address_range_array[0].reserved = 0;
 
         /* tx buffer */
-        mem_reg = ffa_tx + rxtx_desc->tx_region_offs;
+        mem_reg = (void *)rxtx_desc + rxtx_desc->tx_region_offs;
         mem_reg->total_page_count = 1;
         mem_reg->address_range_count = 1;
         mem_reg->reserved = 0;
@@ -155,7 +189,7 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
 
         ret = ffa_rxtx_map(0, 0, 0);
 
-        spin_unlock(&ffa_tx_buffer_lock);
+        ffa_rxtx_spmc_tx_release();
 
         if ( ret != FFA_RET_OK )
             goto err_unmap_rx;
@@ -167,6 +201,10 @@ uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
     ctx->tx_pg = tx_pg;
     ctx->page_count = page_count;
     ctx->rx_is_free = true;
+
+    spin_unlock(&ctx->tx_lock);
+    spin_unlock(&ctx->rx_lock);
+
     return FFA_RET_OK;
 
 err_unmap_rx:
@@ -177,24 +215,58 @@ err_put_rx_pg:
     put_page(rx_pg);
 err_put_tx_pg:
     put_page(tx_pg);
+err_unlock_rxtx:
+    spin_unlock(&ctx->tx_lock);
+    spin_unlock(&ctx->rx_lock);
 
     return ret;
 }
 
-static uint32_t  rxtx_unmap(struct domain *d)
+static int32_t rxtx_unmap(struct domain *d, bool teardown)
 {
     struct ffa_ctx *ctx = d->arch.tee;
+    int32_t ret = FFA_RET_OK;
+
+    spin_lock(&ctx->rx_lock);
+    spin_lock(&ctx->tx_lock);
 
     if ( !ctx->page_count )
-        return FFA_RET_INVALID_PARAMETERS;
+    {
+        ret = FFA_RET_INVALID_PARAMETERS;
+        goto err_unlock_rxtx;
+    }
+
+    if ( !ctx->rx_is_free )
+    {
+        if ( teardown )
+        {
+            if ( ffa_fw_supports_fid(FFA_RX_ACQUIRE) )
+            {
+                int32_t rel_ret;
+
+                /* Can't use ffa_rx_release() while holding rx_lock. */
+                rel_ret = ffa_simple_call(FFA_RX_RELEASE, ctx->ffa_id,
+                                          0, 0, 0);
+                if ( rel_ret )
+                    gdprintk(XENLOG_DEBUG,
+                             "ffa: RX release during teardown failed: %d\n",
+                             rel_ret);
+            }
+        }
+        else
+        {
+            gdprintk(XENLOG_DEBUG,
+                     "ffa: RXTX_UNMAP denied, RX buffer owned by VM\n");
+            ret = FFA_RET_DENIED;
+            goto err_unlock_rxtx;
+        }
+    }
 
     if ( ffa_fw_supports_fid(FFA_RX_ACQUIRE) )
     {
-        uint32_t ret;
-
         ret = ffa_rxtx_unmap(ffa_get_vm_id(d));
         if ( ret != FFA_RET_OK )
-            return ret;
+            goto err_unlock_rxtx;
     }
 
     unmap_domain_page_global(ctx->rx);
@@ -208,50 +280,60 @@ static uint32_t  rxtx_unmap(struct domain *d)
     ctx->page_count = 0;
     ctx->rx_is_free = false;
 
-    return FFA_RET_OK;
+err_unlock_rxtx:
+    spin_unlock(&ctx->tx_lock);
+    spin_unlock(&ctx->rx_lock);
+
+    return ret;
 }
 
-uint32_t ffa_handle_rxtx_unmap(void)
+int32_t ffa_handle_rxtx_unmap(void)
 {
-    return rxtx_unmap(current->domain);
+    return rxtx_unmap(current->domain, false);
 }
 
-int32_t ffa_rx_acquire(struct domain *d)
+int32_t ffa_rx_acquire(struct ffa_ctx *ctx, void **buf, size_t *buf_size)
 {
     int32_t ret = FFA_RET_OK;
-    struct ffa_ctx *ctx = d->arch.tee;
 
     spin_lock(&ctx->rx_lock);
 
     if ( !ctx->page_count )
     {
         ret = FFA_RET_DENIED;
+        gdprintk(XENLOG_DEBUG, "ffa: RX acquire denied, no RX/TX mapped\n");
         goto out;
     }
 
     if ( !ctx->rx_is_free )
     {
         ret = FFA_RET_BUSY;
+        if ( printk_ratelimit() )
+            gdprintk(XENLOG_DEBUG, "ffa: RX acquire busy\n");
         goto out;
     }
 
     if ( ffa_fw_supports_fid(FFA_RX_ACQUIRE) )
     {
-        ret = ffa_simple_call(FFA_RX_ACQUIRE, ffa_get_vm_id(d), 0, 0, 0);
+        ret = ffa_simple_call(FFA_RX_ACQUIRE, ctx->ffa_id, 0, 0, 0);
         if ( ret != FFA_RET_OK )
+        {
+            gdprintk(XENLOG_DEBUG, "ffa: RX acquire failed: %d\n", ret);
             goto out;
+        }
     }
     ctx->rx_is_free = false;
+    *buf = ctx->rx;
+    *buf_size = ctx->page_count * FFA_PAGE_SIZE;
 out:
     spin_unlock(&ctx->rx_lock);
 
     return ret;
 }
 
-int32_t ffa_rx_release(struct domain *d)
+int32_t ffa_rx_release(struct ffa_ctx *ctx)
 {
     int32_t ret = FFA_RET_DENIED;
-    struct ffa_ctx *ctx = d->arch.tee;
 
     spin_lock(&ctx->rx_lock);
 
@@ -260,7 +342,7 @@ int32_t ffa_rx_release(struct domain *d)
 
     if ( ffa_fw_supports_fid(FFA_RX_ACQUIRE) )
     {
-        ret = ffa_simple_call(FFA_RX_RELEASE, ffa_get_vm_id(d), 0, 0, 0);
+        ret = ffa_simple_call(FFA_RX_RELEASE, ctx->ffa_id, 0, 0, 0);
         if ( ret != FFA_RET_OK )
             goto out;
     }
@@ -272,54 +354,173 @@ out:
     return ret;
 }
 
-void ffa_rxtx_domain_destroy(struct domain *d)
+int32_t ffa_tx_acquire(struct ffa_ctx *ctx, const void **buf, size_t *buf_size)
 {
-    rxtx_unmap(d);
+    int32_t ret = FFA_RET_DENIED;
+
+    if ( !spin_trylock(&ctx->tx_lock) )
+    {
+        gdprintk(XENLOG_DEBUG, "ffa: TX acquire busy\n");
+        return FFA_RET_BUSY;
+    }
+
+    if ( !ctx->page_count )
+    {
+        gdprintk(XENLOG_DEBUG, "ffa: TX acquire denied, no RX/TX mapped\n");
+        goto err_unlock;
+    }
+
+    if ( !ctx->tx )
+    {
+        gdprintk(XENLOG_DEBUG, "ffa: TX acquire denied, TX buffer missing\n");
+        goto err_unlock;
+    }
+
+    *buf = ctx->tx;
+    *buf_size = ctx->page_count * FFA_PAGE_SIZE;
+    return FFA_RET_OK;
+
+err_unlock:
+    spin_unlock(&ctx->tx_lock);
+
+    return ret;
 }
 
-void ffa_rxtx_destroy(void)
+int32_t ffa_tx_release(struct ffa_ctx *ctx)
 {
-    bool need_unmap = ffa_tx && ffa_rx;
+    ASSERT(spin_is_locked(&ctx->tx_lock));
 
-    if ( ffa_tx )
+    spin_unlock(&ctx->tx_lock);
+    return FFA_RET_OK;
+}
+
+int32_t ffa_rxtx_domain_init(struct domain *d)
+{
+    struct ffa_ctx *ctx = d->arch.tee;
+
+    spin_lock_init(&ctx->rx_lock);
+    spin_lock_init(&ctx->tx_lock);
+    ctx->rx = NULL;
+    ctx->tx = NULL;
+    ctx->rx_pg = NULL;
+    ctx->tx_pg = NULL;
+    ctx->page_count = 0;
+    ctx->rx_is_free = false;
+
+    return 0;
+}
+
+void ffa_rxtx_domain_destroy(struct domain *d)
+{
+    rxtx_unmap(d, true /* teardown */);
+}
+
+void *ffa_rxtx_spmc_rx_acquire(void)
+{
+    spin_lock(&ffa_spmc_rx_lock);
+
+    if ( ffa_spmc_rx )
+        return ffa_spmc_rx;
+
+    return NULL;
+}
+
+int32_t ffa_rxtx_spmc_rx_release(bool notify_fw)
+{
+    int32_t ret;
+
+    ASSERT(spin_is_locked(&ffa_spmc_rx_lock));
+
+    if ( notify_fw )
     {
-        free_xenheap_pages(ffa_tx, 0);
-        ffa_tx = NULL;
+        /* Inform the SPMC that we are done with our RX buffer */
+        ret = ffa_simple_call(FFA_RX_RELEASE, 0, 0, 0, 0);
     }
-    if ( ffa_rx )
+    else
+        ret = FFA_RET_OK;
+
+    spin_unlock(&ffa_spmc_rx_lock);
+    return ret;
+}
+
+void *ffa_rxtx_spmc_tx_acquire(void)
+{
+    spin_lock(&ffa_spmc_tx_lock);
+
+    if ( ffa_spmc_tx )
+        return ffa_spmc_tx;
+
+    return NULL;
+}
+
+void ffa_rxtx_spmc_tx_release(void)
+{
+    ASSERT(spin_is_locked(&ffa_spmc_tx_lock));
+
+    spin_unlock(&ffa_spmc_tx_lock);
+}
+
+void ffa_rxtx_spmc_destroy(void)
+{
+    bool need_unmap;
+
+    spin_lock(&ffa_spmc_rx_lock);
+    spin_lock(&ffa_spmc_tx_lock);
+    need_unmap = ffa_spmc_tx && ffa_spmc_rx;
+
+    if ( ffa_spmc_tx )
     {
-        free_xenheap_pages(ffa_rx, 0);
-        ffa_rx = NULL;
+        free_xenheap_pages(ffa_spmc_tx, 0);
+        ffa_spmc_tx = NULL;
+    }
+    if ( ffa_spmc_rx )
+    {
+        free_xenheap_pages(ffa_spmc_rx, 0);
+        ffa_spmc_rx = NULL;
     }
 
     if ( need_unmap )
         ffa_rxtx_unmap(0);
+
+    spin_unlock(&ffa_spmc_tx_lock);
+    spin_unlock(&ffa_spmc_rx_lock);
 }
 
-bool ffa_rxtx_init(void)
+bool ffa_rxtx_spmc_init(void)
 {
-    int e;
+    int32_t e;
+    bool ret = false;
 
     /* Firmware not there or not supporting */
     if ( !ffa_fw_supports_fid(FFA_RXTX_MAP_64) )
         return false;
 
-    ffa_rx = alloc_xenheap_pages(get_order_from_pages(FFA_RXTX_PAGE_COUNT), 0);
-    if ( !ffa_rx )
-        return false;
+    spin_lock(&ffa_spmc_rx_lock);
+    spin_lock(&ffa_spmc_tx_lock);
 
-    ffa_tx = alloc_xenheap_pages(get_order_from_pages(FFA_RXTX_PAGE_COUNT), 0);
-    if ( !ffa_tx )
-        goto err;
+    ffa_spmc_rx = alloc_xenheap_pages(
+                            get_order_from_pages(FFA_RXTX_PAGE_COUNT), 0);
+    if ( !ffa_spmc_rx )
+        goto exit;
 
-    e = ffa_rxtx_map(__pa(ffa_tx), __pa(ffa_rx), FFA_RXTX_PAGE_COUNT);
+    ffa_spmc_tx = alloc_xenheap_pages(
+                            get_order_from_pages(FFA_RXTX_PAGE_COUNT), 0);
+    if ( !ffa_spmc_tx )
+        goto exit;
+
+    e = ffa_rxtx_map(__pa(ffa_spmc_tx), __pa(ffa_spmc_rx),
+                     FFA_RXTX_PAGE_COUNT);
     if ( e )
-        goto err;
+        goto exit;
 
-    return true;
+    ret = true;
 
-err:
-    ffa_rxtx_destroy();
+exit:
+    spin_unlock(&ffa_spmc_tx_lock);
+    spin_unlock(&ffa_spmc_rx_lock);
 
-    return false;
+    if ( !ret )
+        ffa_rxtx_spmc_destroy();
+
+    return ret;
 }

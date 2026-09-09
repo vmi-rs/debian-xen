@@ -22,6 +22,10 @@ mkdir -p $tdir
 git --git-dir="$xen_root/.git" archive --format=tar HEAD --prefix=xen-$desc/ \
     >"$tdir/xen-$desc.tar"
 
-gzip -9k "$tdir/xen-$desc.tar"
+gzip -9k "$tdir/xen-$desc.tar" &
+xz -9k "$tdir/xen-$desc.tar" &
+lzip -9k "$tdir/xen-$desc.tar" &
+wait
 
-echo "Source tarball in $xen_root/dist/xen-$desc.tar.gz"
+echo "Source tarball(s):"
+ls -lh $tdir/xen-$desc.tar*

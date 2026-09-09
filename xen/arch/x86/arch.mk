@@ -3,28 +3,28 @@
 
 export XEN_IMG_OFFSET := 0x200000
 
+ARCH_LIBS-y += arch/x86/lib/lib.a
+ARCH_LIBS-y += arch/x86/lib/cpu-policy/lib.a
+
 CFLAGS += -DXEN_IMG_OFFSET=$(XEN_IMG_OFFSET)
 
 # Prevent floating-point variables from creeping into Xen.
 CFLAGS += -msoft-float
 
+# Don't needlessly over-align larger aggregates.
+CFLAGS-$(CONFIG_CC_IS_GCC) += -malign-data=abi
+
 $(call cc-options-add,CFLAGS,CC,$(EMBEDDED_EXTRA_CFLAGS))
 $(call cc-option-add,CFLAGS,CC,-Wnested-externs)
-$(call as-option-add,CFLAGS,CC,"vmcall",-DHAVE_AS_VMX)
-$(call as-option-add,CFLAGS,CC,"crc32 %eax$(comma)%eax",-DHAVE_AS_SSE4_2)
-$(call as-option-add,CFLAGS,CC,"invept (%rax)$(comma)%rax",-DHAVE_AS_EPT)
-$(call as-option-add,CFLAGS,CC,"rdrand %eax",-DHAVE_AS_RDRAND)
-$(call as-option-add,CFLAGS,CC,"rdfsbase %rax",-DHAVE_AS_FSGSBASE)
-$(call as-option-add,CFLAGS,CC,"xsaveopt (%rax)",-DHAVE_AS_XSAVEOPT)
-$(call as-option-add,CFLAGS,CC,"rdseed %eax",-DHAVE_AS_RDSEED)
-$(call as-option-add,CFLAGS,CC,"clac",-DHAVE_AS_CLAC_STAC)
-$(call as-option-add,CFLAGS,CC,"clwb (%rax)",-DHAVE_AS_CLWB)
 $(call as-option-add,CFLAGS,CC,".equ \"x\"$(comma)1",-DHAVE_AS_QUOTED_SYM)
-$(call as-option-add,CFLAGS,CC,"invpcid (%rax)$(comma)%rax",-DHAVE_AS_INVPCID)
+
+# Binutils >= 2.31, Clang >= 7
 $(call as-option-add,CFLAGS,CC,"movdiri %rax$(comma)(%rax)",-DHAVE_AS_MOVDIR)
+
+# Binutils >= 2.33, Clang >= 9
 $(call as-option-add,CFLAGS,CC,"enqcmd (%rax)$(comma)%rax",-DHAVE_AS_ENQCMD)
 
-# Check to see whether the assmbler supports the .nop directive.
+# Check to see whether the assembler supports the .nop directive.
 $(call as-option-add,CFLAGS,CC,\
     ".L1: .L2: .nops (.L2 - .L1)$(comma)9",-DHAVE_AS_NOPS_DIRECTIVE)
 
@@ -68,22 +68,15 @@ endif
 $(call cc-option-add,CFLAGS_stack_boundary,CC,-mpreferred-stack-boundary=3)
 export CFLAGS_stack_boundary
 
+CFLAGS += $(call cc-option,$(CC),-mmemcpy-strategy=unrolled_loop:16:noalign$(comma)libcall:-1:noalign)
+CFLAGS += $(call cc-option,$(CC),-mmemset-strategy=unrolled_loop:16:noalign$(comma)libcall:-1:noalign)
+
 ifeq ($(CONFIG_UBSAN),y)
 # Don't enable alignment sanitisation.  x86 has efficient unaligned accesses,
 # and various things (ACPI tables, hypercall pages, stubs, etc) are wont-fix.
 # It also causes an as-yet-unidentified crash on native boot before the
 # console starts.
 $(call cc-option-add,CFLAGS_UBSAN,CC,-fno-sanitize=alignment)
-endif
-
-ifeq ($(CONFIG_LD_IS_GNU),y)
-# While not much better than going by raw GNU ld version, utilize that the
-# feature we're after has appeared in the same release as the
-# --print-output-format command line option.
-AFLAGS-$(call ld-option,--print-output-format) += -DHAVE_LD_SORT_BY_INIT_PRIORITY
-else
-# Assume all versions of LLD support this.
-AFLAGS += -DHAVE_LD_SORT_BY_INIT_PRIORITY
 endif
 
 ifneq ($(CONFIG_PV_SHIM_EXCLUSIVE),y)
@@ -116,6 +109,7 @@ efi-nr-fixups := $(strip $(shell LC_ALL=C $(OBJDUMP) -p $(efi-check).efi | grep 
 
 ifeq ($(efi-nr-fixups),2)
 MKRELOC := :
+EFI_LDFLAGS += --disable-high-entropy-va --dynamicbase
 else
 MKRELOC := arch/x86/efi/mkreloc
 # If the linker produced fixups but not precisely two of them, we need to
@@ -134,3 +128,8 @@ endif
 
 # Set up the assembler include path properly for older toolchains.
 CFLAGS += -Wa,-I$(objtree)/include -Wa,-I$(srctree)/include
+
+# The GNU assembler will interpret '/' as a comment start marker instead of a
+# divide for some ELF targets.  Pass --divide when when available to signal '/'
+# is always used as an operator in assembly.
+$(call cc-option-add,CFLAGS,CC,-Wa$$(comma)--divide)

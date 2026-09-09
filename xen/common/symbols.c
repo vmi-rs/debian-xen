@@ -10,12 +10,12 @@
  *      compression (see tools/symbols.c for a more complete description)
  */
 
-#include <xen/symbols.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/string.h>
 #include <xen/spinlock.h>
+#include <xen/symbols.h>
 #include <xen/virtual_region.h>
 #include <public/platform.h>
 #include <xen/guest_access.h>
@@ -28,13 +28,14 @@ extern const unsigned int symbols_offsets[];
 extern const unsigned long symbols_addresses[];
 #define symbols_address(n) symbols_addresses[n]
 #endif
-extern const unsigned int symbols_num_syms;
-extern const u8 symbols_names[];
+extern const unsigned int symbols_num_addrs;
+extern const unsigned char symbols_names[];
 
+extern const unsigned int symbols_num_names;
 extern const struct symbol_offset symbols_sorted_offsets[];
 
-extern const u8 symbols_token_table[];
-extern const u16 symbols_token_index[];
+extern const uint8_t symbols_token_table[];
+extern const uint16_t symbols_token_index[];
 
 extern const unsigned int symbols_markers[];
 
@@ -108,7 +109,7 @@ const char *symbols_lookup(unsigned long addr,
                            unsigned long *offset,
                            char *namebuf)
 {
-    unsigned long i, low, high, mid;
+    unsigned int i, low, high, mid;
     unsigned long symbol_end = 0;
     const struct virtual_region *region;
 
@@ -124,12 +125,19 @@ const char *symbols_lookup(unsigned long addr,
 
         /* do a binary search on the sorted symbols_addresses array */
     low = 0;
-    high = symbols_num_syms;
+    high = symbols_num_addrs;
 
     while (high-low > 1) {
         mid = (low + high) / 2;
         if (symbols_address(mid) <= addr) low = mid;
         else high = mid;
+    }
+
+    /* If we hit an END symbol, move to the previous (real) one. */
+    if (!symbols_names[get_symbol_offset(low)]) {
+        ASSERT(low);
+        symbol_end = symbols_address(low);
+        --low;
     }
 
     /* search for the first aliased symbol. Aliased symbols are
@@ -140,11 +148,13 @@ const char *symbols_lookup(unsigned long addr,
         /* Grab name */
     symbols_expand_symbol(get_symbol_offset(low), namebuf);
 
-    /* Search for next non-aliased symbol */
-    for (i = low + 1; i < symbols_num_syms; i++) {
-        if (symbols_address(i) > symbols_address(low)) {
-            symbol_end = symbols_address(i);
-            break;
+    if (!symbol_end) {
+        /* Search for next non-aliased symbol */
+        for (i = low + 1; i < symbols_num_addrs; i++) {
+            if (symbols_address(i) > symbols_address(low)) {
+                symbol_end = symbols_address(i);
+                break;
+            }
         }
     }
 
@@ -179,13 +189,14 @@ int xensyms_read(uint32_t *symnum, char *type,
      * from previous read. This can help us avoid the extra call to
      * get_symbol_offset().
      */
-    static uint64_t next_symbol, next_offset;
+    static unsigned int next_symbol, next_offset;
     static DEFINE_SPINLOCK(symbols_mutex);
 
-    if ( *symnum > symbols_num_syms )
+    if ( *symnum > symbols_num_addrs )
         return -ERANGE;
-    if ( *symnum == symbols_num_syms )
+    if ( *symnum == symbols_num_addrs )
     {
+    no_symbol:
         /* No more symbols */
         name[0] = '\0';
         return 0;
@@ -199,9 +210,33 @@ int xensyms_read(uint32_t *symnum, char *type,
         /* Non-sequential access */
         next_offset = get_symbol_offset(*symnum);
 
+    /*
+     * If we're at an END symbol, skip to the next (real) one. This can
+     * happen if the caller ignores the *symnum output from an earlier
+     * iteration (Linux'es /proc/xen/xensyms handling does as of 6.14-rc).
+     */
+    if ( !symbols_names[next_offset] )
+    {
+        ++next_offset;
+        if ( ++*symnum == symbols_num_addrs )
+        {
+            spin_unlock(&symbols_mutex);
+            goto no_symbol;
+        }
+    }
+
     *type = symbols_get_symbol_type(next_offset);
     next_offset = symbols_expand_symbol(next_offset, name);
     *address = symbols_address(*symnum);
+
+    /* If next one is an END symbol, skip it. */
+    if ( !symbols_names[next_offset] )
+    {
+        ++next_offset;
+        /* Make sure not to increment past symbols_num_addrs below. */
+        if ( *symnum + 1 < symbols_num_addrs )
+            ++*symnum;
+    }
 
     next_symbol = ++*symnum;
 
@@ -227,7 +262,7 @@ unsigned long symbols_lookup_by_name(const char *symname)
 
 #ifdef CONFIG_FAST_SYMBOL_LOOKUP
     low = 0;
-    high = symbols_num_syms;
+    high = symbols_num_names;
     while ( low < high )
     {
         unsigned long mid = low + ((high - low) / 2);
@@ -259,6 +294,41 @@ unsigned long symbols_lookup_by_name(const char *symname)
 #endif
     return 0;
 }
+
+#ifdef CONFIG_SELF_TESTS
+
+static void __init test_lookup(unsigned long addr, const char *expected)
+{
+    char buf[KSYM_NAME_LEN + 1];
+    const char *name, *symname;
+    unsigned long size, offs;
+
+    name = symbols_lookup(addr, &size, &offs, buf);
+    if ( !name )
+        panic("%s: address not found\n", expected);
+    if ( offs )
+        panic("%s: non-zero offset (%#lx) unexpected\n", expected, offs);
+
+    /* Cope with static symbols, where varying file names/paths may be used. */
+    symname = strchr(name, '#');
+    symname = symname ? symname + 1 : name;
+    if ( strcmp(symname, expected) )
+        panic("%s: unexpected symbol name: '%s'\n", expected, symname);
+
+    offs = symbols_lookup_by_name(name);
+    if ( offs != addr )
+        panic("%s: address %#lx unexpected; wanted %#lx\n",
+              expected, offs, addr);
+}
+
+static void __init __constructor test_symbols(void)
+{
+    /* Be sure to only try this for cf_check functions. */
+    test_lookup((unsigned long)dump_execstate, "dump_execstate");
+    test_lookup((unsigned long)test_symbols, __func__);
+}
+
+#endif /* CONFIG_SELF_TESTS */
 
 /*
  * Local variables:

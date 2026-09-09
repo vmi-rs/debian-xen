@@ -5,7 +5,21 @@
 #include <xen/bug.h>
 #include <xen/cpumask.h>
 
+#include <asm/insn-defs.h>
 #include <asm/sbi.h>
+
+struct page_info;
+
+static inline void local_hfence_gvma_all(void)
+{
+    asm volatile ( "hfence.gvma zero, zero" ::: "memory" );
+}
+
+/* Flush VS-stage TLB for current hart. */
+static inline void flush_tlb_guest_local(void)
+{
+    HFENCE_VVMA(0, 0);
+}
 
 /* Flush TLB of local processor for address va. */
 static inline void flush_tlb_one_local(vaddr_t va)
@@ -31,11 +45,13 @@ static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp) {}
 
 static inline void page_set_tlbflush_timestamp(struct page_info *page)
 {
-    BUG_ON("unimplemented");
+    page->tlbflush_timestamp = tlbflush_current_time();
 }
 
-/* Flush specified CPUs' TLBs */
-void arch_flush_tlb_mask(const cpumask_t *mask);
+static inline void arch_flush_tlb_mask(const cpumask_t *mask)
+{
+    sbi_remote_hfence_gvma(mask, 0, 0);
+}
 
 #endif /* ASM__RISCV__FLUSHTLB_H */
 

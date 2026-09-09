@@ -1,49 +1,24 @@
+#include <xen/bitops.h>
 #include <xen/cpu.h>
 #include <xen/init.h>
-#include <xen/bitops.h>
 #include <xen/mm.h>
 #include <xen/param.h>
-#include <xen/smp.h>
-#include <xen/softirq.h>
 #include <xen/pci.h>
 #include <xen/sched.h>
+#include <xen/smp.h>
+#include <xen/softirq.h>
 #include <xen/warning.h>
+
+#include <asm/acpi.h>
+#include <asm/amd.h>
+#include <asm/apic.h>
 #include <asm/io.h>
+#include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/processor.h>
-#include <asm/amd.h>
 #include <asm/spec_ctrl.h>
-#include <asm/acpi.h>
-#include <asm/apic.h>
-#include <asm/microcode.h>
 
 #include "cpu.h"
-
-/*
- * Pre-canned values for overriding the CPUID features 
- * and extended features masks.
- *
- * Currently supported processors:
- * 
- * "fam_0f_rev_c"
- * "fam_0f_rev_d"
- * "fam_0f_rev_e"
- * "fam_0f_rev_f"
- * "fam_0f_rev_g"
- * "fam_10_rev_b"
- * "fam_10_rev_c"
- * "fam_11_rev_b"
- */
-static char __initdata opt_famrev[14];
-string_param("cpuid_mask_cpu", opt_famrev);
-
-static unsigned int __initdata opt_cpuid_mask_l7s0_eax = ~0u;
-integer_param("cpuid_mask_l7s0_eax", opt_cpuid_mask_l7s0_eax);
-static unsigned int __initdata opt_cpuid_mask_l7s0_ebx = ~0u;
-integer_param("cpuid_mask_l7s0_ebx", opt_cpuid_mask_l7s0_ebx);
-
-static unsigned int __initdata opt_cpuid_mask_thermal_ecx = ~0u;
-integer_param("cpuid_mask_thermal_ecx", opt_cpuid_mask_thermal_ecx);
 
 /* 1 = allow, 0 = don't allow guest creation, -1 = don't allow boot */
 int8_t __read_mostly opt_allow_unsafe;
@@ -59,36 +34,51 @@ static bool __read_mostly fam17_c6_disabled;
 static inline int rdmsr_amd_safe(unsigned int msr, unsigned int *lo,
 				 unsigned int *hi)
 {
-	int err;
+#ifdef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
+    asm_inline goto (
+        "1: rdmsr\n\t"
+        _ASM_EXTABLE(1b, %l[fault])
+        : "=a" (*lo), "=d" (*hi)
+        : "c" (msr), "D" (0x9c5a203a)
+        :
+        : fault );
 
-	asm volatile("1: rdmsr\n2:\n"
-		     ".section .fixup,\"ax\"\n"
-		     "3: movl %6,%2\n"
-		     "   jmp 2b\n"
-		     ".previous\n"
-		     _ASM_EXTABLE(1b, 3b)
-		     : "=a" (*lo), "=d" (*hi), "=r" (err)
-		     : "c" (msr), "D" (0x9c5a203a), "2" (0), "i" (-EFAULT));
+    return 0;
 
-	return err;
+ fault:
+    return -EFAULT;
+#else
+    int err;
+
+    asm_inline volatile (
+        "1: rdmsr\n2:\n"
+        ".section .fixup,\"ax\"\n"
+        "3: movl %6,%2\n"
+        "   jmp 2b\n"
+        ".previous\n"
+        _ASM_EXTABLE(1b, 3b)
+        : "=a" (*lo), "=d" (*hi), "=r" (err)
+        : "c" (msr), "D" (0x9c5a203a), "2" (0), "i" (-EFAULT) );
+
+    return err;
+#endif
 }
 
 static inline int wrmsr_amd_safe(unsigned int msr, unsigned int lo,
-				 unsigned int hi)
+                                 unsigned int hi)
 {
-	int err;
+    asm_inline goto (
+        "1: wrmsr\n\t"
+        _ASM_EXTABLE(1b, %l[fault])
+        :
+        : "c" (msr), "a" (lo), "d" (hi), "D" (0x9c5a203a)
+        :
+        : fault );
 
-	asm volatile("1: wrmsr\n2:\n"
-		     ".section .fixup,\"ax\"\n"
-		     "3: movl %6,%0\n"
-		     "   jmp 2b\n"
-		     ".previous\n"
-		     _ASM_EXTABLE(1b, 3b)
-		     : "=r" (err)
-		     : "c" (msr), "a" (lo), "d" (hi), "D" (0x9c5a203a),
-		       "0" (0), "i" (-EFAULT));
+    return 0;
 
-	return err;
+ fault:
+    return -EFAULT;
 }
 
 static void wrmsr_amd(unsigned int msr, uint64_t val)
@@ -96,51 +86,6 @@ static void wrmsr_amd(unsigned int msr, uint64_t val)
 	asm volatile("wrmsr" ::
 		     "c" (msr), "a" ((uint32_t)val),
 		     "d" (val >> 32), "D" (0x9c5a203a));
-}
-
-static const struct cpuidmask {
-	uint16_t fam;
-	char rev[2];
-	unsigned int ecx, edx, ext_ecx, ext_edx;
-} pre_canned[] __initconst = {
-#define CAN(fam, id, rev) { \
-		fam, #rev, \
-		AMD_FEATURES_##id##_REV_##rev##_ECX, \
-		AMD_FEATURES_##id##_REV_##rev##_EDX, \
-		AMD_EXTFEATURES_##id##_REV_##rev##_ECX, \
-		AMD_EXTFEATURES_##id##_REV_##rev##_EDX \
-	}
-#define CAN_FAM(fam, rev) CAN(0x##fam, FAM##fam##h, rev)
-#define CAN_K8(rev)       CAN(0x0f,    K8,          rev)
-	CAN_FAM(11, B),
-	CAN_FAM(10, C),
-	CAN_FAM(10, B),
-	CAN_K8(G),
-	CAN_K8(F),
-	CAN_K8(E),
-	CAN_K8(D),
-	CAN_K8(C)
-#undef CAN
-};
-
-static const struct cpuidmask *__init noinline get_cpuidmask(const char *opt)
-{
-	unsigned long fam;
-	char rev;
-	unsigned int i;
-
-	if (strncmp(opt, "fam_", 4))
-		return NULL;
-	fam = simple_strtoul(opt + 4, &opt, 16);
-	if (strncmp(opt, "_rev_", 5) || !opt[5] || opt[6])
-		return NULL;
-	rev = toupper(opt[5]);
-
-	for (i = 0; i < ARRAY_SIZE(pre_canned); ++i)
-		if (fam == pre_canned[i].fam && rev == *pre_canned[i].rev)
-			return &pre_canned[i];
-
-	return NULL;
 }
 
 /*
@@ -172,10 +117,12 @@ static void __init noinline probe_masking_msrs(void)
 	/*
 	 * First, work out which masking MSRs we should have, based on
 	 * revision and cpuid.
+	 *
+	 * Fam11h doesn't support masking at all.  FamFh RevD and earlier had
+	 * the feature MSRs in different locations, as can be seen by the
+	 * suggested workaround for Erratum #110, doc 25759.
 	 */
-
-	/* Fam11 doesn't support masking at all. */
-	if (c->x86 == 0x11)
+	if (c->family == 0x11 || (c->family == 0xf && c->model < 0x20))
 		return;
 
 	cpuidmask_defaults._1cd =
@@ -187,7 +134,7 @@ static void __init noinline probe_masking_msrs(void)
 		cpuidmask_defaults._7ab0 =
 			_probe_mask_msr(MSR_AMD_L7S0_FEATURE_MASK, LCAP_7ab0);
 
-	if (c->x86 == 0x15 && c->cpuid_level >= 6 && cpuid_ecx(6))
+	if (c->family == 0x15 && c->cpuid_level >= 6 && cpuid_ecx(6))
 		cpuidmask_defaults._6c =
 			_probe_mask_msr(MSR_AMD_THRM_FEATURE_MASK, LCAP_6c);
 
@@ -204,7 +151,7 @@ static void __init noinline probe_masking_msrs(void)
 	       expected_levelling_cap, levelling_caps,
 	       (expected_levelling_cap ^ levelling_caps) & levelling_caps);
 	printk(XENLOG_WARNING "Fam %#x, model %#x level %#x\n",
-	       c->x86, c->x86_model, c->cpuid_level);
+	       c->family, c->model, c->cpuid_level);
 	printk(XENLOG_WARNING
 	       "If not running virtualised, please report a bug\n");
 }
@@ -223,7 +170,7 @@ static void cf_check amd_ctxt_switch_masking(const struct vcpu *next)
 		(nextd && is_pv_domain(nextd) && nextd->arch.pv.cpuidmasks)
 		? nextd->arch.pv.cpuidmasks : &cpuidmask_defaults;
 
-	if ((levelling_caps & LCAP_1cd) == LCAP_1cd) {
+	if (levelling_caps & LCAP_1cd) {
 		uint64_t val = masks->_1cd;
 
 		/*
@@ -244,7 +191,7 @@ static void cf_check amd_ctxt_switch_masking(const struct vcpu *next)
 #define LAZY(cap, msr, field)						\
 	({								\
 		if (unlikely(these_masks->field != masks->field) &&	\
-		    ((levelling_caps & cap) == cap))			\
+		    (levelling_caps & cap))				\
 		{							\
 			wrmsr_amd(msr, masks->field);			\
 			these_masks->field = masks->field;		\
@@ -279,8 +226,6 @@ static const typeof(ctxt_switch_masking) __initconst_cf_clobber __used csm =
  */
 static void __init noinline amd_init_levelling(void)
 {
-	const struct cpuidmask *m = NULL;
-
 	/*
 	 * If there's support for CpuidUserDis or CPUID faulting then
 	 * we can skip levelling because CPUID accesses are trapped anyway.
@@ -302,25 +247,10 @@ static void __init noinline amd_init_levelling(void)
 
 	probe_masking_msrs();
 
-	if (*opt_famrev != '\0') {
-		m = get_cpuidmask(opt_famrev);
-
-		if (!m)
-			printk("Invalid processor string: %s\n", opt_famrev);
-	}
-
-	if ((levelling_caps & LCAP_1cd) == LCAP_1cd) {
+	if (levelling_caps & LCAP_1cd) {
 		uint32_t ecx, edx, tmp;
 
 		cpuid(0x00000001, &tmp, &tmp, &ecx, &edx);
-
-		if (~(opt_cpuid_mask_ecx & opt_cpuid_mask_edx)) {
-			ecx &= opt_cpuid_mask_ecx;
-			edx &= opt_cpuid_mask_edx;
-		} else if (m) {
-			ecx &= m->ecx;
-			edx &= m->edx;
-		}
 
 		/* Fast-forward bits - Must be set. */
 		if (ecx & cpufeat_mask(X86_FEATURE_XSAVE))
@@ -330,18 +260,10 @@ static void __init noinline amd_init_levelling(void)
 		cpuidmask_defaults._1cd = ((uint64_t)ecx << 32) | edx;
 	}
 
-	if ((levelling_caps & LCAP_e1cd) == LCAP_e1cd) {
+	if (levelling_caps & LCAP_e1cd) {
 		uint32_t ecx, edx, tmp;
 
 		cpuid(0x80000001, &tmp, &tmp, &ecx, &edx);
-
-		if (~(opt_cpuid_mask_ext_ecx & opt_cpuid_mask_ext_edx)) {
-			ecx &= opt_cpuid_mask_ext_ecx;
-			edx &= opt_cpuid_mask_ext_edx;
-		} else if (m) {
-			ecx &= m->ext_ecx;
-			edx &= m->ext_edx;
-		}
 
 		/* Fast-forward bits - Must be set. */
 		edx |= cpufeat_mask(X86_FEATURE_APIC);
@@ -349,24 +271,16 @@ static void __init noinline amd_init_levelling(void)
 		cpuidmask_defaults.e1cd = ((uint64_t)ecx << 32) | edx;
 	}
 
-	if ((levelling_caps & LCAP_7ab0) == LCAP_7ab0) {
+	if (levelling_caps & LCAP_7ab0) {
 		uint32_t eax, ebx, tmp;
 
 		cpuid(0x00000007, &eax, &ebx, &tmp, &tmp);
 
-		if (~(opt_cpuid_mask_l7s0_eax & opt_cpuid_mask_l7s0_ebx)) {
-			eax &= opt_cpuid_mask_l7s0_eax;
-			ebx &= opt_cpuid_mask_l7s0_ebx;
-		}
-
 		cpuidmask_defaults._7ab0 &= ((uint64_t)eax << 32) | ebx;
 	}
 
-	if ((levelling_caps & LCAP_6c) == LCAP_6c) {
+	if (levelling_caps & LCAP_6c) {
 		uint32_t ecx = cpuid_ecx(6);
-
-		if (~opt_cpuid_mask_thermal_ecx)
-			ecx &= opt_cpuid_mask_thermal_ecx;
 
 		cpuidmask_defaults._6c &= (~0ULL << 32) | ecx;
 	}
@@ -413,7 +327,7 @@ int cpu_has_amd_erratum(const struct cpuinfo_x86 *cpu, int osvw_id, ...)
 	u32 range;
 	u32 ms;
 	
-	if (cpu->x86_vendor != X86_VENDOR_AMD)
+	if (cpu->vendor != X86_VENDOR_AMD)
 		return 0;
 
 	if (osvw_id >= 0 && cpu_has(cpu, X86_FEATURE_OSVW)) {
@@ -434,9 +348,9 @@ int cpu_has_amd_erratum(const struct cpuinfo_x86 *cpu, int osvw_id, ...)
 	/* OSVW unavailable or ID unknown, match family-model-stepping range */
 	va_start(ap, osvw_id);
 
-	ms = (cpu->x86_model << 4) | cpu->x86_mask;
+	ms = (cpu->model << 4) | cpu->stepping;
 	while ((range = va_arg(ap, int))) {
-		if ((cpu->x86 == AMD_MODEL_RANGE_FAMILY(range)) &&
+		if ((cpu->family == AMD_MODEL_RANGE_FAMILY(range)) &&
 		    (ms >= AMD_MODEL_RANGE_START(range)) &&
 		    (ms <= AMD_MODEL_RANGE_END(range))) {
 			va_end(ap);
@@ -481,7 +395,7 @@ static void cf_check disable_c1e(void *unused)
 	 * The MSR does not exist in all FamilyF CPUs (only Rev F and above),
 	 * but we safely catch the #GP in that case.
 	 */
-	if ((rdmsr_safe(MSR_K8_ENABLE_C1E, msr_content) == 0) &&
+	if ((rdmsr_safe(MSR_K8_ENABLE_C1E, &msr_content) == 0) &&
 	    (msr_content & (3ULL << 27)) &&
 	    (wrmsr_safe(MSR_K8_ENABLE_C1E, msr_content & ~(3ULL << 27)) != 0))
 		printk(KERN_ERR "Failed to disable C1E on CPU#%u (%16"PRIx64")\n",
@@ -504,8 +418,8 @@ static void check_syscfg_dram_mod_en(void)
 {
 	uint64_t syscfg;
 
-	if (!((boot_cpu_data.x86_vendor == X86_VENDOR_AMD) &&
-		(boot_cpu_data.x86 >= 0x0f)))
+	if (!((boot_cpu_data.vendor == X86_VENDOR_AMD) &&
+		(boot_cpu_data.family >= 0x0f)))
 		return;
 
 	rdmsrl(MSR_K8_SYSCFG, syscfg);
@@ -548,7 +462,7 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
                 cpuid(0x8000001e, &eax, &ebx, &ecx, &edx);
                 c->x86_num_siblings = ((ebx >> 8) & 0xff) + 1;
 
-                if (c->x86 < 0x17)
+                if (c->family < 0x17)
                         c->compute_unit_id = ebx & 0xFF;
                 else {
                         c->cpu_core_id = ebx & 0xFF;
@@ -572,17 +486,44 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
                                                           : c->cpu_core_id);
 }
 
-void amd_log_freq(const struct cpuinfo_x86 *c)
+static unsigned int attr_const amd_parse_freq(unsigned int family,
+					      unsigned int value)
+{
+	unsigned int freq = 0;
+
+	switch (family) {
+	case 0x10 ... 0x16:
+		freq = (((value & 0x3f) + 0x10) * 100) >> ((value >> 6) & 7);
+		break;
+
+	case 0x17 ... 0x19:
+		freq = ((value & 0xff) * 25 * 8) / ((value >> 8) & 0x3f);
+		break;
+
+	case 0x1A:
+		freq = (value & 0xfff) * 5;
+		break;
+
+	default:
+		ASSERT_UNREACHABLE();
+		break;
+	}
+
+	return freq;
+}
+
+void amd_process_freq(const struct cpuinfo_x86 *c,
+		      unsigned int *low_mhz,
+		      unsigned int *nom_mhz,
+		      unsigned int *hi_mhz)
 {
 	unsigned int idx = 0, h;
 	uint64_t hi, lo, val;
 
-	if (c->x86 < 0x10 || c->x86 > 0x19 ||
-	    (c != &boot_cpu_data &&
-	     (!opt_cpu_info || (c->apicid & (c->x86_num_siblings - 1)))))
+	if (c->family < 0x10 || c->family > 0x1A)
 		return;
 
-	if (c->x86 < 0x17) {
+	if (c->family < 0x17) {
 		unsigned int node = 0;
 		uint64_t nbcfg;
 
@@ -632,7 +573,7 @@ void amd_log_freq(const struct cpuinfo_x86 *c)
 				 * accounted for in order to correctly fetch the
 				 * nominal frequency of the processor.
 				 */
-				switch (c->x86) {
+				switch (c->family) {
 				case 0x10: idx = 1; break;
 				case 0x12: idx = 7; break;
 				case 0x14: idx = 7; break;
@@ -652,25 +593,28 @@ void amd_log_freq(const struct cpuinfo_x86 *c)
 	}
 
 	lo = 0; /* gcc may not recognize the loop having at least 5 iterations */
-	for (h = c->x86 == 0x10 ? 5 : 8; h--; )
-		if (!rdmsr_safe(0xC0010064 + h, lo) && (lo >> 63))
+	for (h = c->family == 0x10 ? 5 : 8; h--; )
+		if (!rdmsr_safe(0xC0010064 + h, &lo) && (lo >> 63))
 			break;
 	if (!(lo >> 63))
 		return;
 
-#define FREQ(v) (c->x86 < 0x17 ? ((((v) & 0x3f) + 0x10) * 100) >> (((v) >> 6) & 7) \
-		                     : (((v) & 0xff) * 25 * 8) / (((v) >> 8) & 0x3f))
 	if (idx && idx < h &&
-	    !rdmsr_safe(0xC0010064 + idx, val) && (val >> 63) &&
-	    !rdmsr_safe(0xC0010064, hi) && (hi >> 63))
-		printk("CPU%u: %lu (%lu ... %lu) MHz\n",
-		       smp_processor_id(), FREQ(val), FREQ(lo), FREQ(hi));
-	else if (h && !rdmsr_safe(0xC0010064, hi) && (hi >> 63))
-		printk("CPU%u: %lu ... %lu MHz\n",
-		       smp_processor_id(), FREQ(lo), FREQ(hi));
-	else
-		printk("CPU%u: %lu MHz\n", smp_processor_id(), FREQ(lo));
-#undef FREQ
+	    !rdmsr_safe(0xC0010064 + idx, &val) && (val >> 63) &&
+	    !rdmsr_safe(0xC0010064, &hi) && (hi >> 63)) {
+		if (nom_mhz)
+			*nom_mhz = amd_parse_freq(c->family, val);
+		if (low_mhz)
+			*low_mhz = amd_parse_freq(c->family, lo);
+		if (hi_mhz)
+			*hi_mhz = amd_parse_freq(c->family, hi);
+	} else if (h && !rdmsr_safe(0xC0010064, &hi) && (hi >> 63)) {
+		if (low_mhz)
+			*low_mhz = amd_parse_freq(c->family, lo);
+		if (hi_mhz)
+			*hi_mhz = amd_parse_freq(c->family, hi);
+	} else if (low_mhz)
+		*low_mhz = amd_parse_freq(c->family, lo);
 }
 
 void cf_check early_init_amd(struct cpuinfo_x86 *c)
@@ -681,6 +625,27 @@ void cf_check early_init_amd(struct cpuinfo_x86 *c)
 	ctxt_switch_levelling(NULL);
 }
 
+void amd_log_freq(const struct cpuinfo_x86 *c)
+{
+	unsigned int low_mhz = 0, nom_mhz = 0, hi_mhz = 0;
+
+	if (c != &boot_cpu_data &&
+	    (!opt_cpu_info || (c->apicid & (c->x86_num_siblings - 1))))
+		return;
+
+	amd_process_freq(c, &low_mhz, &nom_mhz, &hi_mhz);
+
+	if (low_mhz && nom_mhz && hi_mhz)
+		printk("CPU%u: %u (%u ... %u) MHz\n",
+		       smp_processor_id(),
+		       nom_mhz, low_mhz, hi_mhz);
+	else if (low_mhz && hi_mhz)
+		printk("CPU%u: %u ... %u MHz\n",
+		       smp_processor_id(), low_mhz, hi_mhz);
+	else if (low_mhz)
+		printk("CPU%u: %u MHz\n", smp_processor_id(), low_mhz);
+}
+
 /*
  * Refer to the AMD Speculative Store Bypass whitepaper:
  * https://developer.amd.com/wp-content/resources/124441_AMD64_SpeculativeStoreBypassDisable_Whitepaper_final.pdf
@@ -689,7 +654,7 @@ static bool set_legacy_ssbd(const struct cpuinfo_x86 *c, bool enable)
 {
 	int bit = -1;
 
-	switch (c->x86) {
+	switch (c->family) {
 	case 0x15: bit = 54; break;
 	case 0x16: bit = 33; break;
 	case 0x17:
@@ -699,7 +664,7 @@ static bool set_legacy_ssbd(const struct cpuinfo_x86 *c, bool enable)
 	if (bit >= 0) {
 		uint64_t val, mask = 1ull << bit;
 
-		if (rdmsr_safe(MSR_AMD64_LS_CFG, val) ||
+		if (rdmsr_safe(MSR_AMD64_LS_CFG, &val) ||
 		    ({
 			    val &= ~mask;
 			    if (enable)
@@ -751,7 +716,7 @@ bool __init amd_setup_legacy_ssbd(void)
 {
 	unsigned int i;
 
-	if ((boot_cpu_data.x86 != 0x17 && boot_cpu_data.x86 != 0x18) ||
+	if ((boot_cpu_data.family != 0x17 && boot_cpu_data.family != 0x18) ||
 	    boot_cpu_data.x86_num_siblings <= 1 || opt_ssbd)
 		return true;
 
@@ -798,7 +763,7 @@ static void core_set_legacy_ssbd(bool enable)
 
 	BUG_ON(this_cpu(legacy_ssbd) == enable);
 
-	if ((c->x86 != 0x17 && c->x86 != 0x18) || c->x86_num_siblings <= 1) {
+	if ((c->family != 0x17 && c->family != 0x18) || c->x86_num_siblings <= 1) {
 		BUG_ON(!set_legacy_ssbd(c, enable));
 		return;
 	}
@@ -829,7 +794,7 @@ void amd_set_legacy_ssbd(bool enable)
 		return;
 
 	if (cpu_has_virt_ssbd)
-		wrmsr(MSR_VIRT_SPEC_CTRL, enable ? SPEC_CTRL_SSBD : 0, 0);
+		wrmsr(MSR_VIRT_SPEC_CTRL, enable ? SPEC_CTRL_SSBD : 0);
 	else if (amd_legacy_ssbd)
 		core_set_legacy_ssbd(enable);
 	else
@@ -857,7 +822,7 @@ void amd_init_spectral_chicken(void)
 	if (cpu_has_hypervisor || !is_zen2_uarch())
 		return;
 
-	if (rdmsr_safe(MSR_AMD64_DE_CFG2, val) == 0 && !(val & chickenbit))
+	if (rdmsr_safe(MSR_AMD64_DE_CFG2, &val) == 0 && !(val & chickenbit))
 		wrmsr_safe(MSR_AMD64_DE_CFG2, val | chickenbit);
 }
 
@@ -906,7 +871,7 @@ static bool zenbleed_use_chickenbit(void)
     uint8_t fixed_rev;
 
     /* Zenbleed only affects Zen2.  Nothing to do on non-Fam17h systems. */
-    if ( boot_cpu_data.x86 != 0x17 )
+    if ( boot_cpu_data.family != 0x17 )
         return false;
 
     curr_rev = this_cpu(cpu_sig).rev;
@@ -937,7 +902,7 @@ void amd_init_de_cfg(const struct cpuinfo_x86 *c)
      * The MSR doesn't exist on Fam 0xf/0x11.  If virtualised, we won't have
      * mutable access even if we can read it.
      */
-    if ( c->x86 == 0xf || c->x86 == 0x11 || cpu_has_hypervisor )
+    if ( c->family == 0xf || c->family == 0x11 || cpu_has_hypervisor )
         return;
 
     /*
@@ -961,14 +926,14 @@ void amd_init_de_cfg(const struct cpuinfo_x86 *c)
      * Erratum #665, doc 44739.  Integer divide instructions may cause
      * unpredictable behaviour.
      */
-    if ( c->x86 == 0x12 )
+    if ( c->family == 0x12 )
         new |= 1U << 31;
 
     /* Avoid reading DE_CFG if we don't intend to change anything. */
     if ( !new )
         return;
 
-    rdmsrl(MSR_AMD64_DE_CFG, val);
+    val = rdmsr(MSR_AMD64_DE_CFG);
 
     if ( (val & new) == new )
         return;
@@ -979,7 +944,7 @@ void amd_init_de_cfg(const struct cpuinfo_x86 *c)
      * consistent across CPUs and unrelated to the old value, so the result
      * should be consistent.
      */
-    wrmsrl(MSR_AMD64_DE_CFG, val | new);
+    wrmsr(MSR_AMD64_DE_CFG, val | new);
 }
 
 static void amd_init_fp_cfg(const struct cpuinfo_x86 *c)
@@ -994,7 +959,7 @@ static void amd_init_fp_cfg(const struct cpuinfo_x86 *c)
      * On Zen1, mitigate SB-7053 / FP-DSS Floating Point Divider State
      * Sampling by setting bit 9 as instructed.
      */
-    if ( c->x86 == 0x17 && is_zen1_uarch() )
+    if ( c->family == 0x17 && is_zen1_uarch() )
         new |= 1 << 9;
 
     /*
@@ -1004,7 +969,7 @@ static void amd_init_fp_cfg(const struct cpuinfo_x86 *c)
     if ( !new )
         return;
 
-    rdmsrl(MSR_AMD64_FP_CFG, val);
+    val = rdmsr(MSR_AMD64_FP_CFG);
 
     if ( (val & new) == new )
         return;
@@ -1015,7 +980,7 @@ static void amd_init_fp_cfg(const struct cpuinfo_x86 *c)
      * consistent across CPUs and unrelated to the old value, so the result
      * should be consistent.
      */
-    wrmsrl(MSR_AMD64_FP_CFG, val | new);
+    wrmsr(MSR_AMD64_FP_CFG, val | new);
 }
 
 void __init amd_init_lfence_dispatch(void)
@@ -1027,11 +992,11 @@ void __init amd_init_lfence_dispatch(void)
         /* LFENCE is forced dispatch serialising and we can't control it. */
         return;
 
-    if ( c->x86 == 0xf || c->x86 == 0x11 )
+    if ( c->family == 0xf || c->family == 0x11 )
         /* MSR doesn't exist, LFENCE is dispatch serialising. */
         goto set;
 
-    if ( rdmsr_safe(MSR_AMD64_DE_CFG, val) )
+    if ( rdmsr_safe(MSR_AMD64_DE_CFG, &val) )
         /* Unable to read.  Assume the safer default. */
         goto clear;
 
@@ -1057,7 +1022,7 @@ static void amd_check_bp_cfg(void)
 		 *
 		 * Set bit 5, as instructed.
 		 */
-		if (boot_cpu_data.x86 == 0x19 && is_zen4_uarch())
+		if (boot_cpu_data.family == 0x19 && is_zen4_uarch())
 			new |= (1 << 5);
 
 		/*
@@ -1066,7 +1031,7 @@ static void amd_check_bp_cfg(void)
 		 *
 		 * Set bit 33, as instructed.
 		 */
-		if (boot_cpu_data.x86 == 0x17 && is_zen2_uarch())
+		if (boot_cpu_data.family == 0x17 && is_zen2_uarch())
 			new |= (1UL << 33);
 	}
 
@@ -1101,8 +1066,7 @@ static void amd_check_bp_cfg(void)
 static void cf_check init_amd(struct cpuinfo_x86 *c)
 {
 	u32 l, h;
-
-	unsigned long long value;
+	uint64_t value;
 
 	amd_init_de_cfg(c);
 	amd_init_fp_cfg(c);
@@ -1116,20 +1080,13 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	 * Errata 63 for SH-B3 steppings
 	 * Errata 122 for all steppings (F+ have it disabled by default)
 	 */
-	if (c->x86 == 15) {
+	if (c->family == 15) {
 		rdmsrl(MSR_K8_HWCR, value);
 		value |= 1 << 6;
 		wrmsrl(MSR_K8_HWCR, value);
 	}
 
-	/*
-	 * Some AMD CPUs duplicate the 3DNow bit in base and extended CPUID
-	 * leaves.  Unfortunately, this aliases PBE on Intel CPUs. Clobber the
-	 * alias, leaving 3DNow in the extended leaf.
-	 */
-	__clear_bit(X86_FEATURE_PBE, c->x86_capability);
-	
-	if (c->x86 == 0xf && c->x86_model < 0x14
+	if (c->family == 0xf && c->model < 0x14
 	    && cpu_has(c, X86_FEATURE_LAHF_LM)) {
 		/*
 		 * Some BIOSes incorrectly force this feature, but only K8
@@ -1150,12 +1107,12 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 
 	amd_init_ssbd(c);
 
-	if (c->x86 == 0x17)
+	if (c->family == 0x17)
 		amd_init_spectral_chicken();
 
 	/* Probe for NSCB on Zen2 CPUs when not virtualised */
 	if (!cpu_has_hypervisor && !cpu_has_nscb && c == &boot_cpu_data &&
-	    c->x86 == 0x17)
+	    c->family == 0x17)
 		detect_zen2_null_seg_behaviour();
 
 	/*
@@ -1177,7 +1134,7 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	if (c == &boot_cpu_data && !cpu_has_clflushopt)
 		setup_force_cpu_cap(X86_BUG_CLFLUSH_MFENCE);
 
-	switch(c->x86)
+	switch(c->family)
 	{
 	case 0xf ... 0x11:
 		disable_c1e(NULL);
@@ -1211,8 +1168,9 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 		 * Branch Type Confusion, but predate the allocation of the
 		 * BTC_NO bit.  Fill it back in if we're not virtualised.
 		 */
-		if (!cpu_has_hypervisor && !cpu_has(c, X86_FEATURE_BTC_NO))
-			__set_bit(X86_FEATURE_BTC_NO, c->x86_capability);
+		if (c == &boot_cpu_data && !cpu_has_hypervisor &&
+		    !cpu_has(c, X86_FEATURE_BTC_NO))
+			setup_force_cpu_cap(X86_FEATURE_BTC_NO);
 		break;
 	}
 
@@ -1226,17 +1184,17 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 		if (cpu_has(c, X86_FEATURE_ITSC)) {
 			__set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 			__set_bit(X86_FEATURE_NONSTOP_TSC, c->x86_capability);
-			if (c->x86 != 0x11)
+			if (c->family != 0x11)
 				__set_bit(X86_FEATURE_TSC_RELIABLE,
 					  c->x86_capability);
 		}
 	}
 
 	/* re-enable TopologyExtensions if switched off by BIOS */
-	if ((c->x86 == 0x15) &&
-	    (c->x86_model >= 0x10) && (c->x86_model <= 0x1f) &&
+	if ((c->family == 0x15) &&
+	    (c->model >= 0x10) && (c->model <= 0x1f) &&
 	    !cpu_has(c, X86_FEATURE_TOPOEXT) &&
-	    !rdmsr_safe(MSR_K8_EXT_FEATURE_MASK, value)) {
+	    !rdmsr_safe(MSR_K8_EXT_FEATURE_MASK, &value)) {
 		value |= 1ULL << 54;
 		wrmsr_safe(MSR_K8_EXT_FEATURE_MASK, value);
 		rdmsrl(MSR_K8_EXT_FEATURE_MASK, value);
@@ -1251,14 +1209,14 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	 * The way access filter has a performance penalty on some workloads.
 	 * Disable it on the affected CPUs.
 	 */
-	if (c->x86 == 0x15 && c->x86_model >= 0x02 && c->x86_model < 0x20 &&
-	    !rdmsr_safe(MSR_AMD64_IC_CFG, value) && (value & 0x1e) != 0x1e)
+	if (c->family == 0x15 && c->model >= 0x02 && c->model < 0x20 &&
+	    !rdmsr_safe(MSR_AMD64_IC_CFG, &value) && (value & 0x1e) != 0x1e)
 		wrmsr_safe(MSR_AMD64_IC_CFG, value | 0x1e);
 
         amd_get_topology(c);
 
 	/* Pointless to use MWAIT on Family10 as it does not deep sleep. */
-	if (c->x86 == 0x10)
+	if (c->family == 0x10)
 		__clear_bit(X86_FEATURE_MONITOR, c->x86_capability);
 
 	if (!cpu_has_amd_erratum(c, AMD_ERRATUM_121))
@@ -1275,7 +1233,7 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 		       "*** Pass \"allow_unsafe\" if you're trusting"
 		       " all your (PV) guest kernels. ***\n");
 
-	if (c->x86 == 0x16 && c->x86_model <= 0xf) {
+	if (c->family == 0x16 && c->model <= 0xf) {
 		if (c == &boot_cpu_data) {
 			l = pci_conf_read32(PCI_SBDF(0, 0, 0x18, 3), 0x58);
 			h = pci_conf_read32(PCI_SBDF(0, 0, 0x18, 3), 0x5c);
@@ -1308,7 +1266,7 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	/* AMD CPUs do not support SYSENTER outside of legacy mode. */
 	__clear_bit(X86_FEATURE_SEP, c->x86_capability);
 
-	if (c->x86 == 0x10) {
+	if (c->family == 0x10) {
 		/* do this for boot cpu */
 		if (c == &boot_cpu_data)
 			check_enable_amd_mmconf_dmi();
@@ -1331,14 +1289,14 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	 * Family 0x12 and above processors have APIC timer
 	 * running in deep C states.
 	 */
-	if ( opt_arat && c->x86 > 0x11 )
-		__set_bit(X86_FEATURE_ARAT, c->x86_capability);
+	if ( opt_arat && c->family > 0x11 )
+		__set_bit(X86_FEATURE_XEN_ARAT, c->x86_capability);
 
 	/*
 	 * Prior to Family 0x14, perf counters are not reset during warm reboot.
 	 * We have to reset them manually.
 	 */
-	if (nmi_watchdog != NMI_LOCAL_APIC && c->x86 < 0x14) {
+	if (nmi_watchdog != NMI_LOCAL_APIC && c->family < 0x14) {
 		wrmsrl(MSR_K7_PERFCTR0, 0);
 		wrmsrl(MSR_K7_PERFCTR1, 0);
 		wrmsrl(MSR_K7_PERFCTR2, 0);
@@ -1346,9 +1304,9 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 	}
 
 	if (cpu_has(c, X86_FEATURE_EFRO)) {
-		rdmsr(MSR_K8_HWCR, l, h);
-		l |= (1 << 27); /* Enable read-only APERF/MPERF bit */
-		wrmsr(MSR_K8_HWCR, l, h);
+		/* Enable read-only APERF/MPERF bit */
+		wrmsrns(MSR_K8_HWCR,
+			rdmsr(MSR_K8_HWCR) | (1 << 27));
 	}
 
 	/* Prevent TSC drift in non single-processor, single-core platforms. */
@@ -1361,6 +1319,10 @@ static void cf_check init_amd(struct cpuinfo_x86 *c)
 		fam17_disable_c6(NULL);
 
 	check_syscfg_dram_mod_en();
+
+	if (c == &boot_cpu_data && cpu_has(c, X86_FEATURE_ERMS)
+	    && c->family != 0x19 /* Zen3/4 */)
+		setup_force_cpu_cap(X86_FEATURE_XEN_REP_MOVSB);
 
 	amd_log_freq(c);
 }
@@ -1379,7 +1341,7 @@ static int __init cf_check amd_check_erratum_1474(void)
 	s_time_t delta;
 
 	if (cpu_has_hypervisor ||
-	    (boot_cpu_data.x86 != 0x17 && boot_cpu_data.x86 != 0x18))
+	    (boot_cpu_data.family != 0x17 && boot_cpu_data.family != 0x18))
 		return 0;
 
 	/*

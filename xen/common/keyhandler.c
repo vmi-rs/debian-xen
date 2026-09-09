@@ -129,6 +129,9 @@ static void cf_check show_handlers(unsigned char key)
     unsigned int i;
 
     printk("'%c' pressed -> showing installed handlers\n", key);
+
+    print_version();
+
     for ( i = 0; i < ARRAY_SIZE(key_table); i++ )
         if ( key_table[i].fn )
             printk(" key '%c' (ascii '%02x') => %s\n",
@@ -247,7 +250,7 @@ static void cf_check dump_hwdom_registers(unsigned char key)
     }
 }
 
-static void cf_check reboot_machine(unsigned char key, bool unused)
+static void noreturn cf_check reboot_machine(unsigned char key, bool unused)
 {
     printk("'%c' pressed -> rebooting machine\n", key);
     machine_restart(0);

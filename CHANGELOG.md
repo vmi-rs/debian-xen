@@ -4,17 +4,127 @@ Notable changes to Xen will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
-## [4.20.3](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.20.3)
+## [4.22.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=staging) - 2026-07-30
 
-### Added
+### Changed
+ - Users of XEN_DOMCTL_createdomain/xc_domain_create() must now pass DOMID_ANY
+   to obtain an automatically allocated domid.  The prior sentinel values (0
+   since the start of Xen, and DOMID_INVALID since Xen 4.21) now no longer
+   represent a wildcard input.
  - On x86:
-   - Support for CPIO microcode in discrete multiboot modules.
-
-## [4.20.1](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.20.1)
+   - Enable pf-fixup option by default for PVH dom0.
+   - The libxenguest bzImage loader now uses the system liblz4 library.
 
 ### Added
+ - Support for per-domain Xenstore quota in C xenstored (includes
+   xenstore-stubdom), libxl and xl.
+ - Support for Xenstore watch depth feature in C xenstored (includes
+   xenstore-stubdom).
+ - On x86:
+   - Support for Bus Lock Threshold on AMD Zen5 and later CPUs, used by Xen to
+     mitigate (by rate-limiting) the system wide impact of an HVM guest
+     misusing atomic instructions.
+   - Support for CPIO microcode in discrete multiboot modules.
+   - Introduce get-core-temp command to xenpm to query CPU temperatures on
+     Intel platforms.
+
+ - On Arm:
+   - Support for guest suspend and resume to/from RAM via vPSCI.
+     Applies only to non-hardware domain guests.
+   - Continued Armv8-R MPU enablement.
+   - Drop ThumbEE support.
+   - FF-A v1.2 support.
+
+ - On RISC-V:
+   - SSTC extension support for Xen (not for guest yet).
+   - Introduce domain build helpers (CONFIG_DOMAIN_BUILD_HELPERS) which allows
+     to load Linux kernel, initrd and allocation related things forfor device
+     tree-based domains, laying the groundwork for guest boot support.
+
+### Removed
+ - On x86:
+   - The cpuid_mask_* command line options for legacy CPUs.  These were
+     deprecated in Xen 4.7 and noted not to work correctly with AMD CPUs from
+     2011 onwards, nor work at all with Intel CPUs from 2012.
+   - The SYSCTL_get_cpu_levelling_caps sysctl.  This is not known to have been
+     used by any toolstack.
+   - Xenoprofile support.  Oprofile themselves removed support for Xen in 2014
+     prior to the version 1.0 release, and there has been no development since
+     before then in Xen.
+   - Cross-vendor support; guests can now only be configured as the same
+     vendor as the host CPU.  When added back in 2009, with enough trickery
+     Intel and AMD CPUs could be made to be compatible enough to live migrate
+     a guest, but the vendors have been diverging since then in ways that Xen
+     cannot compensate for, and the advent of speculative security issues has
+     put to rest any possibility of this being a viable option.
+
+ - Removed xenpm tool on non-x86 platforms as it doesn't actually provide
+   anything useful outside of x86.
+ - Removed the XEN_FSIMAGE_FSDIR environment variable.
+
+## [4.21.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.21.0) - 2025-11-19
+
+### Changed
+ - The minimum toolchain requirements have increased for some architectures:
+   - For x86, GCC 5.1 and Binutils 2.25, or Clang/LLVM 11
+   - For ARM32 and ARM64, GCC 5.1 and Binutils 2.25
+   - For RISC-V, GCC 12.2 and Binutils 2.39
+ - Debian Trixie added to CI.  Debian Bullseye retired from CI for RISC-V due
+   to the baseline change.
+ - Linux based device model stubdomains are now fully supported.
+ - New dependency on library json-c 0.15 or later, the toolstack will prefer it
+   to `YAJL` when available.
+ - Introduce libxenmanage as a stable library, replacing xenstored's
+   dependency on unstable libraries.
+
+ - On x86:
+   - Restrict the cache flushing done as a result of guest physical memory map
+     manipulations and memory type changes.
+   - Allow controlling the MTRR cache attribute of the Xen platform PCI device
+     BAR for HVM guests, to improve performance of guests using it to map the
+     grant table or foreign memory.
+   - Allow configuring the number of altp2m tables per domain via vm.cfg.
+
+### Added
+ - Introduce new PDX compression algorithm to cope with Intel Sierra Forest and
+   Granite Rapids having sparse memory maps.
+
  - On x86:
    - Option to attempt to fixup p2m page-faults on PVH dom0.
+   - Resizable BARs is supported for PVH dom0.
+   - Support PCI passthrough for HVM domUs when dom0 is PVH (note SR-IOV
+     capability usage is not yet supported on PVH dom0).
+   - Smoke tests for the FreeBSD Xen builds in Cirrus CI.
+   - PVH xenstore-stubdom now supports Live Update.
+   - Support in hvmloader for new SMBIOS tables: 7 (Cache Info), 8 (Port
+     Connector), 9 (System Slots), 26 (Voltage Probe), 27 (Cooling Device),
+     and 28 (Temperature Probe).
+   - New amd-cppc/amd-cppc-epp cpufreq driver.
+
+ - On Arm:
+    - Ability to enable stack protector.
+    - GICv3.1 eSPI (Extended Shared Peripheral Interrupts) support for Xen
+      and guest domains.
+    - SMMU handling for PCIe passthrough.
+    - R-Car Gen4 PCI host controller support.
+    - SCI SCMI SMC single-agent support.
+    - Initial support for MPU, R82, and R52: reaches the early boot stages.
+
+ - On RISC-V:
+    - Basic UART support and external interrupts (APLIC/IMSIC only) handling
+      for hypervisor mode.
+
+### Removed
+ - On x86:
+   - GNTTABOP_cache_flush: it's unused on x86 and the implementation is
+     broken.
+
+ - Support of qemu-traditional has been removed.
+
+ - The in-tree oxenstored is deprecated and will be removed in a future
+   version of Xen.  It is moving into the Xapi project
+   https://github.com/xapi-project/oxenstored so it can be maintained in line
+   with the other Ocaml projects in the Xen ecosystem.
 
 ## [4.20.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.20.0) - 2025-03-05
 

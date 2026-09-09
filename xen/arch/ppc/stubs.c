@@ -103,26 +103,6 @@ void smp_send_call_function_mask(const cpumask_t *mask)
 
 /* irq.c */
 
-struct pirq *alloc_pirq_struct(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-int pirq_guest_bind(struct vcpu *v, struct pirq *pirq, int will_share)
-{
-    BUG_ON("unimplemented");
-}
-
-void pirq_guest_unbind(struct domain *d, struct pirq *pirq)
-{
-    BUG_ON("unimplemented");
-}
-
-void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
-{
-    BUG_ON("unimplemented");
-}
-
 void irq_ack_none(struct irq_desc *desc)
 {
     BUG_ON("unimplemented");
@@ -167,17 +147,7 @@ void startup_cpu_idle_loop(void)
     BUG_ON("unimplemented");
 }
 
-void free_domain_struct(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
 void dump_pageframe_info(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-void free_vcpu_struct(struct vcpu *v)
 {
     BUG_ON("unimplemented");
 }
@@ -188,11 +158,6 @@ int arch_vcpu_create(struct vcpu *v)
 }
 
 void arch_vcpu_destroy(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-void vcpu_switch_to_aarch64_mode(struct vcpu *v)
 {
     BUG_ON("unimplemented");
 }
@@ -230,11 +195,6 @@ void arch_domain_pause(struct domain *d)
 }
 
 void arch_domain_unpause(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-int arch_domain_soft_reset(struct domain *d)
 {
     BUG_ON("unimplemented");
 }
@@ -290,16 +250,6 @@ void vcpu_block_unless_event_pending(struct vcpu *v)
 }
 
 void vcpu_kick(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-struct domain *alloc_domain_struct(void)
-{
-    BUG_ON("unimplemented");
-}
-
-struct vcpu *alloc_vcpu_struct(const struct domain *d)
 {
     BUG_ON("unimplemented");
 }

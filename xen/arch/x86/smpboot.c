@@ -7,40 +7,43 @@
  *  (c) 1998, 1999, 2000 Ingo Molnar <mingo@redhat.com>
  */
 
-#include <xen/init.h>
-#include <xen/kernel.h>
-#include <xen/mm.h>
+#include <xen/cpu.h>
+#include <xen/delay.h>
 #include <xen/domain.h>
 #include <xen/domain_page.h>
-#include <xen/sched.h>
+#include <xen/init.h>
 #include <xen/irq.h>
-#include <xen/delay.h>
+#include <xen/kernel.h>
+#include <xen/mm.h>
+#include <xen/numa.h>
+#include <xen/sched.h>
+#include <xen/serial.h>
 #include <xen/softirq.h>
 #include <xen/tasklet.h>
-#include <xen/serial.h>
-#include <xen/numa.h>
-#include <xen/cpu.h>
 #include <xen/xvmalloc.h>
 
 #include <asm/apic.h>
-#include <asm/io_apic.h>
 #include <asm/cpuidle.h>
 #include <asm/current.h>
-#include <asm/mc146818rtc.h>
 #include <asm/desc.h>
 #include <asm/div64.h>
 #include <asm/flushtlb.h>
 #include <asm/guest.h>
+#include <asm/idt.h>
+#include <asm/io_apic.h>
+#include <asm/irq-vectors.h>
+#include <asm/mc146818rtc.h>
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/mtrr.h>
 #include <asm/prot-key.h>
 #include <asm/setup.h>
 #include <asm/spec_ctrl.h>
-#include <asm/time.h>
+#include <asm/stubs.h>
 #include <asm/tboot.h>
+#include <asm/time.h>
 #include <asm/trampoline.h>
-#include <asm/irq-vectors.h>
+#include <asm/traps.h>
 
 uint32_t __ro_after_init trampoline_phys;
 enum ap_boot_method __read_mostly ap_boot_method = AP_BOOT_NORMAL;
@@ -50,14 +53,16 @@ DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
 /* representing HT and core siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
 
-DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, scratch_cpumask);
+DEFINE_PER_CPU_CPUMASK_VAR(scratch_cpumask);
 static cpumask_t scratch_cpu0mask;
 
-DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, hpet_scratch_cpumask);
+DEFINE_PER_CPU_CPUMASK_VAR(hpet_scratch_cpumask);
 static cpumask_t hpet_scratch_cpu0mask;
 
-DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, send_ipi_cpumask);
+DEFINE_PER_CPU_CPUMASK_VAR(send_ipi_cpumask);
 static cpumask_t send_ipi_cpu0mask;
+
+DEFINE_PER_CPU_READ_MOSTLY(struct stubs, stubs);
 
 cpumask_t cpu_online_map __read_mostly;
 EXPORT_SYMBOL(cpu_online_map);
@@ -68,7 +73,8 @@ unsigned int __read_mostly nr_sockets;
 cpumask_t **__read_mostly socket_cpumask;
 static cpumask_t *secondary_socket_cpumask;
 
-struct cpuinfo_x86 cpu_data[NR_CPUS];
+struct cpuinfo_x86 __read_mostly cpu_data[NR_CPUS] =
+    { [0 ... NR_CPUS - 1] = { CPU_DATA_INIT() } };
 
 u32 x86_cpu_to_apicid[NR_CPUS] __read_mostly =
 	{ [0 ... NR_CPUS-1] = BAD_APICID };
@@ -88,7 +94,12 @@ void *stack_base[NR_CPUS];
 
 void initialize_cpu_data(unsigned int cpu)
 {
-    cpu_data[cpu] = boot_cpu_data;
+    struct cpuinfo_x86 c = boot_cpu_data;
+
+    /* Must not partially clear the BSP's collected data. */
+    if ( cpu || system_state > SYS_STATE_smp_boot )
+        reset_cpuinfo(&c, true);
+    cpu_data[cpu] = c;
 }
 
 static bool smp_store_cpu_info(unsigned int id)
@@ -228,8 +239,6 @@ static void smp_callin(void)
         cpu_relax();
 }
 
-static int booting_cpu;
-
 /* CPUs for which sibling maps can be computed. */
 static cpumask_t cpu_sibling_setup_map;
 
@@ -317,23 +326,12 @@ static void set_cpu_sibling_map(unsigned int cpu)
     }
 }
 
-void asmlinkage start_secondary(void *unused)
+void asmlinkage start_secondary(void)
 {
     struct cpu_info *info = get_cpu_info();
+    unsigned int cpu = smp_processor_id();
 
-    /*
-     * Dont put anything before smp_callin(), SMP booting is so fragile that we
-     * want to limit the things done here to the most necessary things.
-     */
-    unsigned int cpu = booting_cpu;
-
-    /* Critical region without IDT or TSS.  Any fault is deadly! */
-
-    set_current(idle_vcpu[cpu]);
-    this_cpu(curr_vcpu) = idle_vcpu[cpu];
-    this_cpu(pgtable_vcpu) = idle_vcpu[cpu];
     rdmsrl(MSR_EFER, this_cpu(efer));
-    init_shadow_spec_ctrl_state();
 
     /*
      * Just as during early bootstrap, it is convenient here to disable
@@ -352,14 +350,6 @@ void asmlinkage start_secondary(void *unused)
      * visible in cpu_online_map. Hence such a deadlock is not possible.
      */
     spin_debug_disable();
-
-    get_cpu_info()->use_pv_cr3 = false;
-    get_cpu_info()->xen_cr3 = 0;
-    get_cpu_info()->pv_cr3 = 0;
-
-    load_system_tables();
-
-    /* Full exception support from here on in. */
 
     if ( cpu_has_pks )
         wrpkrs_and_cache(0); /* Must be before setting CR4.PKS */
@@ -577,9 +567,7 @@ static int do_boot_cpu(int apicid, int cpu)
      */
     mtrr_save_state();
 
-    booting_cpu = cpu;
-
-    start_eip = bootsym_phys(trampoline_realmode_entry);
+    start_eip = bootsym_phys(entry_SIPI16);
 
     /* start_eip needs be page aligned, and below the 1M boundary. */
     if ( start_eip & ~0xff000 )
@@ -632,10 +620,12 @@ static int do_boot_cpu(int apicid, int cpu)
             smp_mb();
             if ( bootsym(trampoline_cpu_started) == 0xA5 )
                 /* trampoline started but...? */
-                printk("Stuck ??\n");
+                printk("APIC ID %#x (CPU%u) didn't finish start sequence\n",
+                       apicid, cpu);
             else
                 /* trampoline code not run */
-                printk("Not responding.\n");
+                printk("APIC ID %#x (CPU%u) didn't respond to SIPI\n",
+                       apicid, cpu);
         }
     }
 
@@ -893,7 +883,7 @@ int setup_cpu_root_pgt(unsigned int cpu)
         rc = clone_mapping(__va(__pa(stack_base[cpu])) + off, rpt);
 
     if ( !rc )
-        rc = clone_mapping(idt_tables[cpu], rpt);
+        rc = clone_mapping(per_cpu(idt, cpu), rpt);
     if ( !rc )
     {
         struct tss_page *ptr = &per_cpu(tss_page, cpu);
@@ -995,8 +985,7 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
      * In that case the socket number cannot be relied upon, but the respective
      * socket_cpumask[] slot also wouldn't have been set.
      */
-    if ( c[cpu].apicid != boot_cpu_data.apicid &&
-         cpumask_empty(socket_cpumask[socket]) )
+    if ( c[cpu].apicid != BAD_APICID && cpumask_empty(socket_cpumask[socket]) )
     {
         xfree(socket_cpumask[socket]);
         socket_cpumask[socket] = NULL;
@@ -1007,11 +996,7 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
     if ( remove )
     {
         if ( system_state != SYS_STATE_suspend )
-        {
-            c[cpu].phys_proc_id = XEN_INVALID_SOCKET_ID;
-            c[cpu].cpu_core_id = XEN_INVALID_CORE_ID;
-            c[cpu].compute_unit_id = INVALID_CUID;
-        }
+            reset_cpuinfo(&c[cpu], false);
 
         FREE_CPUMASK_VAR(per_cpu(cpu_sibling_mask, cpu));
         FREE_CPUMASK_VAR(per_cpu(cpu_core_mask, cpu));
@@ -1043,7 +1028,7 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
     if ( remove )
     {
         FREE_XENHEAP_PAGE(per_cpu(gdt, cpu));
-        FREE_XENHEAP_PAGE(idt_tables[cpu]);
+        FREE_XENHEAP_PAGE(per_cpu(idt, cpu));
 
         if ( stack_base[cpu] )
         {
@@ -1086,8 +1071,15 @@ static int cpu_smpboot_alloc(unsigned int cpu)
             goto out;
 
     info = get_cpu_info_from_stack((unsigned long)stack_base[cpu]);
+    memset(info, 0, sizeof(*info));
     info->processor_id = cpu;
     info->per_cpu_offset = __per_cpu_offset[cpu];
+
+    init_shadow_spec_ctrl_state(info);
+
+    info->current_vcpu = idle_vcpu[cpu]; /* set_current() */
+    per_cpu(curr_vcpu, cpu) = idle_vcpu[cpu];
+    per_cpu(pgtable_vcpu, cpu) = idle_vcpu[cpu];
 
     gdt = per_cpu(gdt, cpu) ?: alloc_xenheap_pages(0, memflags);
     if ( gdt == NULL )
@@ -1109,12 +1101,12 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     gdt[PER_CPU_GDT_ENTRY - FIRST_RESERVED_GDT_ENTRY].a = cpu;
 #endif
 
-    if ( idt_tables[cpu] == NULL )
-        idt_tables[cpu] = alloc_xenheap_pages(0, memflags);
-    if ( idt_tables[cpu] == NULL )
+    if ( per_cpu(idt, cpu) == NULL )
+        per_cpu(idt, cpu) = alloc_xenheap_pages(0, memflags);
+    if ( per_cpu(idt, cpu) == NULL )
         goto out;
-    memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES * sizeof(idt_entry_t));
-    disable_each_ist(idt_tables[cpu]);
+    memcpy(per_cpu(idt, cpu), bsp_idt, sizeof(bsp_idt));
+    disable_each_ist(per_cpu(idt, cpu));
 
     if ( !assign_stub_page(cpu) )
         goto out;
@@ -1180,6 +1172,17 @@ void __init smp_prepare_cpus(void)
     /* Setup boot CPU information */
     initialize_cpu_data(0); /* Final full version of the data */
     print_cpu_info(0);
+
+    /*
+     * Cache {,compat_}gdt_l1e for the BSP now that physically relocation is
+     * done.  It must be after physical relocation of Xen, and before the
+     * first context_switch().
+     */
+    this_cpu(gdt_l1e) =
+        l1e_from_pfn(virt_to_mfn(boot_gdt), __PAGE_HYPERVISOR_RW);
+    if ( IS_ENABLED(CONFIG_PV32) )
+        this_cpu(compat_gdt_l1e) =
+            l1e_from_pfn(virt_to_mfn(boot_compat_gdt), __PAGE_HYPERVISOR_RW);
 
     boot_cpu_physical_apicid = get_apic_id();
     x86_cpu_to_apicid[0] = boot_cpu_physical_apicid;
@@ -1402,6 +1405,7 @@ int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm)
 int __cpu_up(unsigned int cpu)
 {
     int apicid, ret;
+    s_time_t start;
 
     if ( (apicid = x86_cpu_to_apicid[cpu]) == BAD_APICID )
         return -ENODEV;
@@ -1420,10 +1424,18 @@ int __cpu_up(unsigned int cpu)
     time_latch_stamps();
 
     set_cpu_state(CPU_STATE_ONLINE);
+    start = NOW();
     while ( !cpu_online(cpu) )
     {
         cpu_relax();
         process_pending_softirqs();
+        if ( (NOW() - start) > SECONDS(5) )
+        {
+            /* AP is stuck, send NMI and panic. */
+            show_execution_state_nmi(cpumask_of(cpu), true);
+            panic("APIC ID %#x (CPU%u) stuck while starting up\n",
+                  apicid, cpu);
+        }
     }
 
     return 0;
@@ -1460,12 +1472,17 @@ void __init smp_intr_init(void)
      */
     for ( seridx = 0; seridx <= SERHND_IDX; seridx++ )
     {
+        struct irq_desc *desc;
+
         if ( (irq = serial_irq(seridx)) < 0 )
             continue;
         vector = alloc_hipriority_vector();
         per_cpu(vector_irq, cpu)[vector] = irq;
-        irq_to_desc(irq)->arch.vector = vector;
-        cpumask_copy(irq_to_desc(irq)->arch.cpu_mask, &cpu_online_map);
+
+        desc = irq_to_desc(irq);
+        desc->arch.vector = vector;
+        cpumask_copy(desc->arch.cpu_mask, cpumask_of(cpu));
+        cpumask_setall(desc->affinity);
     }
 
     /* Direct IPI vectors. */

@@ -23,8 +23,12 @@
 
 #include <xen/err.h>
 #include <xen/init.h>
+#include <xen/lib.h>
+#include <xen/string.h>
+#include <xen/xmalloc.h>
 
 #include <asm/msr.h>
+#include <asm/processor.h>
 #include <asm/system.h>
 
 #include "private.h"
@@ -282,8 +286,8 @@ static int cf_check intel_compare(
     return compare_revisions(old->rev, new->rev);
 }
 
-static int cf_check apply_microcode(const struct microcode_patch *patch,
-                                    unsigned int flags)
+static int cf_check intel_ucode_load(const struct microcode_patch *patch,
+                                     unsigned int flags)
 {
     uint64_t msr_content;
     unsigned int cpu = smp_processor_id();
@@ -329,7 +333,7 @@ static int cf_check apply_microcode(const struct microcode_patch *patch,
     return 0;
 }
 
-static struct microcode_patch *cf_check cpu_request_microcode(
+static struct microcode_patch *cf_check intel_ucode_parse(
     const void *buf, size_t size, bool make_copy)
 {
     int error = 0;
@@ -404,17 +408,20 @@ static const char __initconst intel_cpio_path[] =
     "kernel/x86/microcode/GenuineIntel.bin";
 
 static const struct microcode_ops __initconst_cf_clobber intel_ucode_ops = {
-    .cpu_request_microcode            = cpu_request_microcode,
     .collect_cpu_info                 = collect_cpu_info,
-    .apply_microcode                  = apply_microcode,
-    .compare                          = intel_compare,
-    .cpio_path                        = intel_cpio_path,
+    .parse                            = MICROCODE_OP(intel_ucode_parse),
+    .load                             = MICROCODE_OP(intel_ucode_load),
+    .compare                          = MICROCODE_OP(intel_compare),
+    .cpio_path                        = MICROCODE_OP(intel_cpio_path),
 };
 
 void __init ucode_probe_intel(struct microcode_ops *ops)
 {
     *ops = intel_ucode_ops;
 
+    if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) )
+        return;
+
     if ( !can_load_microcode() )
-        ops->apply_microcode = NULL;
+        ops->load = NULL;
 }

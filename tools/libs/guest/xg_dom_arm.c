@@ -70,7 +70,7 @@ static int alloc_magic_pages(struct xc_dom_image *dom)
     dom->xenstore_pfn = base + XENSTORE_PFN_OFFSET;
     dom->vuart_gfn = base + VUART_PFN_OFFSET;
 
-    xc_clear_domain_page(dom->xch, dom->guest_domid, dom->console_pfn);
+    xc_dom_console_init(dom->xch, dom->guest_domid, dom->console_pfn);
     xc_clear_domain_page(dom->xch, dom->guest_domid, dom->xenstore_pfn);
     xc_clear_domain_page(dom->xch, dom->guest_domid, base + MEMACCESS_PFN_OFFSET);
     xc_clear_domain_page(dom->xch, dom->guest_domid, dom->vuart_gfn);
@@ -364,12 +364,12 @@ static int meminit(struct xc_dom_image *dom)
 
     /* Convenient */
     const uint64_t kernbase = dom->kernel_seg.vstart;
-    const uint64_t kernend = ROUNDUP(dom->kernel_seg.vend, 21/*2MB*/);
+    const uint64_t kernend = ROUNDUP(dom->kernel_seg.vend, MB(2));
     const uint64_t kernsize = kernend - kernbase;
     const uint64_t dtb_size = dom->devicetree_blob ?
-        ROUNDUP(dom->devicetree_size, XC_PAGE_SHIFT) : 0;
+        ROUNDUP(dom->devicetree_size, XC_PAGE_SIZE) : 0;
     const uint64_t ramdisk_size = dom->modules[0].blob ?
-        ROUNDUP(dom->modules[0].size, XC_PAGE_SHIFT) : 0;
+        ROUNDUP(dom->modules[0].size, XC_PAGE_SIZE) : 0;
     const uint64_t modsize = dtb_size + ramdisk_size;
     const uint64_t ram128mb = bankbase[0] + (128<<20);
 
@@ -429,7 +429,7 @@ static int meminit(struct xc_dom_image *dom)
      * just before the kernel.
      *
      * If changing this then consider
-     * xen/arch/arm/kernel.c:place_modules as well.
+     * xen/arch/arm/kernel.c:place_dtb_initrd as well.
      */
     bank0end = bankbase[0] + ((uint64_t)dom->rambank_size[0] << XC_PAGE_SHIFT);
 

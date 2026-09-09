@@ -5,7 +5,6 @@
 #include <xen/lib.h>
 
 /* TODO: implement */
-static inline void vcpu_kick(struct vcpu *v) { BUG_ON("unimplemented"); }
 static inline void vcpu_mark_events_pending(struct vcpu *v) { BUG_ON("unimplemented"); }
 static inline void vcpu_update_evtchn_irq(struct vcpu *v) { BUG_ON("unimplemented"); }
 static inline void vcpu_block_unless_event_pending(struct vcpu *v) { BUG_ON("unimplemented"); }
@@ -17,9 +16,9 @@ static inline int vcpu_event_delivery_is_enabled(struct vcpu *v)
 }
 
 /* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
+static inline enum virq_type arch_get_virq_type(unsigned int virq)
 {
-    return true;
+    return VIRQ_GLOBAL;
 }
 
 static inline int local_events_need_delivery(void)

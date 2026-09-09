@@ -20,7 +20,7 @@
 static DEFINE_PER_CPU_READ_MOSTLY(u32, cpu_2_logical_apicid);
 static DEFINE_PER_CPU_READ_MOSTLY(cpumask_t *, cluster_cpus);
 static cpumask_t *cluster_cpus_spare;
-static DEFINE_PER_CPU(cpumask_var_t, scratch_mask);
+static DEFINE_PER_CPU_CPUMASK_VAR(scratch_mask);
 
 static inline u32 x2apic_cluster(unsigned int cpu)
 {
@@ -140,11 +140,7 @@ static void cf_check send_IPI_mask_x2apic_cluster(
 
 static const struct genapic __initconst_cf_clobber apic_x2apic_phys = {
     APIC_INIT("x2apic_phys", NULL),
-    .int_delivery_mode = dest_Fixed,
-    .int_dest_mode = 0 /* physical delivery */,
     .init_apic_ldr = init_apic_ldr_phys,
-    .vector_allocation_cpumask = vector_allocation_cpumask_phys,
-    .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
     .send_IPI_mask = send_IPI_mask_x2apic_phys,
     .send_IPI_self = send_IPI_self_x2apic
 };
@@ -158,15 +154,6 @@ static const struct genapic __initconst_cf_clobber apic_x2apic_phys = {
  */
 static const struct genapic __initconst_cf_clobber apic_x2apic_mixed = {
     APIC_INIT("x2apic_mixed", NULL),
-
-    /*
-     * The following fields are exclusively used by external interrupts and
-     * hence are set to use Physical destination mode handlers.
-     */
-    .int_delivery_mode = dest_Fixed,
-    .int_dest_mode = 0 /* physical delivery */,
-    .vector_allocation_cpumask = vector_allocation_cpumask_phys,
-    .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
 
     /*
      * The following fields are exclusively used by IPIs and hence are set to
@@ -220,9 +207,9 @@ static struct notifier_block x2apic_cpu_nfb = {
 static int8_t __initdata x2apic_phys = -1;
 boolean_param("x2apic_phys", x2apic_phys);
 
-enum {
+static enum {
    unset, physical, mixed
-} static __initdata x2apic_mode = unset;
+} x2apic_mode __initdata = unset;
 
 static int __init cf_check parse_x2apic_mode(const char *s)
 {
@@ -272,14 +259,11 @@ const struct genapic *__init apic_x2apic_probe(void)
 
 void __init check_x2apic_preenabled(void)
 {
-    u32 lo, hi;
-
     if ( !cpu_has_x2apic )
         return;
 
     /* Check whether x2apic mode was already enabled by the BIOS. */
-    rdmsr(MSR_APIC_BASE, lo, hi);
-    if ( lo & APIC_BASE_EXTD )
+    if ( rdmsr(MSR_APIC_BASE) & APIC_BASE_EXTD )
     {
         printk("x2APIC mode is already enabled by BIOS.\n");
         x2apic_enabled = 1;

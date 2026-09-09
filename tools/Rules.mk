@@ -11,6 +11,10 @@ XEN_FULLVERSION=$(shell env \
     XEN_VENDORVERSION=$(XEN_VENDORVERSION) \
     $(SHELL) $(XEN_ROOT)/version.sh --full $(XEN_ROOT)/xen/Makefile)
 
+PATH_FILES += Tools-paths.mk
+
+-include $(XEN_ROOT)/config/Tools-paths.mk
+
 export _INSTALL := $(INSTALL)
 INSTALL = $(XEN_ROOT)/tools/cross-install
 
@@ -134,11 +138,8 @@ endif
 
 CFLAGS_libxenlight += $(CFLAGS_libxenctrl)
 
-# Don't add -Werror if we are used by qemu-trad build system.
-ifndef BUILDING_QEMU_TRAD
 ifeq ($(CONFIG_WERROR),y)
 CFLAGS += -Werror
-endif
 endif
 
 ifeq ($(debug),y)

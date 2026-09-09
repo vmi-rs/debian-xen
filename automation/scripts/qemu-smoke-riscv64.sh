@@ -6,7 +6,8 @@ set -ex -o pipefail
 rm -f smoke.serial
 
 export TEST_CMD="qemu-system-riscv64 \
-    -M virt \
+    -M virt,aia=aplic-imsic \
+    -cpu rv64,svpbmt=on \
     -smp 1 \
     -nographic \
     -m 2g \
@@ -15,4 +16,4 @@ export TEST_CMD="qemu-system-riscv64 \
 export TEST_LOG="smoke.serial"
 export PASSED="All set up"
 
-./automation/scripts/console.exp | sed 's/\r\+$//'
+./automation/scripts/console.exp |& sed 's/\r\+$//'

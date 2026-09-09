@@ -326,6 +326,7 @@ static const struct {
     { { 0x00, 0x18 }, { 2, 2 }, T, R }, /* ltr */
     { { 0x00, 0x20 }, { 2, 2 }, T, R }, /* verr */
     { { 0x00, 0x28 }, { 2, 2 }, T, R }, /* verw */
+    { { 0x00, 0x30 }, { 0, 2 }, T, R, pfx_f2 }, /* lkgs */
     { { 0x01, 0x00 }, { 2, 2 }, F, W }, /* sgdt */
     { { 0x01, 0x08 }, { 2, 2 }, F, W }, /* sidt */
     { { 0x01, 0x10 }, { 2, 2 }, F, R }, /* lgdt */
@@ -1945,7 +1946,7 @@ static const struct evex {
     { { 0x83 }, 2, T, R, pfx_66, W1, Ln }, /* vpmultishiftqb */
     { { 0x88 }, 2, T, R, pfx_66, Wn, Ln }, /* vpexpandp{s,d} */
     { { 0x89 }, 2, T, R, pfx_66, Wn, Ln }, /* vpexpand{d,q} */
-    { { 0x8a }, 2, T, W, pfx_66, Wn, Ln }, /* vcompressp{s,d} */
+    { { 0x8a }, 2, T, W, pfx_66, Wn, Ln }, /* vpcompressp{s,d} */
     { { 0x8b }, 2, T, W, pfx_66, Wn, Ln }, /* vpcompress{d,q} */
     { { 0x8d }, 2, F, R, pfx_66, Wn, Ln }, /* vperm{b,w} */
     { { 0x8f }, 2, F, R, pfx_66, W0, Ln }, /* vpshufbitqmb */
@@ -2140,6 +2141,9 @@ static const struct evex {
     { { 0x56 }, 2, T, R, pfx_f2, W0, Ln }, /* vfcmaddcph */
     { { 0x57 }, 2, T, R, pfx_f3, W0, LIG }, /* vfmaddcsh */
     { { 0x57 }, 2, T, R, pfx_f2, W0, LIG }, /* vfcmaddcsh */
+    { { 0x80 }, 2, T, R, pfx_no, W0, L1 | L2 }, /* vbmacor16x16x16 */
+    { { 0x80 }, 2, T, R, pfx_no, W1, L1 | L2 }, /* vbmacxor16x16x16 */
+    { { 0x81 }, 2, T, R, pfx_no, W0, Ln }, /* vbitrev */
     { { 0x96 }, 2, T, R, pfx_66, W0, Ln }, /* vfmaddsub132ph */
     { { 0x97 }, 2, T, R, pfx_66, W0, Ln }, /* vfmsubadd132ph */
     { { 0x98 }, 2, T, R, pfx_66, W0, Ln }, /* vfmadd132ph */

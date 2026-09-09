@@ -139,7 +139,7 @@ void unmap_xenbus(void *interface)
 	munmap(interface, getpagesize());
 }
 
-evtchn_port_t get_xenbus_evtchn(void)
+static evtchn_port_t get_xenbus_evtchn(void)
 {
 	int fd;
 	int rc;
@@ -164,6 +164,20 @@ evtchn_port_t get_xenbus_evtchn(void)
 
 	close(fd);
 	return port;
+}
+
+/*
+ * dom0 xenstored uses get_xenbus_evtchn() to lookup with XENSTORED_PORT_DEV.
+ *
+ * Any other existing domains from dom0less/Hyperlaunch will have
+ * the event channel in the xenstore page, so lookup here isn't necessary.
+ */
+evtchn_port_t get_domain_evtchn(unsigned int domid)
+{
+	if (domid == store_domid)
+		return get_xenbus_evtchn();
+
+	return 0;
 }
 
 void *xenbus_map(void)
@@ -266,7 +280,7 @@ static void accept_connection(int sock)
 	conn = new_connection(&socket_funcs);
 	if (conn) {
 		conn->fd = fd;
-		conn->id = dom0_domid;
+		conn->id = store_domid;
 	} else
 		close(fd);
 }
@@ -406,6 +420,16 @@ int get_socket_fd(void)
 void set_socket_fd(int fd)
 {
 	sock = fd;
+}
+
+xenevtchn_handle *evtchn_fdopen(int fd)
+{
+	return xenevtchn_fdopen(NULL, fd, 0);
+}
+
+int evtchn_rebind(int port)
+{
+	return 0;
 }
 
 const char *xenstore_rundir(void)

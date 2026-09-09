@@ -16,32 +16,32 @@
  *    Mikael Pettersson    :    PM converted to driver model.
  */
 
-#include <xen/perfc.h>
+#include <xen/delay.h>
 #include <xen/errno.h>
 #include <xen/init.h>
+#include <xen/irq.h>
+#include <xen/kexec.h>
 #include <xen/mm.h>
 #include <xen/param.h>
+#include <xen/perfc.h>
 #include <xen/sched.h>
-#include <xen/irq.h>
-#include <xen/delay.h>
 #include <xen/smp.h>
 #include <xen/softirq.h>
 
+#include <asm/apic.h>
+#include <asm/atomic.h>
+#include <asm/flushtlb.h>
+#include <asm/genapic.h>
+#include <asm/guest.h>
+#include <asm/hardirq.h>
 #include <asm/io-ports.h>
+#include <asm/io_apic.h>
 #include <asm/irq-vectors.h>
+#include <asm/match-cpu.h>
 #include <asm/mc146818rtc.h>
 #include <asm/microcode.h>
-#include <asm/msr.h>
-#include <asm/atomic.h>
 #include <asm/mpspec.h>
-#include <asm/flushtlb.h>
-#include <asm/hardirq.h>
-#include <asm/apic.h>
-#include <asm/io_apic.h>
-#include <asm/genapic.h>
-
-#include <xen/kexec.h>
-#include <asm/guest.h>
+#include <asm/msr.h>
 #include <asm/nmi.h>
 #include <asm/time.h>
 
@@ -91,23 +91,6 @@ static enum apic_mode apic_boot_mode = APIC_MODE_INVALID;
 bool __read_mostly x2apic_enabled;
 bool __read_mostly directed_eoi_enabled;
 
-static int modern_apic(void)
-{
-    unsigned int lvr, version;
-    /* AMD systems use old APIC versions, so check the CPU */
-    if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
-        boot_cpu_data.x86 >= 0xf)
-        return 1;
-
-    /* Hygon systems use modern APIC */
-    if (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
-        return 1;
-
-    lvr = apic_read(APIC_LVR);
-    version = GET_APIC_VERSION(lvr);
-    return version >= 0x14;
-}
-
 /*
  * 'what should we do if we get a hw irq event on an illegal vector'.
  * each architecture has to answer this themselves.
@@ -132,14 +115,6 @@ void ack_bad_irq(unsigned int irq)
 static bool __read_mostly using_apic_timer;
 
 static bool __read_mostly enabled_via_apicbase;
-
-int get_physical_broadcast(void)
-{
-    if (modern_apic())
-        return 0xff;
-    else
-        return 0xf;
-}
 
 int get_maxlvt(void)
 {
@@ -404,21 +379,6 @@ int __init verify_local_APIC(void)
     return 1;
 }
 
-void __init sync_Arb_IDs(void)
-{
-    /* Unsupported on P4 - see Intel Dev. Manual Vol. 3, Ch. 8.6.1
-       And not needed on AMD */
-    if (modern_apic())
-        return;
-    /*
-     * Wait for idle.
-     */
-    apic_wait_icr_idle();
-
-    apic_printk(APIC_DEBUG, "Synchronizing Arb IDs.\n");
-    apic_write(APIC_ICR, APIC_DEST_ALLINC | APIC_INT_LEVELTRIG | APIC_DM_INIT);
-}
-
 /*
  * An initial setup of the virtual wire mode.
  */
@@ -446,7 +406,7 @@ void __init init_bsp_APIC(void)
     value |= APIC_SPIV_APIC_ENABLED;
     
     /* This bit is reserved on P4/Xeon and should be cleared */
-    if ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) && (boot_cpu_data.x86 == 15))
+    if ((boot_cpu_data.vendor == X86_VENDOR_INTEL) && (boot_cpu_data.family == 15))
         value &= ~APIC_SPIV_FOCUS_DISABLED;
     else
         value |= APIC_SPIV_FOCUS_DISABLED;
@@ -761,7 +721,7 @@ static int __init detect_init_APIC (void)
     if (enable_local_apic < 0)
         return -1;
 
-    if ( rdmsr_safe(MSR_APIC_BASE, msr_content) )
+    if ( rdmsr_safe(MSR_APIC_BASE, &msr_content) )
     {
         printk("No local APIC present\n");
         return -1;
@@ -1048,88 +1008,41 @@ static void setup_APIC_timer(void)
     local_irq_restore(flags);
 }
 
-#define DEADLINE_MODEL_MATCH(m, fr) \
-    { .vendor = X86_VENDOR_INTEL, .family = 6, .model = (m), \
-      .feature = X86_FEATURE_TSC_DEADLINE, \
-      .driver_data = (void *)(unsigned long)(fr) }
-
-static unsigned int __init hsx_deadline_rev(void)
-{
-    switch ( boot_cpu_data.x86_mask )
-    {
-    case 0x02: return 0x3a; /* EP */
-    case 0x04: return 0x0f; /* EX */
-    }
-
-    return ~0U;
-}
-
-static unsigned int __init bdx_deadline_rev(void)
-{
-    switch ( boot_cpu_data.x86_mask )
-    {
-    case 0x02: return 0x00000011;
-    case 0x03: return 0x0700000e;
-    case 0x04: return 0x0f00000c;
-    case 0x05: return 0x0e000003;
-    }
-
-    return ~0U;
-}
-
-static unsigned int __init skx_deadline_rev(void)
-{
-    switch ( boot_cpu_data.x86_mask )
-    {
-    case 0x00 ... 0x02: return ~0U;
-    case 0x03: return 0x01000136;
-    case 0x04: return 0x02000014;
-    }
-
-    return 0;
-}
-
-static const struct x86_cpu_id __initconstrel deadline_match[] = {
-    DEADLINE_MODEL_MATCH(0x3c, 0x22),             /* Haswell */
-    DEADLINE_MODEL_MATCH(0x3f, hsx_deadline_rev), /* Haswell EP/EX */
-    DEADLINE_MODEL_MATCH(0x45, 0x20),             /* Haswell D */
-    DEADLINE_MODEL_MATCH(0x46, 0x17),             /* Haswell H */
-
-    DEADLINE_MODEL_MATCH(0x3d, 0x25),             /* Broadwell */
-    DEADLINE_MODEL_MATCH(0x47, 0x17),             /* Broadwell H */
-    DEADLINE_MODEL_MATCH(0x4f, 0x0b000020),       /* Broadwell EP/EX */
-    DEADLINE_MODEL_MATCH(0x56, bdx_deadline_rev), /* Broadwell D */
-
-    DEADLINE_MODEL_MATCH(0x4e, 0xb2),             /* Skylake M */
-    DEADLINE_MODEL_MATCH(0x55, skx_deadline_rev), /* Skylake X */
-    DEADLINE_MODEL_MATCH(0x5e, 0xb2),             /* Skylake D */
-
-    DEADLINE_MODEL_MATCH(0x8e, 0x52),             /* Kabylake M */
-    DEADLINE_MODEL_MATCH(0x9e, 0x52),             /* Kabylake D */
-
-    {}
-};
-
 static void __init check_deadline_errata(void)
 {
+    static const struct x86_cpu_id __initconst deadline_match[] = {
+        X86_MATCH_VFM (INTEL_HASWELL,          0x22),
+        X86_MATCH_VFMS(INTEL_HASWELL_X,   0x2, 0x3a),
+        X86_MATCH_VFMS(INTEL_HASWELL_X,   0x4, 0x0f),
+        X86_MATCH_VFM (INTEL_HASWELL_L,        0x20),
+        X86_MATCH_VFM (INTEL_HASWELL_G,        0x17),
+        X86_MATCH_VFM (INTEL_BROADWELL,        0x25),
+        X86_MATCH_VFM (INTEL_BROADWELL_G,      0x17),
+        X86_MATCH_VFM (INTEL_BROADWELL_X,      0x0b000020),
+        X86_MATCH_VFMS(INTEL_BROADWELL_D, 0x2, 0x00000011),
+        X86_MATCH_VFMS(INTEL_BROADWELL_D, 0x3, 0x0700000e),
+        X86_MATCH_VFMS(INTEL_BROADWELL_D, 0x4, 0x0f00000c),
+        X86_MATCH_VFMS(INTEL_BROADWELL_D, 0x5, 0x0e000003),
+        X86_MATCH_VFM (INTEL_SKYLAKE_L,        0xb2),
+        X86_MATCH_VFM (INTEL_SKYLAKE,          0xb2),
+        X86_MATCH_VFMS(INTEL_SKYLAKE_X,   0x3, 0x01000136),
+        X86_MATCH_VFMS(INTEL_SKYLAKE_X,   0x4, 0x02000014),
+        X86_MATCH_VFM (INTEL_KABYLAKE_L,       0x52),
+        X86_MATCH_VFM (INTEL_KABYLAKE,         0x52),
+        {}
+    };
+
     const struct x86_cpu_id *m;
     unsigned int rev;
 
-    if ( cpu_has_hypervisor )
+    if ( cpu_has_hypervisor || !boot_cpu_has(X86_FEATURE_TSC_DEADLINE) )
         return;
 
     m = x86_match_cpu(deadline_match);
     if ( !m )
         return;
 
-    /*
-     * Function pointers will have the MSB set due to address layout,
-     * immediate revisions will not.
-     */
-    if ( (long)m->driver_data < 0 )
-        rev = ((unsigned int (*)(void))(m->driver_data))();
-    else
-        rev = (unsigned long)m->driver_data;
+    rev = (unsigned long)m->driver_data;
 
     if ( this_cpu(cpu_sig).rev >= rev )
         return;
@@ -1313,15 +1226,9 @@ int reprogram_timer(s_time_t timeout)
     if ( timeout && ((expire = timeout - NOW()) > 0) )
     {
         unsigned long product;
-        bool carry;
 
         apic_tmict = UINT32_MAX;
-        asm ( "mul %[expire]\n\t"
-              ASM_FLAG_OUT(, "setc %[cf]")
-              : "=&a" (product), [cf] ASM_FLAG_OUT("=@ccc", "=qm") (carry)
-              : "0" ((unsigned long)bus_scale), [expire] "r" (expire)
-              : "rdx" );
-        if ( !carry &&
+        if ( !__builtin_umull_overflow(bus_scale, expire, &product) &&
              (product >>= BUS_SCALE_SHIFT) < apic_tmict )
             apic_tmict = product;
     }
@@ -1418,8 +1325,8 @@ static void cf_check error_interrupt(void)
 
 static void cf_check pmu_interrupt(void)
 {
-    ack_APIC_irq();
     vpmu_do_interrupt();
+    ack_APIC_irq();
 }
 
 void __init apic_intr_init(void)

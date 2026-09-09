@@ -214,37 +214,37 @@ output_raw(const char *data, int len)
 }
 
 static void
-usage(enum mode mode, int incl_mode, const char *progname)
+usage(int err_val, enum mode mode, int incl_mode, const char *progname)
 {
     const char *mstr = NULL;
 
     switch (mode) {
     case MODE_unknown:
-	errx(1, "Usage: %s <mode> [-h] [...]", progname);
+	errx(err_val, "Usage: %s <mode> [-h] [...]", progname);
     case MODE_read:
 	mstr = incl_mode ? "read " : "";
-	errx(1, "Usage: %s %s[-h] [-p] [-R] key [...]", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-p] [-R] key [...]", progname, mstr);
     case MODE_write:
 	mstr = incl_mode ? "write " : "";
-	errx(1, "Usage: %s %s[-h] [-R] key value [...]", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-R] key value [...]", progname, mstr);
     case MODE_rm:
 	mstr = incl_mode ? "rm " : "";
-	errx(1, "Usage: %s %s[-h] [-t] key [...]", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-t] key [...]", progname, mstr);
     case MODE_exists:
 	mstr = incl_mode ? "exists " : "";
-	/* fallthrough */
+	errx(err_val, "Usage: %s %s[-h] key", progname, mstr);
     case MODE_list:
 	mstr = mstr ? : incl_mode ? "list " : "";
-	errx(1, "Usage: %s %s[-h] [-p] key [...]", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-p] key [...]", progname, mstr);
     case MODE_ls:
 	mstr = mstr ? : incl_mode ? "ls " : "";
-	errx(1, "Usage: %s %s[-h] [-f] [-p] [path]", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-f] [-p] [path]", progname, mstr);
     case MODE_chmod:
 	mstr = incl_mode ? "chmod " : "";
-	errx(1, "Usage: %s %s[-h] [-u] [-r] key <mode [modes...]>", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-u] [-r] key <mode [modes...]>", progname, mstr);
     case MODE_watch:
 	mstr = incl_mode ? "watch " : "";
-	errx(1, "Usage: %s %s[-h] [-n NR] key", progname, mstr);
+	errx(err_val, "Usage: %s %s[-h] [-n NR] key", progname, mstr);
     }
 }
 
@@ -445,7 +445,7 @@ do_watch(struct xs_handle *xsh, int max_events)
 static int
 perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh,
         xs_transaction_t xth, int prefix, int tidy, int upto, int recurse, int nr_watches,
-        int raw)
+        int raw, int depth)
 {
     switch (mode) {
     case MODE_ls:
@@ -568,13 +568,17 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
         case MODE_list: {
             unsigned int i, num;
             char **list = xs_directory(xsh, xth, argv[optind], &num);
+            const char *pref = argv[optind];
+
             if (list == NULL) {
                 warnx("could not list path %s", argv[optind]);
                 return 1;
             }
+            if (prefix && !strcmp(pref, "/"))
+                pref = "";
             for (i = 0; i < num; i++) {
                 if (prefix)
-                    output("%s/", argv[optind]);
+                    output("%s/", pref);
                 output("%s\n", list[i]);
             }
             free(list);
@@ -623,8 +627,11 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
             for (; argv[optind]; optind++) {
                 const char *w = argv[optind];
 
-                if (!xs_watch(xsh, w, w))
+                if (depth < 0 && !xs_watch(xsh, w, w))
                     errx(1, "Unable to add watch on %s\n", w);
+                if (depth >= 0 && !xs_watch_depth(xsh, w, w, depth))
+                    errx(1, "Unable to add watch on %s with depth %d\n", w,
+                         depth);
             }
             do_watch(xsh, nr_watches);
         }
@@ -672,6 +679,7 @@ main(int argc, char **argv)
     int nr_watches = -1;
     int transaction;
     int raw = 0;
+    int depth = -1;
     struct winsize ws;
     enum mode mode;
 
@@ -685,7 +693,7 @@ main(int argc, char **argv)
 	command = command + strlen("xenstore-");
     }
     else if (argc < 2)
-	usage(MODE_unknown, 0, argv[0]);
+	usage(1, MODE_unknown, 0, argv[0]);
     else
     {
 	command = argv[1];
@@ -705,17 +713,18 @@ main(int argc, char **argv)
 	    {"recurse", 0, 0, 'r'}, /* MODE_chmod */
 	    {"number",  1, 0, 'n'}, /* MODE_watch */
 	    {"raw",     0, 0, 'R'}, /* MODE_read || MODE_write */
+	    {"depth",   1, 0, 'd'}, /* MODE_watch */
 	    {0, 0, 0, 0}
 	};
 
-	c = getopt_long(argc - switch_argv, argv + switch_argv, "hfspturn:R",
+	c = getopt_long(argc - switch_argv, argv + switch_argv, "hfspturn:Rd:",
 			long_options, &index);
 	if (c == -1)
 	    break;
 
 	switch (c) {
 	case 'h':
-	    usage(mode, switch_argv, argv[0]);
+	    usage(0, mode, switch_argv, argv[0]);
 	    /* NOTREACHED */
         case 'f':
 	    if ( mode == MODE_ls ) {
@@ -723,44 +732,50 @@ main(int argc, char **argv)
 		desired_width = 0;
 		show_whole_path = 1;
 	    } else {
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    }
             break;
 	case 'p':
 	    if ( mode == MODE_read || mode == MODE_list || mode == MODE_ls )
 		prefix = 1;
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	case 't':
 	    if ( mode == MODE_rm )
 		tidy = 1;
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	case 'u':
 	    if ( mode == MODE_chmod )
 		upto = 1;
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	case 'r':
 	    if ( mode == MODE_chmod )
 		recurse = 1;
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	case 'n':
 	    if ( mode == MODE_watch )
 		nr_watches = atoi(optarg);
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	case 'R':
 	    if ( mode == MODE_read || mode == MODE_write )
 		raw = 1;
 	    else
-		usage(mode, switch_argv, argv[0]);
+		usage(1, mode, switch_argv, argv[0]);
+	    break;
+	case 'd':
+	    if ( mode == MODE_watch )
+		depth = atoi(optarg);
+	    else
+		usage(1, mode, switch_argv, argv[0]);
 	    break;
 	}
     }
@@ -770,13 +785,13 @@ main(int argc, char **argv)
 	break;
     case MODE_write:
 	if ((argc - switch_argv - optind) % 2 == 1) {
-	    usage(mode, switch_argv, argv[0]);
+	    usage(1, mode, switch_argv, argv[0]);
 	    /* NOTREACHED */
 	}
 	/* DROP-THRU */
     default:
 	if (optind == argc - switch_argv) {
-	    usage(mode, switch_argv, argv[0]);
+	    usage(1, mode, switch_argv, argv[0]);
 	    /* NOTREACHED */
 	}
     }
@@ -815,7 +830,7 @@ again:
 	    errx(1, "couldn't start transaction");
     }
 
-    ret = perform(mode, optind, argc - switch_argv, argv + switch_argv, xsh, xth, prefix, tidy, upto, recurse, nr_watches, raw);
+    ret = perform(mode, optind, argc - switch_argv, argv + switch_argv, xsh, xth, prefix, tidy, upto, recurse, nr_watches, raw, depth);
 
     if (transaction && !xs_transaction_end(xsh, xth, ret)) {
 	if (ret == 0 && errno == EAGAIN) {

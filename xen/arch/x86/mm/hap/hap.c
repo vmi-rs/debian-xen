@@ -36,13 +36,18 @@
 /*          HAP VRAM TRACKING SUPPORT           */
 /************************************************/
 
+struct hap_dirty_vram {
+    unsigned long begin_pfn;
+    unsigned long end_pfn;
+};
+
 /*
  * hap_track_dirty_vram()
  * Create the domain's dv_dirty_vram struct on demand.
  * Create a dirty vram range on demand when some [begin_pfn:begin_pfn+nr] is
  * first encountered.
  * Collect the guest_dirty bitmask, a bit mask of the dirty vram pages, by
- * calling paging_log_dirty_range(), which interrogates each vram
+ * calling p2m_log_dirty_range(), which interrogates each vram
  * page's p2m type looking for pages that have been made writable.
  */
 
@@ -52,7 +57,7 @@ int hap_track_dirty_vram(struct domain *d,
                          XEN_GUEST_HANDLE(void) guest_dirty_bitmap)
 {
     long rc = 0;
-    struct sh_dirty_vram *dirty_vram;
+    struct hap_dirty_vram *dirty_vram;
     uint8_t *dirty_bitmap = NULL;
 
     if ( nr_frames )
@@ -66,17 +71,17 @@ int hap_track_dirty_vram(struct domain *d,
 
         paging_lock(d);
 
-        dirty_vram = d->arch.hvm.dirty_vram;
+        dirty_vram = d->arch.hvm.dirty_vram.hap;
         if ( !dirty_vram )
         {
             rc = -ENOMEM;
-            if ( (dirty_vram = xzalloc(struct sh_dirty_vram)) == NULL )
+            if ( (dirty_vram = xzalloc(struct hap_dirty_vram)) == NULL )
             {
                 paging_unlock(d);
                 goto out;
             }
 
-            d->arch.hvm.dirty_vram = dirty_vram;
+            d->arch.hvm.dirty_vram.hap = dirty_vram;
         }
 
         if ( begin_pfn != dirty_vram->begin_pfn ||
@@ -119,7 +124,7 @@ int hap_track_dirty_vram(struct domain *d,
             p2m_flush_hardware_cached_dirty(d);
 
             /* get the bitmap */
-            paging_log_dirty_range(d, begin_pfn, nr_frames, dirty_bitmap);
+            p2m_log_dirty_range(d, begin_pfn, nr_frames, dirty_bitmap);
 
             domain_unpause(d);
         }
@@ -132,7 +137,7 @@ int hap_track_dirty_vram(struct domain *d,
     {
         paging_lock(d);
 
-        dirty_vram = d->arch.hvm.dirty_vram;
+        dirty_vram = d->arch.hvm.dirty_vram.hap;
         if ( dirty_vram )
         {
             /*
@@ -142,7 +147,7 @@ int hap_track_dirty_vram(struct domain *d,
             begin_pfn = dirty_vram->begin_pfn;
             nr_frames = dirty_vram->end_pfn - dirty_vram->begin_pfn;
             xfree(dirty_vram);
-            d->arch.hvm.dirty_vram = NULL;
+            d->arch.hvm.dirty_vram.hap = NULL;
         }
 
         paging_unlock(d);
@@ -494,6 +499,7 @@ int hap_enable(struct domain *d, u32 mode)
            goto out;
     }
 
+#ifdef CONFIG_ALTP2M
     if ( hvm_altp2m_supported() )
     {
         /* Init alternate p2m data */
@@ -515,7 +521,7 @@ int hap_enable(struct domain *d, u32 mode)
             d->arch.altp2m_visible_eptp[i] = mfn_x(INVALID_MFN);
         }
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             rv = p2m_alloc_table(d->arch.altp2m_p2m[i]);
             if ( rv != 0 )
@@ -524,6 +530,7 @@ int hap_enable(struct domain *d, u32 mode)
 
         d->arch.altp2m_active = false;
     }
+#endif /* CONFIG_ALTP2M */
 
     /* Now let other users see the new mode */
     d->arch.paging.mode = mode | PG_HAP_enable;
@@ -537,9 +544,11 @@ void hap_final_teardown(struct domain *d)
 {
     unsigned int i;
 
+#ifdef CONFIG_ALTP2M
     if ( hvm_altp2m_supported() )
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
             p2m_teardown(d->arch.altp2m_p2m[i], true, NULL);
+#endif
 
     /* Destroy nestedp2m's first */
     for (i = 0; i < MAX_NESTEDP2M; i++) {
@@ -578,6 +587,7 @@ void hap_teardown(struct domain *d, bool *preempted)
     for_each_vcpu ( d, v )
         hap_vcpu_teardown(v);
 
+#ifdef CONFIG_ALTP2M
     /* Leave the root pt in case we get further attempts to modify the p2m. */
     if ( hvm_altp2m_supported() )
     {
@@ -590,13 +600,14 @@ void hap_teardown(struct domain *d, bool *preempted)
         FREE_XENHEAP_PAGE(d->arch.altp2m_eptp);
         FREE_XENHEAP_PAGE(d->arch.altp2m_visible_eptp);
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             p2m_teardown(d->arch.altp2m_p2m[i], false, preempted);
             if ( preempted && *preempted )
                 return;
         }
     }
+#endif
 
     /* Destroy nestedp2m's after altp2m. */
     for ( i = 0; i < MAX_NESTEDP2M; i++ )
@@ -624,7 +635,7 @@ void hap_teardown(struct domain *d, bool *preempted)
 
     d->arch.paging.mode &= ~PG_log_dirty;
 
-    XFREE(d->arch.hvm.dirty_vram);
+    XFREE(d->arch.hvm.dirty_vram.hap);
 
 out:
     paging_unlock(d);
@@ -803,15 +814,33 @@ static void cf_check hap_update_paging_modes(struct vcpu *v)
 static void cf_check
 hap_write_p2m_entry_post(struct p2m_domain *p2m, unsigned int oflags)
 {
-    struct domain *d = p2m->domain;
+    if ( !(oflags & _PAGE_PRESENT) )
+        return;
 
-    if ( oflags & _PAGE_PRESENT )
+    if ( unlikely(!p2m->defer_flush) )
+    {
+        const struct domain *d = p2m->domain;
+
+        ASSERT_UNREACHABLE();
         guest_flush_tlb_mask(d, d->dirty_cpumask);
+        return;
+    }
+
+    p2m->need_flush = true;
+}
+
+static void cf_check
+hap_p2m_tlb_flush(struct p2m_domain *p2m)
+{
+    const struct domain *d = p2m->domain;
+
+    guest_flush_tlb_mask(d, d->dirty_cpumask);
 }
 
 void hap_p2m_init(struct p2m_domain *p2m)
 {
     p2m->write_p2m_entry_post = hap_write_p2m_entry_post;
+    p2m->tlb_flush = hap_p2m_tlb_flush;
 }
 
 static unsigned long cf_check hap_gva_to_gfn_real_mode(

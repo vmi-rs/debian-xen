@@ -4,7 +4,6 @@
  * (C) 2004      - Mark Williamson - Intel Research Cambridge
  ****************************************************************************
  *
- *        File: common/schedule.c
  *      Author: Rolf Neugebauer & Keir Fraser
  *              Updated for generic API by Mark Williamson
  *
@@ -326,15 +325,35 @@ void vcpu_runstate_get(const struct vcpu *v,
     }
 }
 
+uint64_t vcpu_runstate_get_running(const struct vcpu *v)
+{
+    struct seqcount seq = SEQCNT_ZERO();
+    const struct seqcount *s = v == current ? &seq : &v->runstate_seq;
+    unsigned int count;
+    uint64_t running;
+    s_time_t delta;
+
+    do {
+        count = read_seqcount_begin(s);
+
+        running = v->runstate.time[RUNSTATE_running];
+        delta = v->runstate.state == RUNSTATE_running
+                ? NOW() - v->runstate.state_entry_time
+                : 0;
+    } while ( read_seqcount_retry(s, count) );
+
+    if ( delta > 0 )
+        running += delta;
+
+    return running;
+}
+
 uint64_t get_cpu_idle_time(unsigned int cpu)
 {
-    struct vcpu_runstate_info state = { 0 };
-    const struct vcpu *v = idle_vcpu[cpu];
-
     if ( cpu_online(cpu) && get_sched_res(cpu) )
-        vcpu_runstate_get(v, &state);
+        return vcpu_runstate_get_running(idle_vcpu[cpu]);
 
-    return state.time[RUNSTATE_running];
+    return 0;
 }
 
 /*
@@ -635,7 +654,6 @@ int sched_init_vcpu(struct vcpu *v)
 static void vcpu_move_irqs(struct vcpu *v)
 {
     arch_move_irqs(v);
-    evtchn_move_pirqs(v);
 }
 
 static void sched_move_irqs(const struct sched_unit *unit)
@@ -949,6 +967,9 @@ void vcpu_sleep_sync(struct vcpu *v)
 
     while ( !vcpu_runnable(v) && v->is_running )
         cpu_relax();
+
+    /* Sync state /after/ observing the running flag clear. */
+    smp_rmb();
 
     sync_vcpu_execstate(v);
 }
@@ -1396,11 +1417,6 @@ int vcpu_set_hard_affinity(struct vcpu *v, const cpumask_t *affinity)
     return vcpu_set_affinity(v, affinity, v->sched_unit->cpu_hard_affinity);
 }
 
-static int vcpu_set_soft_affinity(struct vcpu *v, const cpumask_t *affinity)
-{
-    return vcpu_set_affinity(v, affinity, v->sched_unit->cpu_soft_affinity);
-}
-
 /* Block the currently-executing domain until a pertinent event occurs. */
 void vcpu_block(void)
 {
@@ -1424,7 +1440,7 @@ void vcpu_block(void)
     }
 }
 
-static void vcpu_block_enable_events(void)
+void vcpu_block_enable_events(void)
 {
     local_event_delivery_enable();
     vcpu_block();
@@ -1527,12 +1543,19 @@ long vcpu_yield(void)
 
 static void cf_check domain_watchdog_timeout(void *data)
 {
-    struct domain *d = data;
+    /*
+     * The data parameter encodes the watchdog id in the low bits of
+     * the domain pointer.
+     */
+    struct domain *d = _p((unsigned long)data & PAGE_MASK);
+    unsigned int id = (unsigned long)data & ~PAGE_MASK;
+
+    BUILD_BUG_ON(alignof(*d) < PAGE_SIZE);
 
     if ( d->is_shutting_down || d->is_dying )
         return;
 
-    printk("Watchdog timer fired for domain %u\n", d->domain_id);
+    printk("Watchdog timer %u fired for %pd\n", id, d);
     domain_shutdown(d, SHUTDOWN_watchdog);
 }
 
@@ -1586,7 +1609,17 @@ void watchdog_domain_init(struct domain *d)
     d->watchdog_inuse_map = 0;
 
     for ( i = 0; i < NR_DOMAIN_WATCHDOG_TIMERS; i++ )
-        init_timer(&d->watchdog_timer[i], domain_watchdog_timeout, d, 0);
+    {
+        void *data = d;
+
+        BUILD_BUG_ON(NR_DOMAIN_WATCHDOG_TIMERS > alignof(*d));
+
+        /*
+         * For the timer callback parameter, encode the watchdog id in
+         * the low bits of the domain pointer.
+         */
+        init_timer(&d->watchdog_timer[i], domain_watchdog_timeout, data + i, 0);
+    }
 }
 
 void watchdog_domain_destroy(struct domain *d)
@@ -1737,8 +1770,9 @@ int vcpu_affinity_domctl(struct domain *d, uint32_t cmd,
         {
             ret = xenctl_bitmap_to_bitmap(cpumask_bits(new_affinity),
                                           &vcpuaff->cpumap_soft, nr_cpu_ids);
-            if ( !ret)
-                ret = vcpu_set_soft_affinity(v, new_affinity);
+            if ( !ret )
+                ret = vcpu_set_affinity(v, new_affinity,
+                                        v->sched_unit->cpu_soft_affinity);
             if ( ret )
             {
                 /*
@@ -2043,11 +2077,13 @@ long do_set_timer_op(s_time_t timeout)
     return 0;
 }
 
+#ifdef CONFIG_SYSCTL
 /* scheduler_id - fetch ID of current scheduler */
 int scheduler_id(void)
 {
     return operations.sched_id;
 }
+#endif
 
 /* Adjust scheduling parameter for a given domain. */
 long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
@@ -2080,6 +2116,7 @@ long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
     return ret;
 }
 
+#ifdef CONFIG_SYSCTL
 long sched_adjust_global(struct xen_sysctl_scheduler_op *op)
 {
     struct cpupool *pool;
@@ -2104,6 +2141,7 @@ long sched_adjust_global(struct xen_sysctl_scheduler_op *op)
 
     return rc;
 }
+#endif /* CONFIG_SYSCTL */
 
 static void vcpu_periodic_timer_work_locked(struct vcpu *v)
 {
@@ -2275,11 +2313,13 @@ static struct sched_unit *do_schedule(struct sched_unit *prev, s_time_t now,
 
 static void vcpu_context_saved(struct vcpu *vprev, struct vcpu *vnext)
 {
-    /* Clear running flag /after/ writing context to memory. */
-    smp_wmb();
-
     if ( vprev != vnext )
+    {
+        /* Clear running flag /after/ writing context to memory. */
+        smp_wmb();
+
         vprev->is_running = false;
+    }
 }
 
 static void unit_context_saved(struct sched_resource *sr)

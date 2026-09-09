@@ -938,6 +938,35 @@ return fmt.Errorf("converting field Vcpus: %v", err)
  return nil
  }
 
+// NewArmSci returns an instance of ArmSci initialized with defaults.
+func NewArmSci() (*ArmSci, error) {
+var (
+x ArmSci
+xc C.libxl_arm_sci)
+
+C.libxl_arm_sci_init(&xc)
+defer C.libxl_arm_sci_dispose(&xc)
+
+if err := x.fromC(&xc); err != nil {
+return nil, err }
+
+return &x, nil}
+
+func (x *ArmSci) fromC(xc *C.libxl_arm_sci) error {
+ x.Type = ArmSciType(xc._type)
+
+ return nil}
+
+func (x *ArmSci) toC(xc *C.libxl_arm_sci) (err error){defer func(){
+if err != nil{
+C.libxl_arm_sci_dispose(xc)}
+}()
+
+xc._type = C.libxl_arm_sci_type(x.Type)
+
+ return nil
+ }
+
 // NewRdmReserve returns an instance of RdmReserve initialized with defaults.
 func NewRdmReserve() (*RdmReserve, error) {
 var (
@@ -965,6 +994,84 @@ C.libxl_rdm_reserve_dispose(xc)}
 
 xc.strategy = C.libxl_rdm_reserve_strategy(x.Strategy)
 xc.policy = C.libxl_rdm_reserve_policy(x.Policy)
+
+ return nil
+ }
+
+// NewXsQuotaItem returns an instance of XsQuotaItem initialized with defaults.
+func NewXsQuotaItem() (*XsQuotaItem, error) {
+var (
+x XsQuotaItem
+xc C.libxl_xs_quota_item)
+
+C.libxl_xs_quota_item_init(&xc)
+defer C.libxl_xs_quota_item_dispose(&xc)
+
+if err := x.fromC(&xc); err != nil {
+return nil, err }
+
+return &x, nil}
+
+func (x *XsQuotaItem) fromC(xc *C.libxl_xs_quota_item) error {
+ x.Name = C.GoString(xc.name)
+x.Val = uint32(xc.val)
+
+ return nil}
+
+func (x *XsQuotaItem) toC(xc *C.libxl_xs_quota_item) (err error){defer func(){
+if err != nil{
+C.libxl_xs_quota_item_dispose(xc)}
+}()
+
+if x.Name != "" {
+xc.name = C.CString(x.Name)}
+xc.val = C.uint32_t(x.Val)
+
+ return nil
+ }
+
+// NewXsQuotaList returns an instance of XsQuotaList initialized with defaults.
+func NewXsQuotaList() (*XsQuotaList, error) {
+var (
+x XsQuotaList
+xc C.libxl_xs_quota_list)
+
+C.libxl_xs_quota_list_init(&xc)
+defer C.libxl_xs_quota_list_dispose(&xc)
+
+if err := x.fromC(&xc); err != nil {
+return nil, err }
+
+return &x, nil}
+
+func (x *XsQuotaList) fromC(xc *C.libxl_xs_quota_list) error {
+ x.Quota = nil
+if n := int(xc.num_quota); n > 0 {
+cQuota := (*[1<<28]C.libxl_xs_quota_item)(unsafe.Pointer(xc.quota))[:n:n]
+x.Quota = make([]XsQuotaItem, n)
+for i, v := range cQuota {
+if err := x.Quota[i].fromC(&v); err != nil {
+return fmt.Errorf("converting field Quota: %v", err) }
+}
+}
+
+ return nil}
+
+func (x *XsQuotaList) toC(xc *C.libxl_xs_quota_list) (err error){defer func(){
+if err != nil{
+C.libxl_xs_quota_list_dispose(xc)}
+}()
+
+if numQuota := len(x.Quota); numQuota > 0 {
+xc.quota = (*C.libxl_xs_quota_item)(C.malloc(C.ulong(numQuota)*C.sizeof_libxl_xs_quota_item))
+xc.num_quota = C.int(numQuota)
+cQuota := (*[1<<28]C.libxl_xs_quota_item)(unsafe.Pointer(xc.quota))[:numQuota:numQuota]
+for i,v := range x.Quota {
+if err := v.toC(&cQuota[i]); err != nil {
+return fmt.Errorf("converting field Quota: %v", err)
+}
+}
+}
 
  return nil
  }
@@ -1163,13 +1270,24 @@ x.ArchArm.GicVersion = GicVersion(xc.arch_arm.gic_version)
 x.ArchArm.Vuart = VuartType(xc.arch_arm.vuart)
 x.ArchArm.SveVl = SveType(xc.arch_arm.sve_vl)
 x.ArchArm.NrSpis = uint32(xc.arch_arm.nr_spis)
+if err := x.ArchArm.ArmSci.fromC(&xc.arch_arm.arm_sci);err != nil {
+return fmt.Errorf("converting field ArchArm.ArmSci: %v", err)
+}
 if err := x.ArchX86.MsrRelaxed.fromC(&xc.arch_x86.msr_relaxed);err != nil {
 return fmt.Errorf("converting field ArchX86.MsrRelaxed: %v", err)
 }
 x.Altp2M = Altp2MMode(xc.altp2m)
+x.Altp2MCount = uint32(xc.altp2m_count)
 x.VmtraceBufKb = int(xc.vmtrace_buf_kb)
 if err := x.Vpmu.fromC(&xc.vpmu);err != nil {
 return fmt.Errorf("converting field Vpmu: %v", err)
+}
+if err := x.TrapUnmappedAccesses.fromC(&xc.trap_unmapped_accesses);err != nil {
+return fmt.Errorf("converting field TrapUnmappedAccesses: %v", err)
+}
+x.XenstoreFeatureMask = uint32(xc.xenstore_feature_mask)
+if err := x.XenstoreQuota.fromC(&xc.xenstore_quota);err != nil {
+return fmt.Errorf("converting field XenstoreQuota: %v", err)
 }
 
  return nil}
@@ -1273,6 +1391,9 @@ return fmt.Errorf("converting field VkbDevice: %v", err)
 x.Soundhw = C.GoString(tmp.soundhw)
 if err := x.XenPlatformPci.fromC(&tmp.xen_platform_pci);err != nil {
 return fmt.Errorf("converting field XenPlatformPci: %v", err)
+}
+if err := x.XenPlatformPciBarUc.fromC(&tmp.xen_platform_pci_bar_uc);err != nil {
+return fmt.Errorf("converting field XenPlatformPciBarUc: %v", err)
 }
 if err := x.UsbdeviceList.fromC(&tmp.usbdevice_list);err != nil {
 return fmt.Errorf("converting field UsbdeviceList: %v", err)
@@ -1618,6 +1739,9 @@ hvm.soundhw = C.CString(tmp.Soundhw)}
 if err := tmp.XenPlatformPci.toC(&hvm.xen_platform_pci); err != nil {
 return fmt.Errorf("converting field XenPlatformPci: %v", err)
 }
+if err := tmp.XenPlatformPciBarUc.toC(&hvm.xen_platform_pci_bar_uc); err != nil {
+return fmt.Errorf("converting field XenPlatformPciBarUc: %v", err)
+}
 if err := tmp.UsbdeviceList.toC(&hvm.usbdevice_list); err != nil {
 return fmt.Errorf("converting field UsbdeviceList: %v", err)
 }
@@ -1688,13 +1812,24 @@ xc.arch_arm.gic_version = C.libxl_gic_version(x.ArchArm.GicVersion)
 xc.arch_arm.vuart = C.libxl_vuart_type(x.ArchArm.Vuart)
 xc.arch_arm.sve_vl = C.libxl_sve_type(x.ArchArm.SveVl)
 xc.arch_arm.nr_spis = C.uint32_t(x.ArchArm.NrSpis)
+if err := x.ArchArm.ArmSci.toC(&xc.arch_arm.arm_sci); err != nil {
+return fmt.Errorf("converting field ArchArm.ArmSci: %v", err)
+}
 if err := x.ArchX86.MsrRelaxed.toC(&xc.arch_x86.msr_relaxed); err != nil {
 return fmt.Errorf("converting field ArchX86.MsrRelaxed: %v", err)
 }
 xc.altp2m = C.libxl_altp2m_mode(x.Altp2M)
+xc.altp2m_count = C.uint32_t(x.Altp2MCount)
 xc.vmtrace_buf_kb = C.int(x.VmtraceBufKb)
 if err := x.Vpmu.toC(&xc.vpmu); err != nil {
 return fmt.Errorf("converting field Vpmu: %v", err)
+}
+if err := x.TrapUnmappedAccesses.toC(&xc.trap_unmapped_accesses); err != nil {
+return fmt.Errorf("converting field TrapUnmappedAccesses: %v", err)
+}
+xc.xenstore_feature_mask = C.uint32_t(x.XenstoreFeatureMask)
+if err := x.XenstoreQuota.toC(&xc.xenstore_quota); err != nil {
+return fmt.Errorf("converting field XenstoreQuota: %v", err)
 }
 
  return nil

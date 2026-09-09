@@ -151,12 +151,13 @@ static XSM_INLINE int cf_check xsm_set_target(
 static XSM_INLINE int cf_check xsm_domctl(
     XSM_DEFAULT_ARG struct domain *d, struct xen_domctl *op)
 {
-    XSM_ASSERT_ACTION(XSM_OTHER);
+    XSM_ASSERT_ACTION(XSM_PRIV);
     switch ( op->cmd )
     {
     case XEN_DOMCTL_bind_pt_irq:
     case XEN_DOMCTL_getdomaininfo:
     case XEN_DOMCTL_get_device_group:
+    case XEN_DOMCTL_get_domain_state:
     case XEN_DOMCTL_gsi_permission:
     case XEN_DOMCTL_iomem_permission:
     case XEN_DOMCTL_ioport_mapping:
@@ -169,7 +170,7 @@ static XSM_INLINE int cf_check xsm_domctl(
         return -EILSEQ;
 
     default:
-        return xsm_default_action(XSM_PRIV, current->domain, d);
+        return xsm_default_action(action, current->domain, d);
     }
 }
 
@@ -264,13 +265,6 @@ static XSM_INLINE int cf_check xsm_console_io(
         return xsm_default_action(XSM_HOOK, d, NULL);
 #endif
     return xsm_default_action(XSM_PRIV, d, NULL);
-}
-
-static XSM_INLINE int cf_check xsm_profile(
-    XSM_DEFAULT_ARG struct domain *d, int op)
-{
-    XSM_ASSERT_ACTION(XSM_HOOK);
-    return xsm_default_action(action, d, NULL);
 }
 
 static XSM_INLINE int cf_check xsm_kexec(XSM_DEFAULT_VOID)
@@ -585,7 +579,7 @@ static XSM_INLINE int cf_check xsm_hvm_altp2mhvm_op(
     }
 }
 
-#ifdef CONFIG_MEM_ACCESS
+#ifdef CONFIG_VM_EVENT
 static XSM_INLINE int cf_check xsm_mem_access(XSM_DEFAULT_ARG struct domain *d)
 {
     XSM_ASSERT_ACTION(XSM_DM_PRIV);
@@ -746,6 +740,13 @@ static XSM_INLINE int cf_check xsm_argo_send(
 }
 
 #endif /* CONFIG_ARGO */
+
+static XSM_INLINE int cf_check xsm_get_domain_state(
+    XSM_DEFAULT_ARG struct domain *d)
+{
+    XSM_ASSERT_ACTION(XSM_XS_PRIV);
+    return xsm_default_action(action, current->domain, d);
+}
 
 #include <public/version.h>
 static XSM_INLINE int cf_check xsm_xen_version(XSM_DEFAULT_ARG uint32_t op)

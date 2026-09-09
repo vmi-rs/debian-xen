@@ -111,6 +111,7 @@
 #define LIBXL_MIN_DOM0_MEM (128*1024)
 #define LIBXL_INVALID_GFN (~(uint64_t)0)
 #define LIBXL_VGA_HOLE_SIZE 0x20
+#define LIBXL_ALTP2M_COUNT_DEFAULT (~(uint32_t)0)
 /* use 0 as the domid of the toolstack domain for now */
 #define LIBXL_TOOLSTACK_DOMID 0
 #define QEMU_SIGNATURE "DeviceModelRecord0002"
@@ -1423,8 +1424,6 @@ _hidden int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
               libxl_domain_config *d_config,
               libxl__domain_build_state *state);
 
-_hidden int libxl__qemu_traditional_cmd(libxl__gc *gc, uint32_t domid,
-                                        const char *cmd);
 _hidden int libxl__domain_rename(libxl__gc *gc, uint32_t domid,
                                  const char *old_name, const char *new_name,
                                  xs_transaction_t trans);
@@ -1914,50 +1913,6 @@ static inline int libxl__spawn_inuse(const libxl__spawn_state *ss)
 _hidden int libxl__spawn_record_pid(libxl__gc*, libxl__spawn_state*,
                                     pid_t innerchild);
 
-/*
- * libxl__xenstore_child_wait_deprecated - Wait for daemonic child IPC
- *
- * This is a NOT function for waiting for ordinary child processes.
- * If you want to run (fork/exec/wait) subprocesses from libxl:
- *  - Make your libxl entrypoint use the ao machinery
- *  - Use libxl__ev_child_fork, and use the callback programming style
- *
- * This function is intended for interprocess communication with a
- * service process.  If the service process does not respond quickly,
- * the whole caller may be blocked.  Therefore this function is
- * deprecated.  This function is currently used only by
- * libxl__wait_for_device_model_deprecated.
- *
- * gc: allocation pool
- * domid: guest to work with
- * timeout: how many seconds to wait for the state to appear
- * what: string describing the spawned process
- * path: path to the state file in xenstore
- * state: expected string to wait for in path (optional)
- * spawning: malloc'd pointer to libxl__spawn_starting (optional)
- * check_callback: (optional)
- * check_callback_userdata: data to pass to the callback function
- *
- * Returns 0 on success, and < 0 on error.
- *
- * This function waits the given timeout for the given path to appear
- * in xenstore, and optionally for state in path.
- * If path appears and state matches, check_callback is called.
- * If check_callback returns > 0, waiting for path or state continues.
- * Otherwise libxl__xenstore_child_wait_deprecated returns.
- */
-_hidden int libxl__xenstore_child_wait_deprecated(libxl__gc *gc,
-                                 uint32_t domid,
-                                 uint32_t timeout, char *what,
-                                 char *path, char *state,
-                                 libxl__spawn_starting *spawning,
-                                 int (*check_callback)(libxl__gc *gc,
-                                                       uint32_t domid,
-                                                       const char *state,
-                                                       void *userdata),
-                                 void *check_callback_userdata);
-
-
  /* low-level stuff, for synchronous subprocesses etc. */
 
 /*
@@ -2022,25 +1977,6 @@ _hidden int libxl__domain_device_construct_rdm(libxl__gc *gc,
                                    uint64_t rdm_mem_guard,
                                    struct xc_dom_image *dom);
 
-/*
- * This function will cause the whole libxl process to hang
- * if the device model does not respond.  It is deprecated.
- *
- * Instead of calling this function:
- *  - Make your libxl entrypoint use the ao machinery
- *  - Use libxl__ev_xswatch_register, and use the callback programming
- *    style
- */
-_hidden int libxl__wait_for_device_model_deprecated(libxl__gc *gc,
-                                uint32_t domid, char *state,
-                                libxl__spawn_starting *spawning
-                                                    /* NULL allowed */,
-                                int (*check_callback)(libxl__gc *gc,
-                                                      uint32_t domid,
-                                                      const char *state,
-                                                      void *userdata),
-                                void *check_callback_userdata);
-
 _hidden const libxl_vnc_info *libxl__dm_vnc(const libxl_domain_config *g_cfg);
 
 _hidden char *libxl__abs_path(libxl__gc *gc, const char *s, const char *path);
@@ -2057,11 +1993,11 @@ _hidden char *libxl__cpupoolid_to_name(libxl__gc *gc, uint32_t poolid);
 _hidden int libxl__enum_from_string(const libxl_enum_string_table *t,
                                     const char *s, int *e) NN(2);
 
-_hidden yajl_gen_status libxl__yajl_gen_asciiz(yajl_gen hand, const char *str);
-
-_hidden yajl_gen_status libxl__string_gen_json(yajl_gen hand, const char *p);
-
+#ifdef HAVE_LIBJSONC
+typedef int (*libxl__gen_json_callback)(json_object **jso_r, void *);
+#elif defined(HAVE_LIBYAJL)
 typedef yajl_gen_status (*libxl__gen_json_callback)(yajl_gen hand, void *);
+#endif
 _hidden char *libxl__object_to_json(libxl_ctx *ctx, const char *type,
                                     libxl__gen_json_callback gen, void *p);
 
@@ -2092,9 +2028,6 @@ _hidden int libxl__mac_is_default(libxl_mac *mac);
 _hidden int libxl__init_recursive_mutex(libxl_ctx *ctx, pthread_mutex_t *lock);
 
 _hidden int libxl__gettimeofday(libxl__gc *gc, struct timeval *now_r);
-
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
 
 /* from libxl_qmp */
 typedef struct libxl__qmp_handler libxl__qmp_handler;
@@ -2153,11 +2086,21 @@ int libxl__recvmsg_fds(libxl__gc *gc, int carrier,
                        void *databuf, size_t datalen,
                        int nfds, int fds[], const char *what);
 
+#ifdef HAVE_LIBJSONC
+_hidden int libxl__enum_gen_jso(json_object **jso_r, const char *str);
+_hidden int libxl__int_gen_jso(json_object **jso_r, int i);
+_hidden int libxl__boolean_gen_jso(json_object **jso_r, bool b);
+_hidden int libxl__string_gen_jso(json_object **jso_r, const char *p);
+#endif
+
+#ifdef HAVE_LIBYAJL
 /* from libxl_json */
 #include <yajl/yajl_gen.h>
 
 _hidden yajl_gen_status libxl__yajl_gen_asciiz(yajl_gen hand, const char *str);
 _hidden yajl_gen_status libxl__yajl_gen_enum(yajl_gen hand, const char *str);
+_hidden yajl_gen_status libxl__string_gen_json(yajl_gen hand, const char *p);
+#endif
 
 typedef enum {
     JSON_NULL    = (1 << 0),
@@ -2303,9 +2246,16 @@ _hidden const libxl__json_object *libxl__json_map_get(const char *key,
  */
 _hidden libxl__json_object *libxl__json_object_alloc(libxl__gc *gc_opt,
                                                      libxl__json_node_type type);
+#ifdef HAVE_LIBJSONC
+_hidden int libxl__json_object_to_json_object(libxl__gc *gc,
+                                              json_object **jso_out,
+                                              const libxl__json_object *obj);
+#endif
+#ifdef HAVE_LIBYAJL
 _hidden yajl_status libxl__json_object_to_yajl_gen(libxl__gc *gc_opt,
                                                    yajl_gen hand,
                                                    const libxl__json_object *param);
+#endif
 _hidden void libxl__json_object_free(libxl__gc *gc_opt,
                                      libxl__json_object *obj);
 
@@ -2318,8 +2268,7 @@ _hidden char *libxl__json_object_to_json(libxl__gc *gc,
 #define JSON(o) \
     (libxl__json_object_to_json(gc, (o)) ? : "<invalid-json-object>")
 
-  /* Based on /local/domain/$domid/dm-version xenstore key
-   * default is qemu xen traditional */
+  /* Based on /local/domain/$domid/dm-version xenstore key */
 _hidden int libxl__device_model_version_running(libxl__gc *gc, uint32_t domid);
 
 static inline
@@ -4753,7 +4702,10 @@ uint64_t libxl__get_targetmem_fudge(libxl__gc *gc,
                                 info->max_memkb > info->target_memkb)
                                 ? LIBXL_MAXMEM_CONSTANT : 0;
 
-    return info->video_memkb + mem_target_fudge;
+    if (info->video_memkb != LIBXL_MEMKB_DEFAULT)
+        mem_target_fudge += info->video_memkb;
+
+    return mem_target_fudge;
 }
 
 int libxl__get_memory_target(libxl__gc *gc, uint32_t domid,

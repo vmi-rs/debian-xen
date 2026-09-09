@@ -1,12 +1,12 @@
-obj-$(CONFIG_X86) += x86/
-
 lib-y += bsearch.o
 lib-y += ctors.o
 lib-y += ctype.o
+lib-y += earlycpio.init.o
 lib-y += find-next-bit.o
 lib-y += generic-ffsl.o
 lib-y += generic-flsl.o
 lib-y += generic-hweightl.o
+lib-y += guest-strcpy.o
 lib-y += list-sort.o
 lib-y += memchr.o
 lib-y += memchr_inv.o
@@ -17,11 +17,13 @@ lib-y += memset.o
 lib-y += muldiv64.o
 lib-y += parse-size.o
 lib-y += rbtree.o
-lib-$(CONFIG_X86) += sha2-256.o
+lib-y += sha1.o
+lib-y += sha2-256.o
 lib-y += sort.o
 lib-y += strcasecmp.o
 lib-y += strchr.o
 lib-y += strcmp.o
+lib-y += strcspn.o
 lib-y += strlcat.o
 lib-y += strlcpy.o
 lib-y += strlen.o
@@ -37,7 +39,6 @@ lib-y += strtol.o
 lib-y += strtoll.o
 lib-y += strtoul.o
 lib-y += strtoull.o
-lib-$(CONFIG_X86) += x86-generic-hweightl.o
 lib-$(CONFIG_X86) += xxhash32.o
 lib-$(CONFIG_X86) += xxhash64.o
 

@@ -53,7 +53,7 @@ static void disk_eject_xswatch_callback(libxl__egc *egc, libxl__ev_xswatch *w,
     }
 
     sscanf(backend,
-            "/local/domain/%d/backend/%" TOSTRING(BACKEND_STRING_SIZE)
+           "/local/domain/%d/backend/%" STR(BACKEND_STRING_SIZE)
            "[a-z]/%*d/%*d",
            &disk->backend_domid, backend_type);
     if (!strcmp(backend_type, "tap") ||
@@ -1005,13 +1005,6 @@ int libxl_cdrom_insert(libxl_ctx *ctx, uint32_t domid, libxl_device_disk *disk,
     } else {
         cis->disk_domid = stubdomid;
         disk->backend = LIBXL_DISK_BACKEND_PHY;
-    }
-
-    if (cis->dm_ver == LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL &&
-        stubdomid) {
-        LOGD(ERROR, domid, "cdrom-insert doesn't work for Mini-OS stubdoms");
-        rc = ERROR_INVAL;
-        goto out;
     }
 
     disks = libxl__device_list(gc, &libxl__disk_devtype, cis->disk_domid, &num);

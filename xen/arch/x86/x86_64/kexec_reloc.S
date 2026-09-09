@@ -27,6 +27,14 @@
         .section .text.kexec, "ax", @progbits
         .code64
 
+        /*
+         * kexec_reloc() is entered in it's natural position within Xen.
+         *
+         * A copy of .text.kexec is identity mapped at %rdi within the
+         * pagetables in %rsi.  Xen's .text is mapped into %rsi at it's high
+         * alias allowing to pivot, but most other things including the stacks
+         * are not mapped.
+         */
 FUNC(kexec_reloc, PAGE_SIZE)
         /* %rdi - code page maddr */
         /* %rsi - page table maddr */
@@ -36,10 +44,42 @@ FUNC(kexec_reloc, PAGE_SIZE)
 
         movq    %rcx, %rbp
 
-        /* Setup stack. */
+        /*
+         * Invalidate the IDT.  After switching off Xen's stacks, the
+         * exception handlers are unsafe to use, because there's no way to
+         * perform arithmetic on the stack pointer to find the cpu_info block.
+         */
+        push    $0
+        pushw   $0
+        lidt    (%rsp)
+        add     $10, %rsp
+
+        /* Move to PCID 0 if necessary, as a prerequisite to clearing CR4.PCIDE */
+        mov     %cr3, %rax
+        test    $0xfff, %eax
+        jz      1f
+        and     $~0xfff, %rax
+        mov     %rax, %cr3
+1:
+
+        /*
+         * Set CR4 to PAE only.  This may disable FRED, which must happen
+         * before switching off Xen's stack.
+         */
+        mov     $X86_CR4_PAE, %eax
+        mov     %rax, %cr4
+
+        /*
+         * Move to the identity mapped stack.
+         *
+         * Note this mapping doesn't exist until the pagetable switch.
+         */
         leaq    (.Lreloc_stack_base - kexec_reloc)(%rdi), %rsp
 
-        /* Load reloc page table. */
+        /*
+         * Move to the relocation pagetables.  Xen's .text is mapped allowing
+         * the pivot, but very little else is.
+         */
         movq    %rsi, %cr3
 
         /* Jump to identity mapped code. */
@@ -61,13 +101,6 @@ FUNC(kexec_reloc, PAGE_SIZE)
         orl     $(X86_CR0_PG | X86_CR0_PE), %eax
         movq    %rax, %cr0
 
-        /*
-         * Set cr4 to a known state:
-         *  - physical address extension enabled
-         */
-        movl    $X86_CR4_PAE, %eax
-        movq    %rax, %cr4
-
         movq    %rdx, %rdi
         call    relocate_pages
 
@@ -75,14 +108,10 @@ FUNC(kexec_reloc, PAGE_SIZE)
         testq   $KEXEC_RELOC_FLAG_COMPAT, %r8
         jnz     .L_call_32_bit
 
-.L_call_64_bit:
-        /* Call the image entry point.  This should never return. */
-        callq   *%rbp
-        ud2
+        /* Jump to the image entry point */
+        jmp     *%rbp
 
 .L_call_32_bit:
-        /* Setup IDT. */
-        lidt    compat_mode_idt(%rip)
 
         /* Load compat GDT. */
         leaq    compat_mode_gdt(%rip), %rax
@@ -155,12 +184,12 @@ FUNC_LOCAL(compatibility_mode)
         movl    %eax, %gs
         movl    %eax, %ss
 
-        /* Disable paging and therefore leave 64 bit mode. */
+        /* Disable paging and therefore leave long mode. */
         movl    %cr0, %eax
         andl    $~X86_CR0_PG, %eax
         movl    %eax, %cr0
 
-        /* Disable long mode */
+        /* Clear EFER.LME */
         movl    $MSR_EFER, %ecx
         rdmsr
         andl    $~EFER_LME, %eax
@@ -170,9 +199,8 @@ FUNC_LOCAL(compatibility_mode)
         xorl    %eax, %eax
         movl    %eax, %cr4
 
-        /* Call the image entry point.  This should never return. */
-        call    *%ebp
-        ud2
+        /* Jump to the image entry point. */
+        jmp     *%ebp
 END(compatibility_mode)
 
         /* Separate code and data into into different cache lines */
@@ -189,11 +217,6 @@ DATA_LOCAL(compat_mode_gdt, 8)
         .quad 0x00cf9b000000ffff     /* 0x0010 ring 0 code, compatibility */
 .Lcompat_mode_gdt_end:
 END(compat_mode_gdt)
-
-DATA_LOCAL(compat_mode_idt)
-        .word 0                      /* limit */
-        .long 0                      /* base */
-END(compat_mode_idt)
 
         /*
          * 16 words of stack are more than enough.

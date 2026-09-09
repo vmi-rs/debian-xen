@@ -2,6 +2,7 @@
 #ifndef __XEN_DOMAIN_H__
 #define __XEN_DOMAIN_H__
 
+#include <xen/errno.h>
 #include <xen/numa.h>
 #include <xen/types.h>
 
@@ -11,6 +12,19 @@ struct guest_area {
     struct page_info *pg;
     void *map;
 };
+
+#ifdef CONFIG_HAS_DOMAIN_TYPE
+enum __packed domain_type {
+    DOMAIN_32BIT,
+    DOMAIN_64BIT,
+};
+#define is_32bit_domain(d) ((d)->type == DOMAIN_32BIT)
+#define is_64bit_domain(d) ((d)->type == DOMAIN_64BIT)
+#elif !defined(CONFIG_64BIT)
+/* At the moment on 32-bit-only platforms all domains are 32-bit. */
+#define is_32bit_domain(d) true
+#define is_64bit_domain(d) false
+#endif
 
 #include <asm/domain.h>
 
@@ -35,6 +49,11 @@ void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info);
 void arch_get_domain_info(const struct domain *d,
                           struct xen_domctl_getdomaininfo *info);
 
+domid_t get_initial_domain_id(void);
+
+domid_t domid_alloc(domid_t domid);
+void domid_free(domid_t domid);
+
 /* CDF_* constant. Internal flags for domain creation. */
 /* Is this a privileged domain? */
 #define CDF_privileged           (1U << 0)
@@ -50,6 +69,8 @@ void arch_get_domain_info(const struct domain *d,
 #else
 #define CDF_staticmem            0
 #endif
+/* This is the hardware domain.  Only 1 allowed. */
+#define CDF_hardware             (1U << 3)
 
 #define is_domain_direct_mapped(d) ((d)->cdf & CDF_directmap)
 #define is_domain_using_staticmem(d) ((d)->cdf & CDF_staticmem)
@@ -57,14 +78,6 @@ void arch_get_domain_info(const struct domain *d,
 /*
  * Arch-specifics.
  */
-
-/* Allocate/free a domain structure. */
-struct domain *alloc_domain_struct(void);
-void free_domain_struct(struct domain *d);
-
-/* Allocate/free a VCPU structure. */
-struct vcpu *alloc_vcpu_struct(const struct domain *d);
-void free_vcpu_struct(struct vcpu *v);
 
 /* Allocate/free a PIRQ structure. */
 #ifndef alloc_pirq_struct
@@ -114,8 +127,24 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c);
 int arch_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
 int default_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
 
+#ifdef CONFIG_ARCH_PAGING_MEMPOOL
+
 int arch_get_paging_mempool_size(struct domain *d, uint64_t *size /* bytes */);
 int arch_set_paging_mempool_size(struct domain *d, uint64_t size /* bytes */);
+
+#else /* !CONFIG_ARCH_PAGING_MEMPOOL */
+
+static inline int arch_get_paging_mempool_size(struct domain *d, uint64_t *size)
+{
+    return -EOPNOTSUPP;
+}
+
+static inline int arch_set_paging_mempool_size(struct domain *d, uint64_t size)
+{
+    return -EOPNOTSUPP;
+}
+
+#endif /* CONFIG_ARCH_PAGING_MEMPOOL */
 
 bool update_runstate_area(struct vcpu *v);
 
@@ -170,7 +199,11 @@ static inline void vnuma_replace(struct domain *d, struct vnuma_info *vnuma)
 { ASSERT(!vnuma); }
 #endif
 
+#ifdef CONFIG_VMTRACE
 extern bool vmtrace_available;
+#else
+#define vmtrace_available false
+#endif
 
 extern bool vpmu_is_available;
 

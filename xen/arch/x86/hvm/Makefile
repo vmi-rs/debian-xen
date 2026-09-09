@@ -1,6 +1,6 @@
 obj-$(CONFIG_AMD_SVM) += svm/
+obj-$(CONFIG_VIRIDIAN) += viridian/
 obj-$(CONFIG_INTEL_VMX) += vmx/
-obj-y += viridian/
 
 obj-y += asid.o
 obj-y += dm.o
@@ -15,7 +15,8 @@ obj-y += intercept.o
 obj-y += io.o
 obj-y += ioreq.o
 obj-y += irq.o
-obj-y += monitor.o
+obj-y += mmio.o
+obj-$(CONFIG_VM_EVENT) += monitor.o
 obj-y += mtrr.o
 obj-y += nestedhvm.o
 obj-y += pmtimer.o
@@ -25,7 +26,7 @@ obj-y += save.o
 obj-y += stdvga.o
 obj-y += vioapic.o
 obj-y += vlapic.o
-obj-y += vm_event.o
+obj-$(CONFIG_VM_EVENT) += vm_event.o
 obj-y += vmsi.o
 obj-y += vpic.o
 obj-y += vpt.o

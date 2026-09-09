@@ -31,8 +31,6 @@ void destroy_waitqueue_head(struct waitqueue_head *wq);
 
 /* Wake VCPU(s) waiting on specified waitqueue. */
 void wake_up_nr(struct waitqueue_head *wq, unsigned int nr);
-void wake_up_one(struct waitqueue_head *wq);
-void wake_up_all(struct waitqueue_head *wq);
 
 /* Wait on specified waitqueue until @condition is true. */
 #define wait_event(wq, condition)               \
@@ -49,11 +47,18 @@ do {                                            \
 } while (0)
 
 /* Private functions. */
-int init_waitqueue_vcpu(struct vcpu *v);
-void destroy_waitqueue_vcpu(struct vcpu *v);
 void prepare_to_wait(struct waitqueue_head *wq);
 void wait(void);
 void finish_wait(struct waitqueue_head *wq);
+
+#ifdef CONFIG_VM_EVENT
+int init_waitqueue_vcpu(struct vcpu *v);
+void destroy_waitqueue_vcpu(struct vcpu *v);
 void check_wakeup_from_wait(void);
+#else
+static inline int init_waitqueue_vcpu(struct vcpu *v) { return 0; }
+static inline void destroy_waitqueue_vcpu(struct vcpu *v) {}
+static inline void check_wakeup_from_wait(void) {}
+#endif
 
 #endif /* __XEN_WAIT_H__ */

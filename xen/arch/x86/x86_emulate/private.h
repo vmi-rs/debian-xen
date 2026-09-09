@@ -6,12 +6,18 @@
  * Copyright (c) 2005-2007 XenSource Inc.
  */
 
+#ifndef X86_EMULATE_PRIVATE_H
+#define X86_EMULATE_PRIVATE_H
+
 #ifdef __XEN__
 
 # include <xen/bug.h>
 # include <xen/kernel.h>
+
+# include <asm/cpu-user-regs.h>
 # include <asm/endbr.h>
 # include <asm/msr-index.h>
+# include <asm/stubs.h>
 # include <asm/x86-vendors.h>
 # include <asm/x86_emulate.h>
 
@@ -110,11 +116,19 @@ struct operand {
     } mem;
 };
 
+#if defined(__x86_64__)
 #define REX_PREFIX 0x40
 #define REX_B 0x01
 #define REX_X 0x02
 #define REX_R 0x04
 #define REX_W 0x08
+#elif defined(__i386__)
+#define REX_PREFIX 0
+#define REX_B 0
+#define REX_X 0
+#define REX_R 0
+#define REX_W 0
+#endif
 
 enum simd_opsize {
     simd_none,
@@ -552,6 +566,7 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 #define vcpu_has_clzero()      (ctxt->cpuid->extd.clzero)
 #define vcpu_has_wbnoinvd()    (ctxt->cpuid->extd.wbnoinvd)
 #define vcpu_has_nscb()        (ctxt->cpuid->extd.nscb)
+#define vcpu_has_avx512_bmm()  (ctxt->cpuid->extd.avx512_bmm)
 
 #define vcpu_has_bmi1()        (ctxt->cpuid->feat.bmi1)
 #define vcpu_has_hle()         (ctxt->cpuid->feat.hle)
@@ -594,6 +609,7 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 #define vcpu_has_avx_vnni()    (ctxt->cpuid->feat.avx_vnni)
 #define vcpu_has_avx512_bf16() (ctxt->cpuid->feat.avx512_bf16)
 #define vcpu_has_cmpccxadd()   (ctxt->cpuid->feat.cmpccxadd)
+#define vcpu_has_lkgs()        (ctxt->cpuid->feat.lkgs)
 #define vcpu_has_wrmsrns()     (ctxt->cpuid->feat.wrmsrns)
 #define vcpu_has_avx_ifma()    (ctxt->cpuid->feat.avx_ifma)
 #define vcpu_has_avx_vnni_int8() (ctxt->cpuid->feat.avx_vnni_int8)
@@ -633,11 +649,9 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 #if defined(__x86_64__)
 #define _LO32 "k"          /* force 32-bit operand */
 #define _STK  "%%rsp"      /* stack pointer */
-#define _BYTES_PER_LONG "8"
 #elif defined(__i386__)
 #define _LO32 ""           /* force 32-bit operand */
 #define _STK  "%%esp"      /* stack pointer */
-#define _BYTES_PER_LONG "4"
 #endif
 
 /* Before executing instruction: restore necessary bits in EFLAGS. */
@@ -651,7 +665,7 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 "pushf; "                                                       \
 "notl %"_LO32 _tmp"; "                                          \
 "andl %"_LO32 _tmp",("_STK"); "                                 \
-"andl %"_LO32 _tmp",2*"_BYTES_PER_LONG"("_STK"); "              \
+"andl %"_LO32 _tmp", 2 * " STR(__SIZEOF_LONG__) "("_STK"); "    \
 "pop  %"_tmp"; "                                                \
 "orl  %"_LO32 _tmp",("_STK"); "                                 \
 "popf; "                                                        \
@@ -840,3 +854,5 @@ static inline int read_ulong(enum x86_segment seg,
     *val = 0;
     return ops->read(seg, offset, val, bytes, ctxt);
 }
+
+#endif /* X86_EMULATE_PRIVATE_H */

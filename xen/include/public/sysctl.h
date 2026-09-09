@@ -26,9 +26,9 @@
  * (e.g. adding semantics to 0-checked input fields or data to zeroed output
  * fields) don't require a change of the version.
  *
- * Last version bump: Xen 4.17
+ * Last version bump: Xen 4.21
  */
-#define XEN_SYSCTL_INTERFACE_VERSION 0x00000015
+#define XEN_SYSCTL_INTERFACE_VERSION 0x00000016
 
 /*
  * Read console content from Xen buffer ring.
@@ -221,9 +221,9 @@ struct pm_px_stat {
      * OUT: total Px states (PMSTAT_get_max_px, PMSTAT_get_pxstat)
      */
     uint8_t total;
-    uint8_t usable;       /* usable Px states */
-    uint8_t last;         /* last Px state */
-    uint8_t cur;          /* current Px state */
+    uint8_t usable;       /* OUT: usable Px states (PMSTAT_get_pxstat) */
+    uint8_t last;         /* OUT: last Px state (PMSTAT_get_pxstat) */
+    uint8_t cur;          /* OUT: current Px state (PMSTAT_get_pxstat) */
     /*
      * OUT: Px transition table. This should have total * total elements.
      *      As it is a 2-D array, this will not be copied if input total is
@@ -235,14 +235,33 @@ struct pm_px_stat {
 };
 
 struct pm_cx_stat {
-    uint32_t nr;    /* entry nr in triggers & residencies, including C0 */
-    uint32_t last;  /* last Cx state */
-    uint64_aligned_t idle_time;                 /* idle time from boot */
-    XEN_GUEST_HANDLE_64(uint64) triggers;    /* Cx trigger counts */
-    XEN_GUEST_HANDLE_64(uint64) residencies; /* Cx residencies */
-    uint32_t nr_pc;                          /* entry nr in pc[] */
-    uint32_t nr_cc;                          /* entry nr in cc[] */
     /*
+     * IN:  Number of elements in triggers, residencies (PMSTAT_get_cxstat)
+     * OUT: entry nr in triggers & residencies, including C0
+     *      (PMSTAT_get_cxstat, PMSTAT_get_max_cx)
+     */
+    uint32_t nr;
+    uint32_t last;  /* OUT: last Cx state (PMSTAT_get_cxstat) */
+    /* OUT: idle time from boot (PMSTAT_get_cxstat)*/
+    uint64_aligned_t idle_time;
+    /* OUT: Cx trigger counts, nr elements (PMSTAT_get_cxstat) */
+    XEN_GUEST_HANDLE_64(uint64) triggers;
+    /* OUT: Cx residencies, nr elements (PMSTAT_get_cxstat) */
+    XEN_GUEST_HANDLE_64(uint64) residencies;
+    /*
+     * IN: entry nr in pc[] (PMSTAT_get_cxstat)
+     * OUT: Required size of pc[] for all known to Xen entries to be written
+     *      (PMSTAT_get_cxstat)
+     */
+    uint32_t nr_pc;
+    /*
+     * IN: entry nr in cc[] (PMSTAT_get_cxstat)
+     * OUT: Required size of cc[] for all known to Xen entries to be written
+     *      (PMSTAT_get_cxstat)
+     */
+    uint32_t nr_cc;
+    /*
+     * OUT: (PMSTAT_get_cxstat)
      * These two arrays may (and generally will) have unused slots; slots not
      * having a corresponding hardware register will not be written by the
      * hypervisor. It is therefore up to the caller to put a suitable sentinel
@@ -317,7 +336,7 @@ struct xen_ondemand {
     uint32_t up_threshold;
 };
 
-struct xen_cppc_para {
+struct xen_get_cppc_para {
     /* OUT */
     /* activity_window supported if set */
 #define XEN_SYSCTL_CPPC_FEAT_ACT_WINDOW  (1 << 0)
@@ -411,7 +430,7 @@ struct xen_set_cppc_para {
 #define XEN_SYSCTL_CPPC_SET_ACT_WINDOW           (1U << 4)
 #define XEN_SYSCTL_CPPC_SET_PRESET_MASK          0xf0000000U
 #define XEN_SYSCTL_CPPC_SET_PRESET_NONE          0x00000000U
-#define XEN_SYSCTL_CPPC_SET_PRESET_BALANCE       0x10000000U
+#define XEN_SYSCTL_CPPC_SET_PRESET_ONDEMAND      0x10000000U
 #define XEN_SYSCTL_CPPC_SET_PRESET_POWERSAVE     0x20000000U
 #define XEN_SYSCTL_CPPC_SET_PRESET_PERFORMANCE   0x30000000U
 #define XEN_SYSCTL_CPPC_SET_PARAM_MASK \
@@ -423,7 +442,7 @@ struct xen_set_cppc_para {
          XEN_SYSCTL_CPPC_SET_ACT_WINDOW  )
     /* IN/OUT */
     uint32_t set_params; /* bitflags for valid values */
-    /* See comments in struct xen_cppc_para. */
+    /* See comments in struct xen_get_cppc_para. */
     /* IN */
     uint32_t minimum;
     uint32_t maximum;
@@ -434,6 +453,8 @@ struct xen_set_cppc_para {
     uint32_t activity_window;
 };
 
+#define XEN_AMD_CPPC_DRIVER_NAME "amd-cppc"
+#define XEN_AMD_CPPC_EPP_DRIVER_NAME "amd-cppc-epp"
 #define XEN_HWP_DRIVER_NAME "hwp"
 
 /*
@@ -457,22 +478,19 @@ struct xen_get_cpufreq_para {
     uint32_t cpuinfo_cur_freq;
     uint32_t cpuinfo_max_freq;
     uint32_t cpuinfo_min_freq;
-    union {
-        struct {
-            uint32_t scaling_cur_freq;
+    struct {
+        uint32_t scaling_cur_freq;
 
-            char scaling_governor[CPUFREQ_NAME_LEN];
-            uint32_t scaling_max_freq;
-            uint32_t scaling_min_freq;
+        char scaling_governor[CPUFREQ_NAME_LEN];
+        uint32_t scaling_max_freq;
+        uint32_t scaling_min_freq;
 
-            /* for specific governor */
-            union {
-                struct  xen_userspace userspace;
-                struct  xen_ondemand ondemand;
-            } u;
-        } s;
-        struct xen_cppc_para cppc_para;
-    } u;
+        /* for specific governor */
+        union {
+            struct  xen_userspace userspace;
+            struct  xen_ondemand ondemand;
+        } u;
+    } s;
 
     int32_t turbo_enabled;
 };
@@ -502,6 +520,7 @@ struct xen_sysctl_pm_op {
     #define SET_CPUFREQ_PARA           (CPUFREQ_PARA | 0x03)
     #define GET_CPUFREQ_AVGFREQ        (CPUFREQ_PARA | 0x04)
     #define SET_CPUFREQ_CPPC           (CPUFREQ_PARA | 0x05)
+    #define GET_CPUFREQ_CPPC           (CPUFREQ_PARA | 0x06)
 
     /* set/reset scheduler power saving option */
     #define XEN_SYSCTL_pm_op_set_sched_opt_smt    0x21
@@ -526,6 +545,7 @@ struct xen_sysctl_pm_op {
     uint32_t cpuid;
     union {
         struct xen_get_cpufreq_para get_para;
+        struct xen_get_cppc_para    get_cppc;
         struct xen_set_cpufreq_gov  set_gov;
         struct xen_set_cpufreq_para set_para;
         struct xen_set_cppc_para    set_cppc;
@@ -913,25 +933,6 @@ struct xen_sysctl_psr_alloc {
 };
 
 /*
- * XEN_SYSCTL_get_cpu_levelling_caps (x86 specific)
- *
- * Return hardware capabilities concerning masking or faulting of the cpuid
- * instruction for PV guests.
- */
-struct xen_sysctl_cpu_levelling_caps {
-#define XEN_SYSCTL_CPU_LEVELCAP_faulting    (1UL <<  0) /* CPUID faulting    */
-#define XEN_SYSCTL_CPU_LEVELCAP_ecx         (1UL <<  1) /* 0x00000001.ecx    */
-#define XEN_SYSCTL_CPU_LEVELCAP_edx         (1UL <<  2) /* 0x00000001.edx    */
-#define XEN_SYSCTL_CPU_LEVELCAP_extd_ecx    (1UL <<  3) /* 0x80000001.ecx    */
-#define XEN_SYSCTL_CPU_LEVELCAP_extd_edx    (1UL <<  4) /* 0x80000001.edx    */
-#define XEN_SYSCTL_CPU_LEVELCAP_xsave_eax   (1UL <<  5) /* 0x0000000D:1.eax  */
-#define XEN_SYSCTL_CPU_LEVELCAP_thermal_ecx (1UL <<  6) /* 0x00000006.ecx    */
-#define XEN_SYSCTL_CPU_LEVELCAP_l7s0_eax    (1UL <<  7) /* 0x00000007:0.eax  */
-#define XEN_SYSCTL_CPU_LEVELCAP_l7s0_ebx    (1UL <<  8) /* 0x00000007:0.ebx  */
-    uint32_t caps;
-};
-
-/*
  * XEN_SYSCTL_get_cpu_featureset (x86 specific)
  *
  * Return information about featuresets available on this host.
@@ -1112,8 +1113,12 @@ struct xen_sysctl_livepatch_list {
                                                amount of payloads and version.
                                                OUT: How many payloads left. */
     uint32_t pad;                           /* IN: Must be zero. */
-    uint32_t name_total_size;               /* OUT: Total size of all transfer names */
-    uint32_t metadata_total_size;           /* OUT: Total size of all transfer metadata */
+    uint32_t name_total_size;               /* IN: Size of name buffer
+                                               OUT: Total size of transferred
+                                               names */
+    uint32_t metadata_total_size;           /* IN: Size of metadata buffer
+                                               OUT: Total size of transferred
+                                               metadata */
     XEN_GUEST_HANDLE_64(xen_livepatch_status_t) status;  /* OUT. Must have enough
                                                space allocate for nr of them. */
     XEN_GUEST_HANDLE_64(char) name;         /* OUT: Array of names. Each member
@@ -1245,8 +1250,8 @@ struct xen_sysctl {
 #define XEN_SYSCTL_psr_cmt_op                    21
 #define XEN_SYSCTL_pcitopoinfo                   22
 #define XEN_SYSCTL_psr_alloc                     23
-/* #define XEN_SYSCTL_tmem_op                       24 */
-#define XEN_SYSCTL_get_cpu_levelling_caps        25
+/* #define XEN_SYSCTL_tmem_op                    24 */
+/* #define XEN_SYSCTL_get_cpu_levelling_caps     25 */
 #define XEN_SYSCTL_get_cpu_featureset            26
 #define XEN_SYSCTL_livepatch_op                  27
 /* #define XEN_SYSCTL_set_parameter              28 */
@@ -1276,7 +1281,6 @@ struct xen_sysctl {
         struct xen_sysctl_coverage_op       coverage_op;
         struct xen_sysctl_psr_cmt_op        psr_cmt_op;
         struct xen_sysctl_psr_alloc         psr_alloc;
-        struct xen_sysctl_cpu_levelling_caps cpu_levelling_caps;
         struct xen_sysctl_cpu_featureset    cpu_featureset;
         struct xen_sysctl_livepatch_op      livepatch;
 #if defined(__i386__) || defined(__x86_64__)

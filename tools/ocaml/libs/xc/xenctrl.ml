@@ -70,6 +70,7 @@ type domain_create_flag =
   | CDF_IOMMU
   | CDF_NESTED_VIRT
   | CDF_VPMU
+  | CDF_TRAP_UNMAPPED_ACCESSES
 
 type domain_create_iommu_opts =
   | IOMMU_NO_SHAREPT
@@ -86,6 +87,7 @@ type domctl_create_config =
     max_maptrack_frames: int;
     max_grant_version: int;
     altp2m_opts: int32;
+    altp2m_count: int32;
     vmtrace_buf_kb: int32;
     cpupool_id: int32;
     arch: arch_domainconfig;
@@ -206,7 +208,9 @@ let with_intf f =
 external domain_create_stub: handle -> domid -> domctl_create_config -> domid
   = "stub_xc_domain_create"
 
-let domain_create handle ?(domid=0) config =
+let domid_any = 0x7ff5 (* DOMID_ANY from public/xen.h *)
+
+let domain_create handle ?(domid=domid_any) config =
   domain_create_stub handle domid config
 
 external domain_sethandle: handle -> domid -> string -> unit

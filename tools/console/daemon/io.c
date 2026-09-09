@@ -781,6 +781,10 @@ static int console_create_ring(struct console *con)
 		con->log_fd = create_console_log(con);
 
  out:
+	/* Mark the console connected. */
+	if (!err && con->interface)
+		con->interface->connection = XENCONSOLE_CONNECTED;
+
 	return err;
 }
 
@@ -1229,7 +1233,7 @@ static int set_fds(int fd, short events)
 		/* Round up to 2^8 boundary, in practice this just
 		 * make newsize larger than current_array_size.
 		 */
-		newsize = ROUNDUP(nr_fds + 1, 8);
+		newsize = ROUNDUP(nr_fds + 1, 1U << 8);
 
 		new_fds = realloc(fds, sizeof(struct pollfd)*newsize);
 		if (!new_fds)

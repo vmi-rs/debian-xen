@@ -57,6 +57,7 @@ static struct dbs_tuners {
 
 static DEFINE_PER_CPU(struct timer, dbs_timer);
 
+#ifdef CONFIG_PM_OP
 int write_ondemand_sampling_rate(unsigned int sampling_rate)
 {
     if ( (sampling_rate > MAX_SAMPLING_RATE / MICROSECS(1)) ||
@@ -93,6 +94,7 @@ int get_cpufreq_ondemand_para(uint32_t *sampling_rate_max,
 
     return 0;
 }
+#endif /* CONFIG_PM_OP */
 
 static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 {
@@ -183,8 +185,7 @@ static void cf_check do_dbs_timer(void *dbs)
     dbs_check_cpu(dbs_info);
 
     set_timer(&per_cpu(dbs_timer, dbs_info->cpu),
-              align_timer(NOW() + dbs_tuners_ins.sampling_rate,
-                          dbs_tuners_ins.sampling_rate));
+              align_timer(NOW(), dbs_tuners_ins.sampling_rate));
 }
 
 static void dbs_timer_init(struct cpu_dbs_info_s *dbs_info)
@@ -399,6 +400,6 @@ void cpufreq_dbs_timer_resume(void)
             (void)cmpxchg(stoppable, -1, 1);
         }
         else
-            set_timer(t, align_timer(t->expires, dbs_tuners_ins.sampling_rate));
+            set_timer(t, align_timer(now, dbs_tuners_ins.sampling_rate));
     }
 }

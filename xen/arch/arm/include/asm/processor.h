@@ -1,7 +1,7 @@
 #ifndef __ASM_ARM_PROCESSOR_H
 #define __ASM_ARM_PROCESSOR_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <xen/types.h>
 #endif
 #include <public/arch-arm.h>
@@ -425,6 +425,9 @@
 
 #define VTCR_RES1       (_AC(1,UL)<<31)
 
+#define VTCR_MSA        (_AC(0x1,UL)<<31)
+#define VTCR_NSA        (_AC(0x1,UL)<<30)
+
 /* HCPTR Hyp. Coprocessor Trap Register */
 #define HCPTR_TAM       ((_AC(1,U)<<30))
 #define HCPTR_TTA       ((_AC(1,U)<<20))        /* Trap trace registers */
@@ -486,7 +489,12 @@
 #define MM64_VMID_16_BITS_SUPPORT   0x2
 #endif
 
-#ifndef __ASSEMBLY__
+#define MM64_MSA_PMSA_SUPPORT       0xf
+#define MM64_MSA_FRAC_NONE_SUPPORT  0x0
+#define MM64_MSA_FRAC_PMSA_SUPPORT  0x1
+#define MM64_MSA_FRAC_VMSA_SUPPORT  0x2
+
+#ifndef __ASSEMBLER__
 
 extern register_t __cpu_logical_map[];
 #define cpu_logical_map(cpu) __cpu_logical_map[cpu]
@@ -593,8 +601,8 @@ extern register_t __cpu_logical_map[];
 # error "unknown ARM variant"
 #endif
 
-#ifndef __ASSEMBLY__
-void panic_PAR(uint64_t par);
+#ifndef __ASSEMBLER__
+void noreturn panic_PAR(uint64_t par);
 
 /* Debugging functions are declared with external linkage to aid development. */
 void show_registers(const struct cpu_user_regs *regs);
@@ -630,9 +638,10 @@ register_t get_default_cptr_flags(void);
 #define SYNCHRONIZE_SERROR(feat)                                  \
     do {                                                          \
         ASSERT(local_abort_is_enabled());                         \
-        asm volatile(ALTERNATIVE("dsb sy; isb",                   \
-                                 "nop; nop", feat)                \
-                                 : : : "memory");                 \
+        asm_inline volatile (                                     \
+            ALTERNATIVE("dsb sy; isb",                            \
+                        "nop; nop", feat)                         \
+            ::: "memory" );                                       \
     } while (0)
 
 /*
@@ -653,7 +662,7 @@ register_t get_default_cptr_flags(void);
         WRITE_SYSREG((v)->arch.hcr_el2, HCR_EL2);   \
     } while (0)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_ARM_PROCESSOR_H */
 /*
  * Local variables:

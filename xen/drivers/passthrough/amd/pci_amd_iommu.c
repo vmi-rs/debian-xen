@@ -32,35 +32,35 @@ static bool __read_mostly init_done;
 
 static const struct iommu_init_ops _iommu_init_ops;
 
-struct amd_iommu *find_iommu_for_device(int seg, int bdf)
+struct amd_iommu *find_iommu_for_device(pci_sbdf_t sbdf)
 {
-    struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(seg);
+    struct ivrs_mappings *ivrs_mappings = get_ivrs_mappings(sbdf.seg);
 
-    if ( !ivrs_mappings || bdf >= ivrs_bdf_entries )
+    if ( !ivrs_mappings || sbdf.bdf >= ivrs_bdf_entries )
         return NULL;
 
-    if ( unlikely(!ivrs_mappings[bdf].iommu) && likely(init_done) )
+    if ( unlikely(!ivrs_mappings[sbdf.bdf].iommu) && likely(init_done) )
     {
-        unsigned int bd0 = bdf & ~PCI_FUNC(~0);
+        unsigned int bd0 = sbdf.bdf & ~PCI_FUNC(~0);
 
-        if ( ivrs_mappings[bd0].iommu && ivrs_mappings[bd0].iommu->bdf != bdf )
+        if ( ivrs_mappings[bd0].iommu && ivrs_mappings[bd0].iommu->sbdf.bdf != sbdf.bdf )
         {
             struct ivrs_mappings tmp = ivrs_mappings[bd0];
 
             tmp.iommu = NULL;
             if ( tmp.dte_requestor_id == bd0 )
-                tmp.dte_requestor_id = bdf;
-            ivrs_mappings[bdf] = tmp;
+                tmp.dte_requestor_id = sbdf.bdf;
+            ivrs_mappings[sbdf.bdf] = tmp;
 
             printk(XENLOG_WARNING "%pp not found in ACPI tables;"
-                   " using same IOMMU as function 0\n", &PCI_SBDF(seg, bdf));
+                   " using same IOMMU as function 0\n", &sbdf);
 
             /* write iommu field last */
-            ivrs_mappings[bdf].iommu = ivrs_mappings[bd0].iommu;
+            ivrs_mappings[sbdf.bdf].iommu = ivrs_mappings[bd0].iommu;
         }
     }
 
-    return ivrs_mappings[bdf].iommu;
+    return ivrs_mappings[sbdf.bdf].iommu;
 }
 
 /*
@@ -107,7 +107,7 @@ static bool any_pdev_behind_iommu(const struct domain *d,
         if ( pdev == exclude )
             continue;
 
-        if ( find_iommu_for_device(pdev->seg, pdev->sbdf.bdf) == iommu )
+        if ( find_iommu_for_device(pdev->sbdf) == iommu )
             return true;
     }
 
@@ -121,7 +121,7 @@ static bool use_ats(
 {
     return !ivrs_dev->block_ats &&
            iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) &&
-           pci_ats_device(iommu->seg, pdev->bus, pdev->devfn);
+           pci_ats_device(pdev);
 }
 
 static int __must_check amd_iommu_setup_domain_device(
@@ -147,17 +147,17 @@ static int __must_check amd_iommu_setup_domain_device(
     if ( rc )
         return rc;
 
-    req_id = get_dma_requestor_id(iommu->seg, pdev->sbdf.bdf);
-    ivrs_dev = &get_ivrs_mappings(iommu->seg)[req_id];
+    req_id = get_dma_requestor_id(iommu->sbdf.seg, pdev->sbdf.bdf);
+    ivrs_dev = &get_ivrs_mappings(iommu->sbdf.seg)[req_id];
     sr_flags = (iommu_hwdom_passthrough && is_hardware_domain(domain)
                 ? 0 : SET_ROOT_VALID)
                | (ivrs_dev->unity_map ? SET_ROOT_WITH_UNITY_MAP : 0);
 
     /* get device-table entry */
-    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF(bus, devfn));
+    req_id = get_dma_requestor_id(iommu->sbdf.seg, PCI_BDF(bus, devfn));
     table = iommu->dev_table.buffer;
     dte = &table[req_id];
-    ivrs_dev = &get_ivrs_mappings(iommu->seg)[req_id];
+    ivrs_dev = &get_ivrs_mappings(iommu->sbdf.seg)[req_id];
 
     if ( domain != dom_io )
     {
@@ -274,8 +274,7 @@ static int __must_check amd_iommu_setup_domain_device(
 
     ASSERT(pcidevs_locked());
 
-    if ( use_ats(pdev, iommu, ivrs_dev) &&
-         !pci_ats_enabled(iommu->seg, bus, pdev->devfn) )
+    if ( use_ats(pdev, iommu, ivrs_dev) && !pci_ats_enabled(pdev) )
     {
         if ( devfn == pdev->devfn )
             enable_ats_device(pdev, &iommu->ats_devices);
@@ -418,12 +417,11 @@ static void amd_iommu_disable_domain_device(const struct domain *domain,
 
     ASSERT(pcidevs_locked());
 
-    if ( pci_ats_device(iommu->seg, bus, pdev->devfn) &&
-         pci_ats_enabled(iommu->seg, bus, pdev->devfn) )
+    if ( pci_ats_device(pdev) && pci_ats_enabled(pdev) )
         disable_ats_device(pdev);
 
     BUG_ON ( iommu->dev_table.buffer == NULL );
-    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF(bus, devfn));
+    req_id = get_dma_requestor_id(iommu->sbdf.seg, PCI_BDF(bus, devfn));
     table = iommu->dev_table.buffer;
     dte = &table[req_id];
 
@@ -468,7 +466,7 @@ static int cf_check reassign_device(
     struct amd_iommu *iommu;
     int rc;
 
-    iommu = find_iommu_for_device(pdev->seg, pdev->sbdf.bdf);
+    iommu = find_iommu_for_device(pdev->sbdf);
     if ( !iommu )
     {
         AMD_IOMMU_WARN("failed to find IOMMU: %pp cannot be assigned to %pd\n",
@@ -578,10 +576,10 @@ static int cf_check amd_iommu_add_device(u8 devfn, struct pci_dev *pdev)
         return -EINVAL;
 
     for_each_amd_iommu(iommu)
-        if ( pdev->seg == iommu->seg && pdev->sbdf.bdf == iommu->bdf )
+        if ( pdev->sbdf.sbdf == iommu->sbdf.sbdf )
             return is_hardware_domain(pdev->domain) ? 0 : -ENODEV;
 
-    iommu = find_iommu_for_device(pdev->seg, pdev->sbdf.bdf);
+    iommu = find_iommu_for_device(pdev->sbdf);
     if ( unlikely(!iommu) )
     {
         /* Filter bridge devices. */
@@ -666,7 +664,7 @@ static int cf_check amd_iommu_remove_device(u8 devfn, struct pci_dev *pdev)
     if ( !pdev->domain )
         return -EINVAL;
 
-    iommu = find_iommu_for_device(pdev->seg, pdev->sbdf.bdf);
+    iommu = find_iommu_for_device(pdev->sbdf);
     if ( !iommu )
     {
         AMD_IOMMU_WARN("failed to find IOMMU: %pp cannot be removed from %pd\n",

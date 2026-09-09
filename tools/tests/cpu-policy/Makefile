@@ -29,12 +29,12 @@ distclean: clean
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(if $(TARGETS),$(INSTALL_PROG) $(TARGETS) $(DESTDIR)$(LIBEXEC_BIN))
+	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC)/tests
+	$(if $(TARGETS),$(INSTALL_PROG) $(TARGETS) $(DESTDIR)$(LIBEXEC)/tests)
 
 .PHONY: uninstall
 uninstall:
-	$(RM) -- $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/,$(TARGETS))
+	$(RM) -- $(addprefix $(DESTDIR)$(LIBEXEC)/tests/,$(TARGETS))
 
 CFLAGS += -D__XEN_TOOLS__
 CFLAGS += $(CFLAGS_xeninclude)
@@ -42,11 +42,14 @@ CFLAGS += $(APPEND_CFLAGS)
 
 LDFLAGS += $(APPEND_LDFLAGS)
 
-vpath %.c ../../../xen/lib/x86
+vpath %.c $(XEN_ROOT)/xen/arch/x86/lib/cpu-policy
+
+lib-y :=
+include $(XEN_ROOT)/xen/arch/x86/lib/cpu-policy/Makefile.common
 
 %.o: Makefile
 
-test-cpu-policy: test-cpu-policy.o msr.o cpuid.o policy.o
+test-cpu-policy: test-cpu-policy.o $(lib-y)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 -include $(DEPS_INCLUDE)

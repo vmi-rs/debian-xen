@@ -15,6 +15,7 @@
 #include <asm/hardirq.h>
 #include <xen/multiboot.h>
 #include <xen/multiboot2.h>
+#include <asm/guest-msr.h>
 
 #ifdef CONFIG_VIDEO
 # include "../boot/video.h"
@@ -52,7 +53,7 @@ void __dummy__(void)
     OFFSET(UREGS_eflags, struct cpu_user_regs, rflags);
     OFFSET(UREGS_rsp, struct cpu_user_regs, rsp);
     OFFSET(UREGS_ss, struct cpu_user_regs, ss);
-    OFFSET(UREGS_kernel_sizeof, struct cpu_user_regs, es);
+    DEFINE(UREGS_kernel_sizeof, sizeof(struct cpu_user_regs));
     BLANK();
 
     /*

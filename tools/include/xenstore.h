@@ -177,6 +177,22 @@ bool xs_set_permissions(struct xs_handle *h, xs_transaction_t t,
  */
 bool xs_watch(struct xs_handle *h, const char *path, const char *token);
 
+/* Same as xs_watch(), but with limiting the matching for modified
+ * children to a specified depth (depth 0 only matches the node itself,
+ * depth 1 will additionally match direct children of the node, etc.).
+ * Only supported if the XENSTORE_SERVER_FEATURE_WATCHDEPTH (4) is set
+ * in the returned features of xs_get_features_supported().
+ */
+bool xs_watch_depth(struct xs_handle *h, const char *path, const char *token,
+		    unsigned int depth);
+
+/* If supported, same as xs_watch_depth(), use xs_watch() otherwise.
+ * As a result watches might trigger for nodes below the watched path, too.
+ * Not to be used for special watches!
+ */
+bool xs_watch_try_depth(struct xs_handle *h, const char *path,
+			const char *token, unsigned int depth);
+
 /* Return the FD to poll on to see if a watch has fired. */
 int xs_fileno(struct xs_handle *h);
 
@@ -263,6 +279,56 @@ bool xs_path_is_subpath(const char *parent, const char *child);
 /* Return whether the domain specified has been introduced to xenstored.
  */
 bool xs_is_domain_introduced(struct xs_handle *h, unsigned int domid);
+
+/* Get the features supported by Xenstore.
+ * Returned as a bitmap of XENSTORE_SERVER_FEATURE_* values.
+ */
+bool xs_get_features_supported(struct xs_handle *h, unsigned int *features);
+
+/* Get the features available for a given domain. */
+bool xs_get_features_domain(struct xs_handle *h, unsigned int domid,
+			    unsigned int *features);
+
+/* Set the features available for a given domain. */
+bool xs_set_features_domain(struct xs_handle *h, unsigned int domid,
+			    unsigned int features);
+
+/* Get names of supported quota.
+ * Returns an array of quota names supported by Xenstore. On return
+ * num will contain the number of quota names in the array.
+ * Will return NULL on failure.
+ * The returned array should be freed via free() after usage, this will
+ * free the array AND the strings of the quota names.
+ */
+const char **xs_get_quota_names(struct xs_handle *h, unsigned int *num);
+
+/* Get the value of one global quota.
+ * Returns the global quota value specified by "quota" in "value".
+ * Return false on failure.
+ */
+bool xs_get_global_quota(struct xs_handle *h, const char *quota,
+			 unsigned int *value);
+
+/* Set the value of one global quota.
+ * Sets the global quota value specified by "quota" to "value".
+ * Return false on failure.
+ */
+bool xs_set_global_quota(struct xs_handle *h, const char *quota,
+			 unsigned int value);
+
+/* Get the value of one domain quota.
+ * Returns a domain's quota value specified by "quota" in "value".
+ * Return false on failure.
+ */
+bool xs_get_domain_quota(struct xs_handle *h, unsigned int domid,
+			 const char *quota, unsigned int *value);
+
+/* Set the value of one domain quota.
+ * Sets a domain's quota value specified by "quota" to "value".
+ * Return false on failure.
+ */
+bool xs_set_domain_quota(struct xs_handle *h, unsigned int domid,
+			 const char *quota, unsigned int value);
 
 char *xs_control_command(struct xs_handle *h, const char *cmd,
 			 void *data, unsigned int len);

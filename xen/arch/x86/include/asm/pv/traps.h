@@ -10,11 +10,9 @@
 #ifndef __X86_PV_TRAPS_H__
 #define __X86_PV_TRAPS_H__
 
+#include <xen/sched.h>
+
 #ifdef CONFIG_PV
-
-#include <public/xen.h>
-
-void pv_trap_init(void);
 
 int pv_raise_nmi(struct vcpu *v);
 
@@ -30,10 +28,6 @@ static inline bool pv_trap_callback_registered(const struct vcpu *v,
 }
 
 #else  /* !CONFIG_PV */
-
-#include <xen/errno.h>
-
-static inline void pv_trap_init(void) {}
 
 static inline int pv_raise_nmi(struct vcpu *v) { return -EOPNOTSUPP; }
 

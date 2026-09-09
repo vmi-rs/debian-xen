@@ -144,11 +144,25 @@ struct vgic_dist {
     spinlock_t lock;
     uint32_t ctlr;
     int nr_spis; /* Number of SPIs */
-    unsigned long *allocated_irqs; /* bitmap of IRQs allocated */
+    /*
+     * Bitmap of allocated IRQs with the following index mapping:
+     * Local IRQs [0..31]
+     * Regular SPIs [32..nr_spis + 31]
+     * Optional, if supported:
+     * Extended SPIs [nr_spis + 32..nr_spis + nr_espis + 31]
+     */
+    unsigned long *allocated_irqs;
     struct vgic_irq_rank *shared_irqs;
+#ifdef CONFIG_GICV3_ESPI
+    struct vgic_irq_rank *ext_shared_irqs;
+    unsigned int nr_espis; /* Number of extended SPIs */
+#endif
     /*
      * SPIs are domain global, SGIs and PPIs are per-VCPU and stored in
-     * struct arch_vcpu.
+     * struct arch_vcpu. The index mapping is as follows:
+     * Regular SPIs [0..nr_spis - 1]
+     * Optional, if supported:
+     * eSPIs [nr_spis..nr_spis + nr_espis - 1]
      */
     struct pending_irq *pending_irqs;
     /* Base address for guest GIC */
@@ -243,6 +257,14 @@ struct vgic_ops {
 /* Number of ranks of interrupt registers for a domain */
 #define DOMAIN_NR_RANKS(d) (((d)->arch.vgic.nr_spis+31)/32)
 
+#ifdef CONFIG_GICV3_ESPI
+#define DOMAIN_NR_EXT_RANKS(d) (((d)->arch.vgic.nr_espis + 31) / 32)
+#endif
+#define EXT_RANK_MIN (ESPI_BASE_INTID / 32)
+#define EXT_RANK_MAX ((ESPI_MAX_INTID + 31) / 32)
+#define EXT_RANK_NUM2IDX(num) ((num) - EXT_RANK_MIN)
+#define EXT_RANK_IDX2NUM(idx) ((idx) + EXT_RANK_MIN)
+
 #define vgic_lock(v)   spin_lock_irq(&(v)->domain->arch.vgic.lock)
 #define vgic_unlock(v) spin_unlock_irq(&(v)->domain->arch.vgic.lock)
 
@@ -302,6 +324,10 @@ extern struct vgic_irq_rank *vgic_rank_offset(struct vcpu *v,
                                               unsigned int b,
                                               unsigned int n,
                                               unsigned int s);
+extern struct vgic_irq_rank *vgic_ext_rank_offset(struct vcpu *v,
+                                                  unsigned int b,
+                                                  unsigned int n,
+                                                  unsigned int s);
 extern struct vgic_irq_rank *vgic_rank_irq(struct vcpu *v, unsigned int irq);
 extern void vgic_disable_irqs(struct vcpu *v, uint32_t r, unsigned int n);
 extern void vgic_enable_irqs(struct vcpu *v, uint32_t r, unsigned int n);
@@ -328,6 +354,38 @@ extern void vgic_check_inflight_irqs_pending(struct vcpu *v,
  * in which LPIs don't participate.
  */
 #define vgic_num_irqs(d)        ((d)->arch.vgic.nr_spis + 32)
+
+/* Maximum number of IRQs supported by vGIC */
+#define VGIC_MAX_IRQS 992U
+
+/* Default number of vGIC SPIs. 32 are substracted to cover local IRQs. */
+#define VGIC_DEF_NR_SPIS (min(gic_number_lines(), VGIC_MAX_IRQS) - 32)
+
+static inline unsigned int vgic_def_nr_spis(void)
+{
+#ifdef CONFIG_GICV3_ESPI
+    /*
+     * Check if the hardware supports extended SPIs (even if the appropriate
+     * config is set). If not, the common SPI range will be used. Otherwise
+     * return the maximum eSPI INTID, supported by HW GIC, subtracted by 32.
+     * For Dom0 and started at boot time DomUs we will add back this value
+     * during VGIC initialization. This ensures consistent handling for Dom0
+     * and other domains. For the regular SPI range interrupts in this case,
+     * the maximum value of VGIC_DEF_NR_SPIS will be used.
+     */
+    if ( gic_number_espis() > 0 )
+        return ESPI_BASE_INTID + min(gic_number_espis(), 1024U) - 32;
+#endif
+
+    return VGIC_DEF_NR_SPIS;
+}
+
+extern bool vgic_is_valid_line(struct domain *d, unsigned int virq);
+
+static inline bool vgic_is_spi(struct domain *d, unsigned int virq)
+{
+    return virq >= NR_LOCAL_IRQS && vgic_is_valid_line(d, virq);
+}
 
 /*
  * Allocate a guest VIRQ
@@ -360,7 +418,7 @@ int domain_vgic_register(struct domain *d, unsigned int *mmio_count);
 int domain_vgic_init(struct domain *d, unsigned int nr_spis);
 void domain_vgic_free(struct domain *d);
 int vcpu_vgic_init(struct vcpu *v);
-int vcpu_vgic_free(struct vcpu *v);
+void vcpu_vgic_free(struct vcpu *v);
 
 void vgic_inject_irq(struct domain *d, struct vcpu *v, unsigned int virq,
                      bool level);

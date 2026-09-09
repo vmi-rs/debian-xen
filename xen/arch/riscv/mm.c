@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
-#include <xen/bootfdt.h>
+#include <xen/bootinfo.h>
 #include <xen/bug.h>
 #include <xen/compiler.h>
+#include <xen/domain_page.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/libfdt/libfdt.h>
@@ -11,6 +12,7 @@
 #include <xen/pfn.h>
 #include <xen/sections.h>
 #include <xen/sizes.h>
+#include <xen/vmap.h>
 
 #include <asm/early_printk.h>
 #include <asm/csr.h>
@@ -31,20 +33,39 @@ unsigned long __ro_after_init phys_offset; /* = load_start - XEN_VIRT_START */
 #define LOAD_TO_LINK(addr) ((unsigned long)(addr) - phys_offset)
 
 /*
- * It is expected that Xen won't be more then 2 MB.
+ * It is expected that Xen won't be more then XEN_VIRT_SIZE.
  * The check in xen.lds.S guarantees that.
- * At least 3 page tables (in case of Sv39 ) are needed to cover 2 MB.
- * One for each page level table with PAGE_SIZE = 4 Kb.
  *
- * One L0 page table can cover 2 MB(512 entries of one page table * PAGE_SIZE).
+ * Root page table is shared with the initial mapping and is declared
+ * separately (look at stage1_pgtbl_root), so it isn't taken into account
+ * in PGTBL_INITIAL_COUNT.
  *
- * It might be needed one more page table in case when Xen load address
- * isn't 2 MB aligned.
+ * An amount of page tables between root page table and L0 page table
+ * (in the case of Sv39 it covers L1 table):
+ *   (CONFIG_PAGING_LEVELS - 2) are needed for an identity mapping and
+ *   the same amount are needed for Xen.
  *
- * CONFIG_PAGING_LEVELS page tables are needed for the identity mapping,
- * except that the root page table is shared with the initial mapping
+ * An amount of L0 page tables:
+ *   (512 entries of one L0 page table covers 2MB == 1<<XEN_PT_LEVEL_SHIFT(1))
+ *   XEN_VIRT_SIZE >> XEN_PT_LEVEL_SHIFT(1) are needed for Xen and
+ *   one L0 is needed for identity mapping.
  */
-#define PGTBL_INITIAL_COUNT ((CONFIG_PAGING_LEVELS - 1) * 2 + 1)
+#define PGTBL_INITIAL_COUNT ((CONFIG_PAGING_LEVELS - 2) * 2 + \
+                             (XEN_VIRT_SIZE >> XEN_PT_LEVEL_SHIFT(1)) + 1)
+
+/*
+ * Modifying these checks may require updating PGTBL_INITIAL_COUNT.
+ *
+ * If XEN_VIRT_{START,SIZE} are not properly aligned and XEN_VIRT_SIZE > GB(1),
+ * additional L1 and L0 page tables are required.
+ */
+static void __init __maybe_unused build_assertions(void)
+{
+    BUILD_BUG_ON(!IS_ALIGNED(XEN_VIRT_START, GB(1)));
+    BUILD_BUG_ON(!IS_ALIGNED(XEN_VIRT_SIZE, MB(2)));
+
+    BUILD_BUG_ON(XEN_VIRT_SIZE > GB(1));
+}
 
 pte_t __section(".bss.page_aligned") __aligned(PAGE_SIZE)
 stage1_pgtbl_root[PAGETABLE_ENTRIES];
@@ -341,11 +362,6 @@ unsigned long __init calc_phys_offset(void)
     return phys_offset;
 }
 
-void put_page(struct page_info *page)
-{
-    BUG_ON("unimplemented");
-}
-
 void arch_dump_shared_mem_info(void)
 {
     BUG_ON("unimplemented");
@@ -464,7 +480,7 @@ static void __init setup_frametable_mappings(paddr_t ps, paddr_t pe)
 static void __init setup_directmap_mappings(unsigned long base_mfn,
                                             unsigned long nr_mfns)
 {
-    static mfn_t __initdata directmap_mfn_start = INVALID_MFN_INITIALIZER;
+    static mfn_t __initdata directmap_mfn_start = INVALID_MFN;
 
     mfn_t base_mfn_t = _mfn(base_mfn);
     unsigned long base_addr = mfn_to_maddr(base_mfn_t);
@@ -504,6 +520,8 @@ static void __init setup_directmap_mappings(unsigned long base_mfn,
 #else /* CONFIG_RISCV_32 */
 #error setup_{directmap,frametable}_mapping() should be implemented for RV_32
 #endif
+
+unsigned long __ro_after_init start_page;
 
 /*
  * Setup memory management
@@ -554,13 +572,117 @@ void __init setup_mm(void)
         ram_end = max(ram_end, bank_end);
 
         setup_directmap_mappings(PFN_DOWN(bank_start), PFN_DOWN(bank_size));
+
+        set_pdx_range(paddr_to_pfn(bank_start), paddr_to_pfn(bank_end));
     }
 
     setup_frametable_mappings(ram_start, ram_end);
+
+    start_page = PFN_DOWN(ram_start);
     max_page = PFN_DOWN(ram_end);
 }
 
 void *__init arch_vmap_virt_end(void)
 {
     return (void *)(VMAP_VIRT_START + VMAP_VIRT_SIZE);
+}
+
+static void __iomem *ioremap_attr(paddr_t pa, size_t len,
+                                  pte_attr_t attributes)
+{
+    mfn_t mfn = _mfn(PFN_DOWN(pa));
+    unsigned int offs = pa & (PAGE_SIZE - 1);
+    unsigned int nr = PFN_UP(offs + len);
+    void *ptr = __vmap(&mfn, nr, 1, 1, attributes, VMAP_DEFAULT);
+
+    if ( ptr == NULL )
+        return NULL;
+
+    return ptr + offs;
+}
+
+void __iomem *ioremap_cache(paddr_t pa, size_t len)
+{
+    return ioremap_attr(pa, len, PAGE_HYPERVISOR);
+}
+
+void __iomem *ioremap_wc(paddr_t pa, size_t len)
+{
+    return ioremap_attr(pa, len, PAGE_HYPERVISOR_WC);
+}
+
+void __iomem *ioremap(paddr_t pa, size_t len)
+{
+    return ioremap_attr(pa, len, PAGE_HYPERVISOR_NOCACHE);
+}
+
+void flush_page_to_ram(unsigned long mfn, bool sync_icache)
+{
+    const void *v = map_domain_page(_mfn(mfn));
+
+    if ( clean_and_invalidate_dcache_va_range(v, PAGE_SIZE) )
+        BUG();
+
+    unmap_domain_page(v);
+
+    if ( sync_icache )
+        invalidate_icache();
+}
+
+bool page_is_offlinable(mfn_t mfn)
+{
+    return false;
+}
+
+void put_page(struct page_info *page)
+{
+    unsigned long nx, x, y = page->count_info;
+
+    do {
+        ASSERT((y & PGC_count_mask) >= 1);
+        x  = y;
+        nx = x - 1;
+    } while ( unlikely((y = cmpxchg(&page->count_info, x, nx)) != x) );
+
+    if ( unlikely((nx & PGC_count_mask) == 0) )
+    {
+        if ( unlikely(nx & PGC_static) )
+            free_domstatic_page(page);
+        else
+            free_domheap_page(page);
+    }
+}
+
+struct domain *page_get_owner_and_reference(struct page_info *page)
+{
+    unsigned long x, y = page->count_info;
+    struct domain *owner;
+
+    do {
+        x = y;
+        /*
+         * Count ==  0: Page is not allocated, so we cannot take a reference.
+         * Count == -1: Reference count would wrap, which is invalid.
+         */
+        if ( unlikely(((x + 1) & PGC_count_mask) <= 1) )
+            return NULL;
+    } while ( (y = cmpxchg(&page->count_info, x, x + 1)) != x );
+
+    owner = page_get_owner(page);
+    ASSERT(owner);
+
+    return owner;
+}
+
+bool get_page(struct page_info *page, const struct domain *domain)
+{
+    const struct domain *owner = page_get_owner_and_reference(page);
+
+    if ( likely(owner == domain) )
+        return true;
+
+    if ( owner != NULL )
+        put_page(page);
+
+    return false;
 }

@@ -9,6 +9,8 @@ RUN <<EOF
 #!/bin/bash
     set -eu
 
+    useradd --create-home user
+
     apt-get update
 
     DEPS=(
@@ -21,6 +23,7 @@ RUN <<EOF
 
         # Tools (general)
         ca-certificates
+        cpio
         git-core
         pkg-config
         wget
@@ -47,19 +50,17 @@ RUN <<EOF
         # Golang bindings
         golang-go
         # Ocaml bindings/oxenstored
-        ocaml-nox
+        ocaml
         ocaml-findlib
 
-        # for test phase, qemu-smoke-* jobs
+        # for test phase, qemu-* jobs
+        busybox-static
         expect
+        ovmf
         qemu-system-x86
 
-        # for qemu-alpine-x86_64-gcc
-        busybox-static
-        cpio
-
-        # For *-efi jobs
-        ovmf
+        # for build-each-commit-gcc
+        ccache
     )
 
     apt-get -y --no-install-recommends install "${DEPS[@]}"
@@ -67,5 +68,5 @@ RUN <<EOF
     rm -rf /var/lib/apt/lists*
 EOF
 
-USER root
+USER user
 WORKDIR /build

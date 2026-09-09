@@ -158,7 +158,7 @@ void msi_compose_msg(unsigned vector, const cpumask_t *cpu_mask, struct msi_msg 
 {
     memset(msg, 0, sizeof(*msg));
 
-    if ( vector < FIRST_DYNAMIC_VECTOR )
+    if ( vector < FIRST_IRQ_VECTOR )
         return;
 
     if ( cpu_mask )
@@ -174,24 +174,29 @@ void msi_compose_msg(unsigned vector, const cpumask_t *cpu_mask, struct msi_msg 
 
     msg->address_hi = MSI_ADDR_BASE_HI;
     msg->address_lo = MSI_ADDR_BASE_LO |
-                      (INT_DEST_MODE ? MSI_ADDR_DESTMODE_LOGIC
-                                     : MSI_ADDR_DESTMODE_PHYS) |
-                      ((INT_DELIVERY_MODE != dest_LowestPrio)
-                       ? MSI_ADDR_REDIRECTION_CPU
-                       : MSI_ADDR_REDIRECTION_LOWPRI) |
+                      MSI_ADDR_DESTMODE_PHYS |
+                      MSI_ADDR_REDIRECTION_CPU |
                       MSI_ADDR_DEST_ID(msg->dest32);
 
     msg->data = MSI_DATA_TRIGGER_EDGE |
                 MSI_DATA_LEVEL_ASSERT |
-                ((INT_DELIVERY_MODE != dest_LowestPrio)
-                 ? MSI_DATA_DELIVERY_FIXED
-                 : MSI_DATA_DELIVERY_LOWPRI) |
+                MSI_DATA_DELIVERY_FIXED |
                 MSI_DATA_VECTOR(vector);
 }
 
-static int write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
+static int write_msi_msg(struct msi_desc *entry, struct msi_msg *msg,
+                         bool force)
 {
     entry->msg = *msg;
+
+    if ( unlikely(system_state != SYS_STATE_active) )
+        /*
+         * Always propagate writes when not in the 'active' state.  The
+         * optimization to avoid the MSI address and data registers write is
+         * only relevant for runtime state, and drivers on resume (at least)
+         * rely on set_msi_affinity() to update the hardware state.
+         */
+        force = true;
 
     if ( iommu_intremap != iommu_intremap_off )
     {
@@ -199,7 +204,7 @@ static int write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
 
         ASSERT(msg != &entry->msg);
         rc = iommu_update_ire_from_msi(entry, msg);
-        if ( rc )
+        if ( rc < 0 || (rc == 0 && !force) )
             return rc;
     }
 
@@ -264,31 +269,25 @@ void cf_check set_msi_affinity(struct irq_desc *desc, const cpumask_t *mask)
     msg.address_lo |= MSI_ADDR_DEST_ID(dest);
     msg.dest32 = dest;
 
-    write_msi_msg(msi_desc, &msg);
+    write_msi_msg(msi_desc, &msg, false);
 }
 
-void __msi_set_enable(u16 seg, u8 bus, u8 slot, u8 func, int pos, int enable)
+void __msi_set_enable(pci_sbdf_t sbdf, int pos, int enable)
 {
-    uint16_t control = pci_conf_read16(PCI_SBDF(seg, bus, slot, func),
-                                       pos + PCI_MSI_FLAGS);
+    uint16_t control = pci_conf_read16(sbdf, pos + PCI_MSI_FLAGS);
 
     control &= ~PCI_MSI_FLAGS_ENABLE;
     if ( enable )
         control |= PCI_MSI_FLAGS_ENABLE;
-    pci_conf_write16(PCI_SBDF(seg, bus, slot, func),
-                     pos + PCI_MSI_FLAGS, control);
+    pci_conf_write16(sbdf, pos + PCI_MSI_FLAGS, control);
 }
 
 static void msi_set_enable(struct pci_dev *dev, int enable)
 {
     unsigned int pos = dev->msi_pos;
-    u16 seg = dev->seg;
-    u8 bus = dev->bus;
-    u8 slot = PCI_SLOT(dev->devfn);
-    u8 func = PCI_FUNC(dev->devfn);
 
     if ( pos )
-        __msi_set_enable(seg, bus, slot, func, pos, enable);
+        __msi_set_enable(dev->sbdf, pos, enable);
 }
 
 static void msix_set_enable(struct pci_dev *dev, int enable)
@@ -533,7 +532,7 @@ int __setup_msi_irq(struct irq_desc *desc, struct msi_desc *msidesc,
     desc->msi_desc = msidesc;
     desc->handler = handler;
     msi_compose_msg(desc->arch.vector, desc->arch.cpu_mask, &msg);
-    ret = write_msi_msg(msidesc, &msg);
+    ret = write_msi_msg(msidesc, &msg, true);
     if ( unlikely(ret) )
     {
         desc->handler = &no_irq_type;
@@ -663,11 +662,11 @@ static int msi_capability_init(struct pci_dev *dev,
     return 0;
 }
 
-static uint64_t read_pci_mem_bar(pci_sbdf_t sbdf, uint8_t bir, int vf,
-                                 const struct pf_info *pf_info)
+static uint64_t read_pci_mem_bar(const struct pci_dev *pdev, uint8_t bir,
+                                 int vf)
 {
-    uint16_t seg = sbdf.seg;
-    uint8_t bus = sbdf.bus, slot = sbdf.dev, func = sbdf.fn;
+    uint16_t seg = pdev->sbdf.seg;
+    uint8_t bus = pdev->sbdf.bus, slot = pdev->sbdf.dev, func = pdev->sbdf.fn;
     u8 limit;
     u32 addr, base = PCI_BASE_ADDRESS_0;
     u64 disp = 0;
@@ -677,20 +676,18 @@ static uint64_t read_pci_mem_bar(pci_sbdf_t sbdf, uint8_t bir, int vf,
         unsigned int pos;
         uint16_t ctrl, num_vf, offset, stride;
 
-        ASSERT(pf_info);
-
-        pos = pci_find_ext_capability(sbdf, PCI_EXT_CAP_ID_SRIOV);
-        ctrl = pci_conf_read16(sbdf, pos + PCI_SRIOV_CTRL);
-        num_vf = pci_conf_read16(sbdf, pos + PCI_SRIOV_NUM_VF);
-        offset = pci_conf_read16(sbdf, pos + PCI_SRIOV_VF_OFFSET);
-        stride = pci_conf_read16(sbdf, pos + PCI_SRIOV_VF_STRIDE);
+        pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_SRIOV);
+        ctrl = pci_conf_read16(pdev->sbdf, pos + PCI_SRIOV_CTRL);
+        num_vf = pci_conf_read16(pdev->sbdf, pos + PCI_SRIOV_NUM_VF);
+        offset = pci_conf_read16(pdev->sbdf, pos + PCI_SRIOV_VF_OFFSET);
+        stride = pci_conf_read16(pdev->sbdf, pos + PCI_SRIOV_VF_STRIDE);
 
         if ( !pos ||
              !(ctrl & PCI_SRIOV_CTRL_VFE) ||
              !(ctrl & PCI_SRIOV_CTRL_MSE) ||
              !num_vf || !offset || (num_vf > 1 && !stride) ||
              bir >= PCI_SRIOV_NUM_BARS ||
-             !pf_info->vf_rlen[bir] )
+             !pdev->physfn.vf_rlen[bir] )
             return 0;
         base = pos + PCI_SRIOV_BAR;
         vf -= PCI_BDF(bus, slot, func) + offset;
@@ -704,8 +701,8 @@ static uint64_t read_pci_mem_bar(pci_sbdf_t sbdf, uint8_t bir, int vf,
         }
         if ( vf >= num_vf )
             return 0;
-        BUILD_BUG_ON(ARRAY_SIZE(pf_info->vf_rlen) != PCI_SRIOV_NUM_BARS);
-        disp = vf * pf_info->vf_rlen[bir];
+        BUILD_BUG_ON(ARRAY_SIZE(pdev->physfn.vf_rlen) != PCI_SRIOV_NUM_BARS);
+        disp = vf * pdev->physfn.vf_rlen[bir];
         limit = PCI_SRIOV_NUM_BARS;
     }
     else switch ( pci_conf_read8(PCI_SBDF(seg, bus, slot, func),
@@ -760,10 +757,6 @@ static int msix_capability_init(struct pci_dev *dev,
     u16 control;
     u64 table_paddr;
     u32 table_offset;
-    u16 seg = dev->seg;
-    u8 bus = dev->bus;
-    u8 slot = PCI_SLOT(dev->devfn);
-    u8 func = PCI_FUNC(dev->devfn);
     bool maskall = msix->host_maskall, zap_on_error = false;
     unsigned int pos = dev->msix_pos;
 
@@ -810,32 +803,20 @@ static int msix_capability_init(struct pci_dev *dev,
           (is_hardware_domain(current->domain) &&
            (dev->domain == current->domain || dev->domain == dom_io))) )
     {
-        unsigned int bir = table_offset & PCI_MSIX_BIRMASK, pbus, pslot, pfunc;
-        int vf;
+        unsigned int bir = table_offset & PCI_MSIX_BIRMASK;
+        int vf = -1;
+        const struct pci_dev *pf_dev = dev;
         paddr_t pba_paddr;
         unsigned int pba_offset;
-        const struct pf_info *pf_info;
 
-        if ( !dev->info.is_virtfn )
+        if ( dev->info.is_virtfn )
         {
-            pbus = bus;
-            pslot = slot;
-            pfunc = func;
-            vf = -1;
-            pf_info = NULL;
-        }
-        else
-        {
-            pbus = dev->info.physfn.bus;
-            pslot = PCI_SLOT(dev->info.physfn.devfn);
-            pfunc = PCI_FUNC(dev->info.physfn.devfn);
             vf = dev->sbdf.bdf;
             ASSERT(dev->pf_pdev);
-            pf_info = &dev->pf_pdev->physfn;
+            pf_dev = dev->pf_pdev;
         }
 
-        table_paddr = read_pci_mem_bar(PCI_SBDF(seg, pbus, pslot, pfunc), bir,
-                                       vf, pf_info);
+        table_paddr = read_pci_mem_bar(pf_dev, bir, vf);
         WARN_ON(msi && msi->table_base != table_paddr);
         if ( !table_paddr )
         {
@@ -858,8 +839,7 @@ static int msix_capability_init(struct pci_dev *dev,
 
         pba_offset = pci_conf_read32(dev->sbdf, msix_pba_offset_reg(pos));
         bir = (u8)(pba_offset & PCI_MSIX_BIRMASK);
-        pba_paddr = read_pci_mem_bar(PCI_SBDF(seg, pbus, pslot, pfunc), bir, vf,
-                                     pf_info);
+        pba_paddr = read_pci_mem_bar(pf_dev, bir, vf);
         WARN_ON(!pba_paddr);
         pba_paddr += pba_offset & ~PCI_MSIX_BIRMASK;
 
@@ -1414,7 +1394,7 @@ int pci_restore_msi_state(struct pci_dev *pdev)
         type = entry->msi_attrib.type;
 
         msg = entry->msg;
-        write_msi_msg(entry, &msg);
+        write_msi_msg(entry, &msg, true);
 
         for ( i = 0; ; )
         {

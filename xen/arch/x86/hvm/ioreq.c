@@ -20,6 +20,7 @@
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/vmx/vmx.h>
+#include <asm/msr.h>
 
 #include <public/hvm/ioreq.h>
 #include <public/hvm/params.h>
@@ -47,7 +48,7 @@ bool arch_vcpu_ioreq_completion(enum vio_completion completion)
 
     default:
         ASSERT_UNREACHABLE();
-        break;
+        return false;
     }
 
     return true;
@@ -292,7 +293,7 @@ bool arch_ioreq_server_get_type_addr(const struct domain *d,
         {
             uint64_t msr_val;
 
-            if ( !rdmsr_safe(MSR_AMD64_NB_CFG, msr_val) &&
+            if ( !rdmsr_safe(MSR_AMD64_NB_CFG, &msr_val) &&
                  (msr_val & (1ULL << AMD64_NB_CFG_CF8_EXT_ENABLE_BIT)) )
                 *addr |= CF8_ADDR_HI(cf8);
         }

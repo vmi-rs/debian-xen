@@ -64,6 +64,7 @@
 #include <xen/bug.h>
 #include <xen/compiler.h>
 #include <xen/mm-frame.h>
+#include <xen/mm-types.h>
 #include <xen/types.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
@@ -113,11 +114,11 @@ int map_pages_to_xen(
     unsigned long virt,
     mfn_t mfn,
     unsigned long nr_mfns,
-    unsigned int flags);
+    pte_attr_t flags);
 /* Alter the permissions of a range of Xen virtual address space. */
-int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf);
+int modify_xen_mappings(unsigned long s, unsigned long e, pte_attr_t nf);
 void modify_xen_mappings_lite(unsigned long s, unsigned long e,
-                              unsigned int nf);
+                              pte_attr_t nf);
 int destroy_xen_mappings(unsigned long s, unsigned long e);
 /* Retrieve the MFN mapped by VA in Xen virtual address space. */
 mfn_t xen_map_to_mfn(unsigned long va);
@@ -140,13 +141,24 @@ struct page_info *alloc_domheap_pages(
 void free_domheap_pages(struct page_info *pg, unsigned int order);
 unsigned long avail_domheap_pages_region(
     unsigned int node, unsigned int min_width, unsigned int max_width);
-unsigned long avail_domheap_pages(void);
 unsigned long avail_node_heap_pages(unsigned int nodeid);
 #define alloc_domheap_page(d,f) (alloc_domheap_pages(d,0,f))
 #define free_domheap_page(p)  (free_domheap_pages(p,0))
-unsigned int online_page(mfn_t mfn, uint32_t *status);
+
+/* Free an allocation, and zero the pointer to it. */
+#define FREE_DOMHEAP_PAGES(p, o) do { \
+    void *_ptr_ = (p);                \
+    (p) = NULL;                       \
+    free_domheap_pages(_ptr_, o);     \
+} while ( false )
+#define FREE_DOMHEAP_PAGE(p) FREE_DOMHEAP_PAGES(p, 0)
+
+void scrub_one_page(const struct page_info *pg, bool cold);
+
+int online_page(mfn_t mfn, uint32_t *status);
 int offline_page(mfn_t mfn, int broken, uint32_t *status);
 int query_page_offline(mfn_t mfn, uint32_t *status);
+bool page_is_offlinable(mfn_t mfn);
 
 void heap_init_late(void);
 
@@ -196,6 +208,14 @@ struct npfec {
 #define  MEMF_no_refcount (1U<<_MEMF_no_refcount)
 #define _MEMF_populate_on_demand 1
 #define  MEMF_populate_on_demand (1U<<_MEMF_populate_on_demand)
+/*
+ * MEMF_keep_scrub is only valid when specified together with MEMF_no_scrub.
+ * Allocations with this flag never assign the pages to the domain, the caller
+ * must call assign_page() after the PGC_need_scrub bit is cleared if
+ * required.
+ */
+#define _MEMF_keep_scrub  2
+#define  MEMF_keep_scrub  (1U << _MEMF_keep_scrub)
 #define _MEMF_no_dma      3
 #define  MEMF_no_dma      (1U<<_MEMF_no_dma)
 #define _MEMF_exact_node  4
@@ -565,15 +585,6 @@ int __must_check guest_remove_page(struct domain *d, unsigned long gmfn);
 int __must_check steal_page(struct domain *d, struct page_info *page,
                             unsigned int memflags);
 
-#define RAM_TYPE_CONVENTIONAL 0x00000001
-#define RAM_TYPE_RESERVED     0x00000002
-#define RAM_TYPE_UNUSABLE     0x00000004
-#define RAM_TYPE_ACPI         0x00000008
-#define RAM_TYPE_UNKNOWN      0x00000010
-/* TRUE if the whole page at @mfn is of the requested RAM type(s) above. */
-int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
-/* Returns the page type(s). */
-unsigned int page_get_ram_type(mfn_t mfn);
 /* Check if a range falls into a hole in the memory map. */
 bool is_memory_hole(mfn_t start, mfn_t end);
 
@@ -647,5 +658,9 @@ static inline void put_page_alloc_ref(struct page_info *page)
         put_page(page);
     }
 }
+
+#ifndef domain_clamp_alloc_bitsize
+#define domain_clamp_alloc_bitsize(d, bits) ((void)(d), (bits))
+#endif
 
 #endif /* __XEN_MM_H__ */

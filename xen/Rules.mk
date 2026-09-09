@@ -29,6 +29,7 @@ targets :=
 subdir-y :=
 CFLAGS-y :=
 AFLAGS-y :=
+cov-cflags-y :=
 nocov-y :=
 noubsan-y :=
 
@@ -129,30 +130,33 @@ endif
 
 targets += $(targets-for-builtin)
 
-$(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): CFLAGS-y += -DINIT_SECTIONS_ONLY
+$(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y) $(lib-y)): CFLAGS-y += -DINIT_SECTIONS_ONLY
 
 non-init-objects = $(filter-out %.init.o, $(obj-y) $(obj-bin-y) $(extra-y))
 
-ifeq ($(CONFIG_COVERAGE),y)
 ifeq ($(CONFIG_CC_IS_CLANG),y)
-    COV_FLAGS := -fprofile-instr-generate -fcoverage-mapping
+    cov-cflags-$(CONFIG_COVERAGE) := -fprofile-instr-generate -fcoverage-mapping
+    cov-cflags-$(CONFIG_CONDITION_COVERAGE) += -fcoverage-mcdc
 else
-    COV_FLAGS := -fprofile-arcs -ftest-coverage
+    cov-cflags-$(CONFIG_COVERAGE) := -fprofile-arcs -ftest-coverage
+    cov-cflags-$(CONFIG_CONDITION_COVERAGE) += -fcondition-coverage
 endif
 
-# Reset COV_FLAGS in cases where an objects has another one as prerequisite
-$(nocov-y) $(filter %.init.o, $(obj-y) $(obj-bin-y) $(extra-y)): \
-    COV_FLAGS :=
+# Ensure that profile/coverage data is updated atomically
+$(call cc-option-add,cov-cflags-$(CONFIG_COVERAGE),CC,-fprofile-update=atomic)
 
-$(non-init-objects): _c_flags += $(COV_FLAGS)
-endif
+# Reset cov-cflags-y in cases where an objects has another one as prerequisite
+$(nocov-y) $(filter %.init.o, $(obj-y) $(obj-bin-y) $(extra-y) $(lib-y)): \
+    cov-cflags-y :=
+
+$(non-init-objects): _c_flags += $(cov-cflags-y)
 
 ifeq ($(CONFIG_UBSAN),y)
 # Any -fno-sanitize= options need to come after any -fsanitize= options
 UBSAN_FLAGS := $(filter-out -fno-%,$(CFLAGS_UBSAN)) $(filter -fno-%,$(CFLAGS_UBSAN))
 
 # Reset UBSAN_FLAGS in cases where an objects has another one as prerequisite
-$(noubsan-y) $(filter %.init.o, $(obj-y) $(obj-bin-y) $(extra-y)): \
+$(noubsan-y) $(filter %.init.o, $(obj-y) $(obj-bin-y) $(extra-y) $(lib-y)): \
     UBSAN_FLAGS :=
 
 $(non-init-objects): _c_flags += $(UBSAN_FLAGS)
@@ -269,7 +273,7 @@ define cmd_obj_init_o
     $(OBJCOPY) $(foreach s,$(SPECIAL_DATA_SECTIONS),--rename-section .$(s)=.init.$(s)) $< $@
 endef
 
-$(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): $(obj)/%.init.o: $(obj)/%.o FORCE
+$(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y) $(lib-y)): $(obj)/%.init.o: $(obj)/%.o FORCE
 	$(call if_changed,obj_init_o)
 
 quiet_cmd_cpp_i_c = CPP     $@

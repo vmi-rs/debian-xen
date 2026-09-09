@@ -338,7 +338,7 @@ p2m_pod_set_mem_target(struct domain *d, unsigned long target)
 
     ASSERT( pod_target >= p2m->pod.count );
 
-    if ( has_arch_pdevs(d) || cache_flush_permitted(d) )
+    if ( has_arch_pdevs(d) || has_arch_io_resources(d) )
         ret = -ENOTEMPTY;
     else
         ret = p2m_pod_set_cache_target(p2m, pod_target, 1/*preemptible*/);
@@ -659,7 +659,10 @@ decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
             }
             p2m_tlb_flush_sync(p2m);
             for ( j = 0; j < n; ++j )
+            {
                 set_gpfn_from_mfn(mfn_x(mfn) + j, INVALID_M2P_ENTRY);
+                paging_mark_pfn_clean(d, _pfn(gfn_x(gfn) + i + j));
+            }
             p2m_pod_cache_add(p2m, page, cur_order);
 
             ioreq_request_mapcache_invalidate(d);
@@ -1399,7 +1402,7 @@ guest_physmap_mark_populate_on_demand(struct domain *d, unsigned long gfn,
     if ( !paging_mode_translate(d) )
         return -EINVAL;
 
-    if ( has_arch_pdevs(d) || cache_flush_permitted(d) )
+    if ( has_arch_pdevs(d) || has_arch_io_resources(d) )
         return -ENOTEMPTY;
 
     do {

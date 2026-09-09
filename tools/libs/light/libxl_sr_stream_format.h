@@ -29,7 +29,7 @@ typedef struct libxl__sr_rec_hdr
 } libxl__sr_rec_hdr;
 
 /* All records must be aligned up to an 8 octet boundary */
-#define REC_ALIGN_ORDER              3U
+#define REC_ALIGN                    8
 
 #define REC_TYPE_END                    0x00000000U
 #define REC_TYPE_LIBXC_CONTEXT          0x00000001U
@@ -45,7 +45,7 @@ typedef struct libxl__sr_emulator_hdr
 } libxl__sr_emulator_hdr;
 
 #define EMULATOR_UNKNOWN             0x00000000U
-#define EMULATOR_QEMU_TRADITIONAL    0x00000001U
+#define EMULATOR_QEMU_TRADITIONAL    0x00000001U /* Dropped in Xen 4.21 */
 #define EMULATOR_QEMU_UPSTREAM       0x00000002U
 
 typedef struct libxl_sr_checkpoint_state

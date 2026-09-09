@@ -30,12 +30,7 @@ void cf_check init_apic_ldr_phys(void)
 	/* We only deliver in phys mode - no setup needed. */
 }
 
-const cpumask_t *cf_check vector_allocation_cpumask_phys(int cpu)
-{
-	return cpumask_of(cpu);
-}
-
-unsigned int cf_check cpu_mask_to_apicid_phys(const cpumask_t *cpumask)
+unsigned int cpu_mask_to_apicid(const cpumask_t *cpumask)
 {
 	/* As we are using single CPU as destination, pick only one CPU here */
 	return cpu_physical_id(cpumask_any(cpumask));

@@ -5,15 +5,34 @@
 #include <public/sysctl.h>
 #include <xen/acpi.h>
 
-#define XEN_PX_INIT 0x80000000U
+/*
+ * Internal xen-pm options
+ * They are extension to public xen-pm options (XEN_PROCESSOR_PM_xxx) defined
+ * in public/platform.h, guarded by SIF_PM_MASK
+ */
+#define XEN_PROCESSOR_PM_CPPC   0x100
+#if XEN_PROCESSOR_PM_CPPC & MASK_EXTR(~0, SIF_PM_MASK)
+# error "XEN_PROCESSOR_PM_CPPC shall not occupy bits reserved for public xen-pm options"
+#endif
+
+#define XEN_CPPC_INIT 0x40000000U
+#define XEN_PX_INIT   0x80000000U
 
 unsigned int powernow_register_driver(void);
 unsigned int get_measured_perf(unsigned int cpu, unsigned int flag);
-void cpufreq_residency_update(unsigned int cpu, uint8_t state);
+#ifdef CONFIG_PM_STATS
 void cpufreq_statistic_update(unsigned int cpu, uint8_t from, uint8_t to);
 int  cpufreq_statistic_init(unsigned int cpu);
 void cpufreq_statistic_exit(unsigned int cpu);
-void cpufreq_statistic_reset(unsigned int cpu);
+#else
+static inline void cpufreq_statistic_update(unsigned int cpu, uint8_t from,
+                                            uint8_t to) {}
+static inline int cpufreq_statistic_init(unsigned int cpu)
+{
+    return 0;
+}
+static inline void cpufreq_statistic_exit(unsigned int cpu) {}
+#endif /* CONFIG_PM_STATS */
 
 int  cpufreq_limit_change(unsigned int cpu);
 
@@ -29,21 +48,21 @@ struct processor_performance {
     struct xen_processor_px *states;
     struct xen_psd_package domain_info;
     uint32_t shared_type;
-
-    uint32_t init;
 };
 
 struct processor_pminfo {
     uint32_t acpi_id;
     uint32_t id;
     struct processor_performance    perf;
+    struct xen_processor_cppc cppc_data;
+
+    uint32_t init;
 };
 
 extern struct processor_pminfo *processor_pminfo[NR_CPUS];
 
 struct px_stat {
     uint8_t total;        /* total Px states */
-    uint8_t usable;       /* usable Px states */
     uint8_t last;         /* last Px state */
     uint8_t cur;          /* current Px state */
     uint64_t *trans_pt;   /* Px transition table */
@@ -55,8 +74,6 @@ struct pm_px {
     uint64_t prev_state_wall;
     uint64_t prev_idle_wall;
 };
-
-DECLARE_PER_CPU(struct pm_px *, cpufreq_statistic_data);
 
 int cpufreq_cpu_init(unsigned int cpu);
 #endif /* __XEN_PROCESSOR_PM_H__ */

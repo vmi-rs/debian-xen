@@ -5,6 +5,7 @@
 #include <xen/timer.h>
 #include <asm/page.h>
 #include <asm/p2m.h>
+#include <asm/suspend.h>
 #include <asm/vfp.h>
 #include <asm/mmio.h>
 #include <asm/gic.h>
@@ -16,32 +17,6 @@ struct hvm_domain
 {
     uint64_t              params[HVM_NR_PARAMS];
 };
-
-#ifdef CONFIG_ARM_64
-enum domain_type {
-    DOMAIN_32BIT,
-    DOMAIN_64BIT,
-};
-#define is_32bit_domain(d) ((d)->arch.type == DOMAIN_32BIT)
-#define is_64bit_domain(d) ((d)->arch.type == DOMAIN_64BIT)
-#else
-#define is_32bit_domain(d) (1)
-#define is_64bit_domain(d) (0)
-#endif
-
-/*
- * Is the domain using the host memory layout?
- *
- * Direct-mapped domain will always have the RAM mapped with GFN == MFN.
- * To avoid any trouble finding space, it is easier to force using the
- * host memory layout.
- *
- * The hardware domain will use the host layout regardless of
- * direct-mapped because some OS may rely on a specific address ranges
- * for the devices.
- */
-#define domain_use_host_layout(d) (is_domain_direct_mapped(d) || \
-                                   is_hardware_domain(d))
 
 struct vtimer {
     struct vcpu *v;
@@ -61,10 +36,6 @@ struct paging_domain {
 
 struct arch_domain
 {
-#ifdef CONFIG_ARM_64
-    enum domain_type type;
-#endif
-
 #ifdef CONFIG_ARM64_SVE
     /* max SVE encoded vector length */
     uint8_t sve_vl;
@@ -75,7 +46,9 @@ struct arch_domain
 
     struct hvm_domain hvm;
 
+#ifdef CONFIG_ARCH_PAGING_MEMPOOL
     struct paging_domain paging;
+#endif
 
     struct vmmio vmmio;
 
@@ -118,7 +91,17 @@ struct arch_domain
 #ifdef CONFIG_TEE
     void *tee;
 #endif
+#ifdef CONFIG_ARM_SCI
+    bool sci_enabled;
+    /* ARM SCI driver's specific data */
+    void *sci_data;
+#endif
 
+    struct resume_info resume_ctx;
+
+#ifdef CONFIG_MPU
+    uint8_t v8r_el1_msa;
+#endif
 }  __cacheline_aligned;
 
 struct arch_vcpu
@@ -242,7 +225,7 @@ struct arch_vcpu
 
 }  __cacheline_aligned;
 
-void vcpu_show_registers(const struct vcpu *v);
+void vcpu_show_registers(struct vcpu *v);
 void vcpu_switch_to_aarch64_mode(struct vcpu *v);
 
 /*
@@ -282,6 +265,11 @@ static inline register_t vcpuid_to_vaffinity(unsigned int vcpuid)
 
     return vaff;
 }
+
+int arch_vcpu_validate_guest_context(const struct vcpu *v,
+                                     const struct vcpu_guest_context *ctxt);
+void arch_vcpu_apply_guest_context(struct vcpu *v,
+                                   const struct vcpu_guest_context *ctxt);
 
 static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
 {

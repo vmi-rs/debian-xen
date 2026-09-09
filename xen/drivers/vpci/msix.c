@@ -17,9 +17,11 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "private.h"
+
+#include <xen/io.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
-#include <xen/vpci.h>
 
 #include <asm/msi.h>
 #include <asm/p2m.h>
@@ -58,8 +60,8 @@ static void update_entry(struct vpci_msix_entry *entry,
     }
 
     rc = vpci_msix_arch_enable_entry(entry, pdev,
-                                     vmsix_table_base(pdev->vpci,
-                                                      VPCI_MSIX_TABLE));
+                                     vmsix_table_host_base(pdev->vpci,
+                                                           VPCI_MSIX_TABLE));
     if ( rc )
     {
         gprintk(XENLOG_WARNING, "%pp: unable to enable entry %u: %d\n",
@@ -219,14 +221,14 @@ static void __iomem *get_table(const struct vpci *vpci, unsigned int slot)
         addr = vmsix_table_size(vpci, VPCI_MSIX_TABLE);
         fallthrough;
     case VPCI_MSIX_TBL_HEAD:
-        addr += vmsix_table_addr(vpci, VPCI_MSIX_TABLE);
+        addr += vmsix_table_host_addr(vpci, VPCI_MSIX_TABLE);
         break;
 
     case VPCI_MSIX_PBA_TAIL:
         addr = vmsix_table_size(vpci, VPCI_MSIX_PBA);
         fallthrough;
     case VPCI_MSIX_PBA_HEAD:
-        addr += vmsix_table_addr(vpci, VPCI_MSIX_PBA);
+        addr += vmsix_table_host_addr(vpci, VPCI_MSIX_PBA);
         break;
 
     default:
@@ -242,12 +244,6 @@ static void __iomem *get_table(const struct vpci *vpci, unsigned int slot)
 static unsigned int get_slot(const struct vpci *vpci, unsigned long addr)
 {
     unsigned long pfn = PFN_DOWN(addr);
-
-    /*
-     * The logic below relies on having the tables identity mapped to the guest
-     * address space, or for the `addr` parameter to be translated into its
-     * host physical memory address equivalent.
-     */
 
     if ( pfn == PFN_DOWN(vmsix_table_addr(vpci, VPCI_MSIX_TABLE)) )
         return VPCI_MSIX_TBL_HEAD;
@@ -345,28 +341,7 @@ static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
         return X86EMUL_OKAY;
     }
 
-    switch ( len )
-    {
-    case 1:
-        *data = readb(mem + PAGE_OFFSET(addr));
-        break;
-
-    case 2:
-        *data = readw(mem + PAGE_OFFSET(addr));
-        break;
-
-    case 4:
-        *data = readl(mem + PAGE_OFFSET(addr));
-        break;
-
-    case 8:
-        *data = readq(mem + PAGE_OFFSET(addr));
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        break;
-    }
+    *data = read_mmio(mem + PAGE_OFFSET(addr), len);
     spin_unlock(&vpci->lock);
 
     return X86EMUL_OKAY;
@@ -494,28 +469,7 @@ static int adjacent_write(const struct domain *d, const struct vpci_msix *msix,
         return X86EMUL_OKAY;
     }
 
-    switch ( len )
-    {
-    case 1:
-        writeb(data, mem + PAGE_OFFSET(addr));
-        break;
-
-    case 2:
-        writew(data, mem + PAGE_OFFSET(addr));
-        break;
-
-    case 4:
-        writel(data, mem + PAGE_OFFSET(addr));
-        break;
-
-    case 8:
-        writeq(data, mem + PAGE_OFFSET(addr));
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        break;
-    }
+    write_mmio(mem + PAGE_OFFSET(addr), data, len);
     spin_unlock(&vpci->lock);
 
     return X86EMUL_OKAY;
@@ -652,6 +606,9 @@ int vpci_make_msix_hole(const struct pci_dev *pdev)
         unsigned long end = PFN_DOWN(vmsix_table_addr(pdev->vpci, i) +
                                      vmsix_table_size(pdev->vpci, i) - 1);
 
+        if ( !vmsix_table_bar_valid(pdev->vpci, i) )
+            continue;
+
         for ( ; start <= end; start++ )
         {
             p2m_type_t t;
@@ -672,8 +629,7 @@ int vpci_make_msix_hole(const struct pci_dev *pdev)
             default:
                 put_gfn(d, start);
                 gprintk(XENLOG_WARNING,
-                        "%pp: existing mapping (mfn: %" PRI_mfn
-                        "type: %d) at %#lx clobbers MSIX MMIO area\n",
+                        "%pp: existing mapping (mfn: %" PRI_mfn " type: %d) at %#lx clobbers MSIX MMIO area\n",
                         &pdev->sbdf, mfn_x(mfn), t, start);
                 return -EEXIST;
             }
@@ -702,6 +658,55 @@ int vpci_make_msix_hole(const struct pci_dev *pdev)
     }
 
     return 0;
+}
+
+static int cf_check cleanup_msix(const struct pci_dev *pdev, bool hide)
+{
+    int rc;
+    struct vpci *vpci = pdev->vpci;
+    const unsigned int msix_pos = pdev->msix_pos;
+
+    if ( vpci->msix )
+    {
+        list_del(&vpci->msix->next);
+        for ( unsigned int i = 0; i < ARRAY_SIZE(vpci->msix->table); i++ )
+            if ( vpci->msix->table[i] )
+                iounmap(vpci->msix->table[i]);
+
+        XFREE(vpci->msix);
+    }
+
+    if ( !hide )
+        return 0;
+
+    rc = vpci_remove_registers(vpci, msix_control_reg(msix_pos), 2);
+    if ( rc )
+    {
+        printk(XENLOG_ERR "%pd %pp: fail to remove MSIX handlers rc=%d\n",
+               pdev->domain, &pdev->sbdf, rc);
+        ASSERT_UNREACHABLE();
+        return rc;
+    }
+
+    /*
+     * Unprivileged domains have a deny by default register access policy, no
+     * need to add any further handlers for them.
+     */
+    if ( !is_hardware_domain(pdev->domain) )
+        return 0;
+
+    /*
+     * The driver may not traverse the capability list and think device
+     * supports MSIX by default. So here let the control register of MSIX
+     * be Read-Only is to ensure MSIX disabled.
+     */
+    rc = vpci_add_register(vpci, vpci_hw_read16, NULL,
+                           msix_control_reg(msix_pos), 2, NULL);
+    if ( rc )
+        printk(XENLOG_ERR "%pd %pp: fail to add MSIX ctrl handler rc=%d\n",
+               pdev->domain, &pdev->sbdf, rc);
+
+    return rc;
 }
 
 static int cf_check init_msix(struct pci_dev *pdev)
@@ -794,12 +799,12 @@ static int cf_check init_msix(struct pci_dev *pdev)
 
     /*
      * vPCI header initialization will have mapped the whole BAR into the
-     * p2m, as MSI-X capability was not yet initialized.  Crave a hole for
+     * p2m, as MSI-X capability was not yet initialized.  Carve a hole for
      * the MSI-X table here, so that Xen can trap accesses.
      */
     return vpci_make_msix_hole(pdev);
 }
-REGISTER_VPCI_INIT(init_msix, VPCI_PRIORITY_MIDDLE);
+REGISTER_VPCI_CAP(MSIX, init_msix, cleanup_msix);
 
 /*
  * Local variables:

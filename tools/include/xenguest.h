@@ -242,6 +242,9 @@ struct xc_dom_image {
 
     /* Number of vCPUs */
     unsigned int max_vcpus;
+
+    /* Caller provided memflags to use when populating physmap. */
+    unsigned int memflags;
 };
 
 /* --- arch specific hooks ----------------------------------------- */
@@ -335,6 +338,10 @@ void *xc_dom_boot_domU_map(struct xc_dom_image *dom, xen_pfn_t pfn,
                            xen_pfn_t count);
 int xc_dom_boot_image(struct xc_dom_image *dom);
 int xc_dom_compat_check(struct xc_dom_image *dom);
+int xc_dom_console_init(xc_interface *xch, uint32_t guest_domid,
+                        xen_pfn_t console_gfn);
+int xc_dom_console_set_disconnected(xc_interface *xch, uint32_t guest_domid,
+                                    xen_pfn_t console_gfn);
 int xc_dom_gnttab_init(struct xc_dom_image *dom);
 int xc_dom_gnttab_seed(xc_interface *xch, uint32_t guest_domid,
                        bool is_hvm,
@@ -607,6 +614,8 @@ struct restore_callbacks {
  *        specific data
  * @param send_back_fd Only used for XC_STREAM_COLO.  Contains backchannel to
  *        the source side.
+ * @param memflags Optional memflags to pass in
+ *        xc_domain_populate_physmap{_exact}() calls.
  * @return 0 on success, -1 on failure
  */
 int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
@@ -614,7 +623,8 @@ int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
                       uint32_t store_domid, unsigned int console_evtchn,
                       unsigned long *console_mfn, uint32_t console_domid,
                       xc_stream_type_t stream_type,
-                      struct restore_callbacks *callbacks, int send_back_fd);
+                      struct restore_callbacks *callbacks, int send_back_fd,
+                      unsigned int memflags);
 
 /**
  * This function will create a domain for a paravirtualized Linux
@@ -812,7 +822,6 @@ int xc_cpu_policy_update_msrs(xc_interface *xch, xc_cpu_policy_t *policy,
 bool xc_cpu_policy_is_compatible(xc_interface *xch, xc_cpu_policy_t *host,
                                  xc_cpu_policy_t *guest);
 
-int xc_get_cpu_levelling_caps(xc_interface *xch, uint32_t *caps);
 int xc_get_cpu_featureset(xc_interface *xch, uint32_t index,
                           uint32_t *nr_features, uint32_t *featureset);
 

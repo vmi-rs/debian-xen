@@ -25,11 +25,11 @@
 /*
  * Keep this arch-specific modified include in the common file, as moving
  * it to the arch specific include file would obscure that special care is
- * taken to include it with __ASSEMBLY__ defined.
+ * taken to include it with __ASSEMBLER__ defined.
  */
-#define __ASSEMBLY__ /* avoid pulling in ACPI stuff (conflicts with EFI) */
+#define __ASSEMBLER__ /* avoid pulling in ACPI stuff (conflicts with EFI) */
 #include <asm/fixmap.h>
-#undef __ASSEMBLY__
+#undef __ASSEMBLER__
 #endif
 
 #define EFI_REVISION(major, minor) (((major) << 16) | (minor))
@@ -38,6 +38,8 @@
   { 0xf2fd1544U, 0x9794, 0x4a2c, {0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94} }
 #define SHIM_LOCK_PROTOCOL_GUID \
   { 0x605dab50U, 0xe046, 0x4300, {0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23} }
+#define SHIM_IMAGE_LOADER_GUID \
+  { 0x1f492041U, 0xfadb, 0x4e59, {0x9e, 0x57, 0x7c, 0xaf, 0xe7, 0x3a, 0x55, 0xab} }
 #define APPLE_PROPERTIES_PROTOCOL_GUID \
   { 0x91bd12feU, 0xf6c3, 0x44fb, {0xa5, 0xb7, 0x51, 0x22, 0xab, 0x30, 0x3a, 0xe0} }
 #define EFI_SYSTEM_RESOURCE_TABLE_GUID    \
@@ -69,6 +71,13 @@ typedef EFI_STATUS
 typedef struct {
     EFI_SHIM_LOCK_VERIFY Verify;
 } EFI_SHIM_LOCK_PROTOCOL;
+
+typedef struct _SHIM_IMAGE_LOADER {
+    EFI_IMAGE_LOAD LoadImage;
+    EFI_IMAGE_START StartImage;
+    EFI_EXIT Exit;
+    EFI_IMAGE_UNLOAD UnloadImage;
+} SHIM_IMAGE_LOADER;
 
 struct _EFI_APPLE_PROPERTIES;
 
@@ -285,35 +294,58 @@ static bool __init match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2)
 }
 
 /* generic routine for printing error messages */
-static void __init PrintErrMesg(const CHAR16 *mesg, EFI_STATUS ErrCode)
+static void __init noreturn PrintErrMesg(const CHAR16 *mesg, EFI_STATUS ErrCode)
 {
-    static const CHAR16* const ErrCodeToStr[] __initconstrel = {
-        [~EFI_ERROR_MASK & EFI_NOT_FOUND]           = L"Not found",
-        [~EFI_ERROR_MASK & EFI_NO_MEDIA]            = L"The device has no media",
-        [~EFI_ERROR_MASK & EFI_MEDIA_CHANGED]       = L"Media changed",
-        [~EFI_ERROR_MASK & EFI_DEVICE_ERROR]        = L"Device error",
-        [~EFI_ERROR_MASK & EFI_VOLUME_CORRUPTED]    = L"Volume corrupted",
-        [~EFI_ERROR_MASK & EFI_ACCESS_DENIED]       = L"Access denied",
-        [~EFI_ERROR_MASK & EFI_OUT_OF_RESOURCES]    = L"Out of resources",
-        [~EFI_ERROR_MASK & EFI_VOLUME_FULL]         = L"Volume is full",
-        [~EFI_ERROR_MASK & EFI_SECURITY_VIOLATION]  = L"Security violation",
-        [~EFI_ERROR_MASK & EFI_CRC_ERROR]           = L"CRC error",
-        [~EFI_ERROR_MASK & EFI_COMPROMISED_DATA]    = L"Compromised data",
-        [~EFI_ERROR_MASK & EFI_BUFFER_TOO_SMALL]    = L"Buffer too small",
-    };
-    EFI_STATUS ErrIdx = ErrCode & ~EFI_ERROR_MASK;
-
     StdOut = StdErr;
     PrintErr(mesg);
     PrintErr(L": ");
 
-    if( (ErrIdx < ARRAY_SIZE(ErrCodeToStr)) && ErrCodeToStr[ErrIdx] )
-        mesg = ErrCodeToStr[ErrIdx];
-    else
+    switch (ErrCode)
     {
+    case EFI_NOT_FOUND:
+        mesg = L"Not found";
+        break;
+    case EFI_NO_MEDIA:
+        mesg = L"The device has no media";
+        break;
+    case EFI_MEDIA_CHANGED:
+        mesg = L"Media changed";
+        break;
+    case EFI_DEVICE_ERROR:
+        mesg = L"Device error";
+        break;
+    case EFI_VOLUME_CORRUPTED:
+        mesg = L"Volume corrupted";
+        break;
+    case EFI_ACCESS_DENIED:
+        mesg = L"Access denied";
+        break;
+    case EFI_OUT_OF_RESOURCES:
+        mesg = L"Out of resources";
+        break;
+    case EFI_VOLUME_FULL:
+        mesg = L"Volume is full";
+        break;
+    case EFI_SECURITY_VIOLATION:
+        mesg = L"Security violation";
+        break;
+    case EFI_CRC_ERROR:
+        mesg = L"CRC error";
+        break;
+    case EFI_COMPROMISED_DATA:
+        mesg = L"Compromised data";
+        break;
+    case EFI_BUFFER_TOO_SMALL:
+        mesg = L"Buffer too small";
+        break;
+    case EFI_INVALID_PARAMETER:
+        mesg = L"Invalid parameter";
+        break;
+    default:
         PrintErr(L"ErrCode: ");
         DisplayUint(ErrCode, 0);
         mesg = NULL;
+        break;
     }
     blexit(mesg);
 }
@@ -421,6 +453,18 @@ static EFI_FILE_HANDLE __init get_parent_handle(const EFI_LOADED_IMAGE *loaded_i
     CHAR16 *pathend, *ptr;
     EFI_STATUS ret;
 
+    /*
+     * In some cases the image could not come from a specific device.
+     * For instance this can happen if Xen was loaded using GRUB2 "linux"
+     * command.
+     */
+    *leaf = NULL;
+    if ( !loaded_image->DeviceHandle )
+    {
+        PrintStr(L"Xen image loaded without providing a device\r\n");
+        return NULL;
+    }
+
     do {
         EFI_FILE_IO_INTERFACE *fio;
 
@@ -444,7 +488,15 @@ static EFI_FILE_HANDLE __init get_parent_handle(const EFI_LOADED_IMAGE *loaded_i
 
         if ( DevicePathType(dp) != MEDIA_DEVICE_PATH ||
              DevicePathSubType(dp) != MEDIA_FILEPATH_DP )
-            blexit(L"Unsupported device path component");
+        {
+            /*
+             * The image could come from an unsupported device.
+             * For instance this can happen if Xen was loaded using GRUB2
+             * "chainloader" command and the file was not from ESP.
+             */
+            PrintStr(L"Unsupported device path component\r\n");
+            return NULL;
+        }
 
         if ( *buffer )
         {
@@ -491,9 +543,19 @@ static EFI_FILE_HANDLE __init get_parent_handle(const EFI_LOADED_IMAGE *loaded_i
     else
         *leaf = buffer;
 #undef BUFFERSIZE
-#undef buffer
 
     return dir_handle;
+}
+
+static void __init ensure_dir_handle(const EFI_LOADED_IMAGE *loaded_image,
+                                     EFI_FILE_HANDLE *dir_handle,
+                                     CHAR16 **file_name)
+{
+    if ( *dir_handle )
+        return;
+    *dir_handle = get_parent_handle(loaded_image, file_name);
+    if ( !*dir_handle )
+        blexit(L"Cannot load files without a usable file system");
 }
 
 static CHAR16 *__init point_tail(CHAR16 *fn)
@@ -528,6 +590,31 @@ static char * __init split_string(char *s)
         return s + 1;
     }
     return NULL;
+}
+
+static void __init pre_parse(const struct file *file)
+{
+    char *ptr = file->str, *end = ptr + file->size;
+    bool start = true, comment = false;
+
+    for ( ; ptr < end; ++ptr )
+    {
+        if ( iscntrl(*ptr) )
+        {
+            comment = false;
+            start = true;
+            *ptr = 0;
+        }
+        else if ( comment || (start && isspace(*ptr)) )
+            *ptr = 0;
+        else if ( *ptr == '#' || (start && *ptr == ';') )
+        {
+            comment = true;
+            *ptr = 0;
+        }
+        else
+            start = 0;
+    }
 }
 
 static char *__init get_value(const struct file *file, const char *section,
@@ -582,7 +669,7 @@ static int __init __maybe_unused set_color(uint32_t mask, int bpp,
    return max(*pos + *sz, bpp);
 }
 
-#ifndef CONFIG_HAS_DEVICE_TREE
+#ifndef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 static int __init efi_check_dt_boot(const EFI_LOADED_IMAGE *loaded_image)
 {
     return 0;
@@ -761,56 +848,54 @@ static bool __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
 
     if ( !name )
         PrintErrMesg(L"No filename", EFI_OUT_OF_RESOURCES);
+
+    if ( !dir_handle )
+        blexit(L"BUG: !dir_handle in read_file()");
+
+    what = L"Open";
     ret = dir_handle->Open(dir_handle, &FileHandle, name,
                            EFI_FILE_MODE_READ, 0);
     if ( file == &cfg && ret == EFI_NOT_FOUND )
         return false;
     if ( EFI_ERROR(ret) )
-        what = L"Open";
-    else
-        ret = FileHandle->SetPosition(FileHandle, -1);
-    if ( EFI_ERROR(ret) )
-        what = what ?: L"Seek";
-    else
-        ret = FileHandle->GetPosition(FileHandle, &size);
-    if ( EFI_ERROR(ret) )
-        what = what ?: L"Get size";
-    else
-        ret = FileHandle->SetPosition(FileHandle, 0);
-    if ( EFI_ERROR(ret) )
-        what = what ?: L"Seek";
-    else
-    {
-        file->addr = min(1UL << (32 + PAGE_SHIFT),
-                         HYPERVISOR_VIRT_END - DIRECTMAP_VIRT_START);
-        /* For config files allocate an extra byte to put a NUL there. */
-        ret = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
-                                    PFN_UP(size + (file == &cfg)), &file->addr);
-    }
-    if ( EFI_ERROR(ret) )
-        what = what ?: L"Allocation";
-    else
-    {
-        file->need_to_free = true;
-        file->size = size;
-        handle_file_info(name, file, options);
+        goto fail;
 
-        ret = FileHandle->Read(FileHandle, &file->size, file->str);
-        if ( !EFI_ERROR(ret) && file->size != size )
-            ret = EFI_ABORTED;
-        if ( EFI_ERROR(ret) )
-            what = L"Read";
-    }
+    what = L"Seek";
+    ret = FileHandle->SetPosition(FileHandle, -1);
+    if ( EFI_ERROR(ret) )
+        goto fail;
 
-    if ( FileHandle )
-        FileHandle->Close(FileHandle);
+    what = L"Get size";
+    ret = FileHandle->GetPosition(FileHandle, &size);
+    if ( EFI_ERROR(ret) )
+        goto fail;
 
-    if ( what )
-    {
-        PrintErr(what);
-        PrintErr(L" failed for ");
-        PrintErrMesg(name, ret);
-    }
+    what = L"Seek";
+    ret = FileHandle->SetPosition(FileHandle, 0);
+    if ( EFI_ERROR(ret) )
+        goto fail;
+
+    what = L"Allocation";
+    file->addr = min(1UL << (32 + PAGE_SHIFT),
+                     HYPERVISOR_VIRT_END - DIRECTMAP_VIRT_START);
+    /* For config files allocate an extra byte to put a NUL there. */
+    ret = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                PFN_UP(size + (file == &cfg)), &file->addr);
+    if ( EFI_ERROR(ret) )
+        goto fail;
+
+    file->need_to_free = true;
+    file->size = size;
+    handle_file_info(name, file, options);
+
+    what = L"Read";
+    ret = FileHandle->Read(FileHandle, &file->size, file->str);
+    if ( !EFI_ERROR(ret) && file->size != size )
+        ret = EFI_ABORTED;
+    if ( EFI_ERROR(ret) )
+        goto fail;
+
+    FileHandle->Close(FileHandle);
 
     efi_arch_flush_dcache_area(file->ptr, file->size);
 
@@ -818,6 +903,16 @@ static bool __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
         file->str[file->size] = 0;
 
     return true;
+
+ fail:
+    if ( FileHandle )
+        FileHandle->Close(FileHandle);
+
+    PrintErr(what);
+    PrintErr(L" failed for ");
+    PrintErrMesg(name, ret);
+
+    /* not reached */
 }
 
 static bool __init read_section(const EFI_LOADED_IMAGE *image,
@@ -854,29 +949,27 @@ static bool __init read_section(const EFI_LOADED_IMAGE *image,
     return true;
 }
 
-static void __init pre_parse(const struct file *file)
+static void __init init_secure_boot_mode(void)
 {
-    char *ptr = file->str, *end = ptr + file->size;
-    bool start = true, comment = false;
+    static EFI_GUID __initdata gv_uuid = EFI_GLOBAL_VARIABLE;
+    static CHAR16 __initdata str_SecureBoot[] = L"SecureBoot";
+    EFI_STATUS status;
+    uint8_t data = 0;
+    UINTN size = sizeof(data);
+    UINT32 attr = 0;
 
-    for ( ; ptr < end; ++ptr )
-    {
-        if ( iscntrl(*ptr) )
-        {
-            comment = false;
-            start = true;
-            *ptr = 0;
-        }
-        else if ( comment || (start && isspace(*ptr)) )
-            *ptr = 0;
-        else if ( *ptr == '#' || (start && *ptr == ';') )
-        {
-            comment = true;
-            *ptr = 0;
-        }
-        else
-            start = 0;
-    }
+    status = efi_rs->GetVariable(str_SecureBoot, &gv_uuid, &attr, &size, &data);
+
+    if ( status == EFI_NOT_FOUND ||
+         (status == EFI_SUCCESS &&
+          attr == (EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                   EFI_VARIABLE_RUNTIME_ACCESS) &&
+          size == 1 && data == 0) )
+        /* Platform does not support Secure Boot or it's disabled. */
+        efi_secure_boot = false;
+    else
+        /* Everything else play it safe and assume enabled. */
+        efi_secure_boot = true;
 }
 
 static void __init efi_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
@@ -893,6 +986,8 @@ static void __init efi_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTabl
 
     StdOut = SystemTable->ConOut;
     StdErr = SystemTable->StdErr ?: StdOut;
+
+    init_secure_boot_mode();
 }
 
 static void __init efi_console_set_mode(void)
@@ -999,6 +1094,52 @@ static UINTN __init efi_find_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
     }
 
     return gop_mode;
+}
+
+static void __init efi_verify_kernel(EFI_HANDLE ImageHandle)
+{
+    static EFI_GUID __initdata shim_image_guid = SHIM_IMAGE_LOADER_GUID;
+    static EFI_GUID __initdata shim_lock_guid = SHIM_LOCK_PROTOCOL_GUID;
+    SHIM_IMAGE_LOADER *shim_loader;
+    EFI_HANDLE loaded_kernel = NULL;
+    EFI_SHIM_LOCK_PROTOCOL *shim_lock;
+    EFI_STATUS status;
+    bool verified = false;
+
+    /* Look for SHIM_IMAGE_LOADER first. */
+    if ( !EFI_ERROR(efi_bs->LocateProtocol(&shim_image_guid, NULL,
+                                           (void **)&shim_loader)) )
+    {
+        status = shim_loader->LoadImage(false, ImageHandle, NULL,
+                                        (void *)kernel.ptr, kernel.size,
+                                        &loaded_kernel);
+        if ( !EFI_ERROR(status) )
+            verified = true;
+
+        /*
+         * If the kernel was loaded, unload it. We only needed LoadImage() to
+         * perform verification anyway, and in the case of a failure there may
+         * still be cleanup needing to be performed.
+         */
+        if ( loaded_kernel &&
+             (!EFI_ERROR(status) || status == EFI_SECURITY_VIOLATION) )
+            shim_loader->UnloadImage(loaded_kernel);
+    }
+
+    /* Otherwise, fall back to SHIM_LOCK. */
+    if ( !verified &&
+         !EFI_ERROR(efi_bs->LocateProtocol(&shim_lock_guid, NULL,
+                                           (void **)&shim_lock)) &&
+         shim_lock->Verify(kernel.ptr, kernel.size) == EFI_SUCCESS )
+        verified = true;
+
+    if ( !verified )
+    {
+        PrintStr(L"Kernel was not verified\n");
+
+        if ( efi_secure_boot )
+            blexit(L"Refusing to boot unverified kernel with UEFI SecureBoot enabled");
+    }
 }
 
 static void __init efi_tables(void)
@@ -1214,9 +1355,7 @@ static void __init efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Syste
     EFI_STATUS status;
     UINTN info_size = 0, map_key;
     bool retry;
-#ifdef CONFIG_EFI_SET_VIRTUAL_ADDRESS_MAP
     unsigned int i;
-#endif
 
     efi_bs->GetMemoryMap(&info_size, NULL, &map_key,
                          &efi_mdesc_size, &mdesc_ver);
@@ -1250,31 +1389,33 @@ static void __init efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Syste
     if ( EFI_ERROR(status) )
         PrintErrMesg(L"Cannot exit boot services", status);
 
-#ifdef CONFIG_EFI_SET_VIRTUAL_ADDRESS_MAP
-    for ( i = 0; i < efi_memmap_size; i += efi_mdesc_size )
+    if ( IS_ENABLED(CONFIG_EFI_SET_VIRTUAL_ADDRESS_MAP) )
     {
-        EFI_MEMORY_DESCRIPTOR *desc = efi_memmap + i;
+        for ( i = 0; i < efi_memmap_size; i += efi_mdesc_size )
+        {
+            EFI_MEMORY_DESCRIPTOR *desc = efi_memmap + i;
 
-        /*
-         * Runtime services regions are always mapped here.
-         * Attributes may be adjusted in efi_init_memory().
-         */
-        if ( (desc->Attribute & EFI_MEMORY_RUNTIME) ||
-             desc->Type == EfiRuntimeServicesCode ||
-             desc->Type == EfiRuntimeServicesData )
-            desc->VirtualStart = desc->PhysicalStart;
-        else
-            desc->VirtualStart = INVALID_VIRTUAL_ADDRESS;
+            /*
+             * Runtime services regions are always mapped here.
+             * Attributes may be adjusted in efi_init_memory().
+             */
+            if ( (desc->Attribute & EFI_MEMORY_RUNTIME) ||
+                 desc->Type == EfiRuntimeServicesCode ||
+                 desc->Type == EfiRuntimeServicesData )
+                desc->VirtualStart = desc->PhysicalStart;
+            else
+                desc->VirtualStart = INVALID_VIRTUAL_ADDRESS;
+        }
+        status = efi_rs->SetVirtualAddressMap(efi_memmap_size, efi_mdesc_size,
+                                              mdesc_ver, efi_memmap);
+        if ( status != EFI_SUCCESS )
+        {
+            printk(XENLOG_ERR
+                   "EFI: SetVirtualAddressMap() failed (%#lx), disabling runtime services\n",
+                   status);
+            __clear_bit(EFI_RS, &efi_flags);
+        }
     }
-    status = efi_rs->SetVirtualAddressMap(efi_memmap_size, efi_mdesc_size,
-                                          mdesc_ver, efi_memmap);
-    if ( status != EFI_SUCCESS )
-    {
-        printk(XENLOG_ERR "EFI: SetVirtualAddressMap() failed (%#lx), disabling runtime services\n",
-               status);
-        __clear_bit(EFI_RS, &efi_flags);
-    }
-#endif
 
     /* Adjust pointers into EFI. */
     efi_ct = (const void *)efi_ct + DIRECTMAP_VIRT_START;
@@ -1288,18 +1429,17 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
                                       EFI_SYSTEM_TABLE *SystemTable)
 {
     static EFI_GUID __initdata loaded_image_guid = LOADED_IMAGE_PROTOCOL;
-    static EFI_GUID __initdata shim_lock_guid = SHIM_LOCK_PROTOCOL_GUID;
     EFI_LOADED_IMAGE *loaded_image;
     EFI_STATUS status;
-    unsigned int i, argc;
-    CHAR16 **argv, *file_name, *cfg_file_name = NULL, *options = NULL;
+    unsigned int i;
+    CHAR16 *file_name, *cfg_file_name = NULL, *options = NULL;
     UINTN gop_mode = ~0;
-    EFI_SHIM_LOCK_PROTOCOL *shim_lock;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     union string section = { NULL }, name;
     bool base_video = false;
     const char *option_str;
     bool use_cfg_file;
+    bool kernel_verified = false;
     int dt_modules_found;
 
     __set_bit(EFI_BOOT, &efi_flags);
@@ -1322,6 +1462,8 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
 
     if ( use_cfg_file )
     {
+        unsigned int argc;
+        CHAR16 **argv;
         UINTN offset = 0;
 
         argc = get_argv(0, NULL, loaded_image->LoadOptions,
@@ -1375,15 +1517,6 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
         if ( !base_video )
             efi_console_set_mode();
     }
-    else
-    {
-        /*
-         * Some compilers may emit a false "uninitialized use" warning for argc,
-         * so initialize argc/argv here to avoid the warning.
-         */
-        argc = 0;
-        argv = NULL;
-    }
 
     PrintStr(L"Xen " XEN_VERSION_STRING XEN_EXTRAVERSION
 	     " (c/s " XEN_CHANGESET ") EFI loader\r\n");
@@ -1392,7 +1525,7 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
 
     if ( use_cfg_file )
     {
-        EFI_FILE_HANDLE dir_handle;
+        EFI_FILE_HANDLE dir_handle = NULL;
         EFI_HANDLE gop_handle;
         UINTN depth, cols, rows;
 
@@ -1404,31 +1537,33 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
 
         gop = efi_get_gop(&gop_handle);
 
-        /* Get the file system interface. */
-        dir_handle = get_parent_handle(loaded_image, &file_name);
-
         /* Read and parse the config file. */
         if ( read_section(loaded_image, L"config", &cfg, NULL) )
             PrintStr(L"Using builtin config file\r\n");
-        else if ( !cfg_file_name )
+        else
         {
-            CHAR16 *tail;
+            ensure_dir_handle(loaded_image, &dir_handle, &file_name);
 
-            while ( (tail = point_tail(file_name)) != NULL )
+            if ( !cfg_file_name )
             {
-                wstrcpy(tail, L".cfg");
-                if ( read_file(dir_handle, file_name, &cfg, NULL) )
-                    break;
-                *tail = 0;
+                CHAR16 *tail;
+
+                while ( (tail = point_tail(file_name)) != NULL )
+                {
+                    wstrcpy(tail, L".cfg");
+                    if ( read_file(dir_handle, file_name, &cfg, NULL) )
+                        break;
+                    *tail = 0;
+                }
+                if ( !tail )
+                    blexit(L"No configuration file found.");
+                PrintStr(L"Using configuration file '");
+                PrintStr(file_name);
+                PrintStr(L"'\r\n");
             }
-            if ( !tail )
-                blexit(L"No configuration file found.");
-            PrintStr(L"Using configuration file '");
-            PrintStr(file_name);
-            PrintStr(L"'\r\n");
+            else if ( !read_file(dir_handle, cfg_file_name, &cfg, NULL) )
+                blexit(L"Configuration file not found.");
         }
-        else if ( !read_file(dir_handle, cfg_file_name, &cfg, NULL) )
-            blexit(L"Configuration file not found.");
         pre_parse(&cfg);
 
         if ( section.w )
@@ -1445,6 +1580,7 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
             if ( !name.s )
                 break;
             free_cfg();
+            ensure_dir_handle(loaded_image, &dir_handle, &file_name);
             if ( !read_file(dir_handle, s2w(&name), &cfg, NULL) )
             {
                 PrintStr(L"Chained configuration file '");
@@ -1456,15 +1592,21 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
             efi_bs->FreePool(name.w);
         }
 
-        efi_arch_cfg_file_early(loaded_image, dir_handle, section.s);
+        efi_arch_cfg_file_early(loaded_image, &dir_handle, section.s);
 
         option_str = name.s ? split_string(name.s) : NULL;
 
         if ( !read_section(loaded_image, L"kernel", &kernel, option_str) &&
              name.s )
         {
+            ensure_dir_handle(loaded_image, &dir_handle, &file_name);
             read_file(dir_handle, s2w(&name), &kernel, option_str);
             efi_bs->FreePool(name.w);
+        }
+        else
+        {
+            /* Kernel was embedded so Xen signature includes it. */
+            kernel_verified = true;
         }
 
         if ( !read_section(loaded_image, L"ramdisk", &ramdisk, NULL) )
@@ -1472,6 +1614,7 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
             name.s = get_value(&cfg, section.s, "ramdisk");
             if ( name.s )
             {
+                ensure_dir_handle(loaded_image, &dir_handle, &file_name);
                 read_file(dir_handle, s2w(&name), &ramdisk, NULL);
                 efi_bs->FreePool(name.w);
             }
@@ -1482,6 +1625,7 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
             name.s = get_value(&cfg, section.s, "xsm");
             if ( name.s )
             {
+                ensure_dir_handle(loaded_image, &dir_handle, &file_name);
                 read_file(dir_handle, s2w(&name), &xsm, NULL);
                 efi_bs->FreePool(name.w);
             }
@@ -1507,11 +1651,12 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
             }
         }
 
-        efi_arch_cfg_file_late(loaded_image, dir_handle, section.s);
+        efi_arch_cfg_file_late(loaded_image, &dir_handle, section.s);
 
         free_cfg();
 
-        dir_handle->Close(dir_handle);
+        if ( dir_handle )
+            dir_handle->Close(dir_handle);
 
         if ( gop && !base_video )
         {
@@ -1537,11 +1682,8 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
      * device tree through the efi_check_dt_boot function, in this stage
      * verify it.
      */
-    if ( kernel.ptr &&
-         !EFI_ERROR(efi_bs->LocateProtocol(&shim_lock_guid, NULL,
-                                           (void **)&shim_lock)) &&
-         (status = shim_lock->Verify(kernel.ptr, kernel.size)) != EFI_SUCCESS )
-        PrintErrMesg(L"Dom0 kernel image could not be verified", status);
+    if ( kernel.ptr && !kernel_verified )
+        efi_verify_kernel(ImageHandle);
 
     efi_arch_edd();
 
@@ -1680,7 +1822,7 @@ void __init efi_init_memory(void)
     struct rt_extra {
         struct rt_extra *next;
         unsigned long smfn, emfn;
-        unsigned int prot;
+        pte_attr_t prot;
     } *extra, *extra_head = NULL;
 
     free_ebmalloc_unused_mem();
@@ -1695,7 +1837,7 @@ void __init efi_init_memory(void)
         EFI_MEMORY_DESCRIPTOR *desc = efi_memmap + i;
         u64 len = desc->NumberOfPages << EFI_PAGE_SHIFT;
         unsigned long smfn, emfn;
-        unsigned int prot = PAGE_HYPERVISOR_RWX;
+        pte_attr_t prot = PAGE_HYPERVISOR_RWX;
         paddr_t mem_base;
         unsigned long mem_npages;
 

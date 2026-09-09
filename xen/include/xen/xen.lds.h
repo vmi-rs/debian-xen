@@ -81,6 +81,25 @@
   .stab.index 0 : { *(.stab.index) }         \
   .stab.indexstr 0 : { *(.stab.indexstr) }
 
+#if defined(CONFIG_CC_IS_CLANG) && defined(CONFIG_COVERAGE)
+/* Clang coverage sections. */
+#define LLVM_COV_RW_DATA                                   \
+    DECL_SECTION(__llvm_prf_cnts) { *(__llvm_prf_cnts) }   \
+    DECL_SECTION(__llvm_prf_data) { *(__llvm_prf_data) }   \
+    DECL_SECTION(__llvm_prf_bits) { *(__llvm_prf_bits) }
+
+#define LLVM_COV_RO_DATA                                   \
+    DECL_SECTION(__llvm_prf_names) { *(__llvm_prf_names) }
+
+#define LLVM_COV_DEBUG                                     \
+    DECL_DEBUG(__llvm_covfun, 8)                           \
+    DECL_DEBUG(__llvm_covmap, 8)
+#else
+#define LLVM_COV_RW_DATA
+#define LLVM_COV_RO_DATA
+#define LLVM_COV_DEBUG
+#endif
+
 /*
  * ELF sections.
  *
@@ -154,6 +173,12 @@
        _edevice = .;        \
   } :text
 
+#define SCHEDULER_ARRAY              \
+       . = ALIGN(POINTER_ALIGN);     \
+       __start_schedulers_array = .; \
+       *(.data.schedulers)           \
+       __end_schedulers_array = .;
+
 #ifdef CONFIG_HYPFS
 #define HYPFS_PARAM              \
        . = ALIGN(POINTER_ALIGN); \
@@ -188,10 +213,16 @@
 #define VPCI_ARRAY               \
        . = ALIGN(POINTER_ALIGN); \
        __start_vpci_array = .;   \
-       *(SORT(.data.vpci.*))     \
+       *(.data.rel.ro.vpci)      \
        __end_vpci_array = .;
 #else
 #define VPCI_ARRAY
 #endif
+
+#define EX_TABLE                  \
+        . = ALIGN(4);             \
+        __start___ex_table = .;   \
+        *(.ex_table)              \
+        __stop___ex_table = .;
 
 #endif /* __XEN_LDS_H__ */

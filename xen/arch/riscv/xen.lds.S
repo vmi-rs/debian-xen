@@ -33,7 +33,6 @@ SECTIONS
         *(.text.ident)
         _ident_end = .;
 
-        *(.fixup)
         *(.gnu.warning)
         . = ALIGN(POINTER_ALIGN);
         _etext = .;             /* End of text section */
@@ -47,10 +46,9 @@ SECTIONS
 
         *(.rodata)
         *(.rodata.*)
+        VPCI_ARRAY
         *(.data.rel.ro)
         *(.data.rel.ro.*)
-
-        VPCI_ARRAY
 
         . = ALIGN(POINTER_ALIGN);
     } :text
@@ -63,12 +61,22 @@ SECTIONS
         __note_gnu_build_id_end = .;
     } :note :text
     #endif
+
+    . = ALIGN(POINTER_ALIGN);
+    DECL_SECTION(.vsbi.exts) {
+        _svsbi_exts = .;
+        *(.vsbi.exts)
+        _evsbi_exts = .;
+    } :text
     _erodata = .;                /* End of read-only data */
 
     . = ALIGN(PAGE_SIZE);
     .data.ro_after_init : {
         __ro_after_init_start = .;
         *(.data.ro_after_init)
+
+        EX_TABLE
+
         . = ALIGN(PAGE_SIZE);
         __ro_after_init_end = .;
     } : text
@@ -80,11 +88,8 @@ SECTIONS
     . = ALIGN(PAGE_SIZE);
     .data : {                    /* Data */
         *(.data.page_aligned)
-        . = ALIGN(8);
-        __start_schedulers_array = .;
-        *(.data.schedulers)
-        __end_schedulers_array = .;
 
+        SCHEDULER_ARRAY
         HYPFS_PARAM
 
         *(.data .data.*)
@@ -165,6 +170,8 @@ SECTIONS
 
     ELF_DETAILS_SECTIONS
 }
+
+PROVIDE(cpu_present_map = cpu_possible_map);
 
 ASSERT(IS_ALIGNED(__bss_start,      POINTER_ALIGN), "__bss_start is misaligned")
 ASSERT(IS_ALIGNED(__bss_end,        POINTER_ALIGN), "__bss_end is misaligned")

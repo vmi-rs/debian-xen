@@ -9,7 +9,7 @@
 
 #include <asm/processor.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 register struct pcpu_info *tp asm ( "tp" );
 
@@ -20,6 +20,12 @@ struct pcpu_info {
 
 /* tp points to one of these */
 extern struct pcpu_info pcpu_info[NR_CPUS];
+
+/* Per-VCPU state that lives at the top of the stack */
+struct cpu_info {
+    /* This should be the first member. */
+    struct cpu_user_regs guest_cpu_user_regs;
+};
 
 #define set_processor_id(id)    do { \
     tp->processor_id = (id);         \
@@ -42,16 +48,18 @@ DECLARE_PER_CPU(struct vcpu *, curr_vcpu);
 #define get_cpu_current(cpu)  per_cpu(curr_vcpu, cpu)
 
 #define guest_cpu_user_regs() ({ BUG_ON("unimplemented"); NULL; })
+#define vcpu_guest_cpu_user_regs(vcpu) \
+    (&(vcpu)->arch.cpu_info->guest_cpu_user_regs)
 
 #define switch_stack_and_jump(stack, fn) do {               \
     asm volatile (                                          \
             "mv sp, %0\n"                                   \
-            "j " #fn :: "r" (stack), "X" (fn) : "memory" ); \
+            "jr %1" :: "r" (stack), "r" (fn) : "memory" );  \
     unreachable();                                          \
 } while ( false )
 
 #define get_per_cpu_offset() __per_cpu_offset[smp_processor_id()]
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* ASM__RISCV__CURRENT_H */

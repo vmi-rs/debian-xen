@@ -65,7 +65,7 @@ static const char migrate_permission_to_go[]=
     "domain is yours, you are cleared to unpause";
 static const char migrate_report[]=
     "my copy unpause results are as follows";
-#endif
+#endif /* !LIBXL_HAVE_NO_SUSPEND_RESUME */
 
   /* followed by one byte:
    *     0: everything went well, domain is running
@@ -130,8 +130,8 @@ int main_migrate_receive(int argc, char **argv);
 int main_save(int argc, char **argv);
 int main_migrate(int argc, char **argv);
 int main_suspend(int argc, char **argv);
+#endif /* !LIBXL_HAVE_NO_SUSPEND_RESUME */
 int main_resume(int argc, char **argv);
-#endif
 int main_dump_core(int argc, char **argv);
 int main_pause(int argc, char **argv);
 int main_unpause(int argc, char **argv);
@@ -217,6 +217,8 @@ int main_psr_mba_set(int argc, char **argv);
 int main_psr_mba_show(int argc, char **argv);
 #endif
 int main_qemu_monitor_command(int argc, char **argv);
+int main_xsquota_get(int argc, char **argv);
+int main_xsquota_set(int argc, char **argv);
 
 void help(const char *command);
 
@@ -310,6 +312,9 @@ extern void printf_info_sexp(int domid, libxl_domain_config *d_config, FILE *fh)
 extern void apply_global_affinity_masks(libxl_domain_type type,
                                         libxl_bitmap *vcpu_affinity_array,
                                         unsigned int size);
+void printf_info(enum output_format output_format,
+                 int domid,
+                 libxl_domain_config *d_config, FILE *fh);
 
 #define XL_GLOBAL_CONFIG XEN_CONFIG_DIR "/xl.conf"
 #define XL_LOCK_FILE XEN_LOCK_DIR "/xl"

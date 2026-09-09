@@ -10,28 +10,21 @@
 #include <xen/lib.h>
 
 /*
- * Check that fn(val) can be calcuated by the compiler, and that it gives the
+ * Check that fn(val) can be calculated by the compiler, and that it gives the
  * expected answer.
- *
- * Clang < 8 can't fold constants through static inlines, causing this to
- * fail.  Simply skip it for incredibly old compilers.
  *
  * N.B. fn is intentionally not bracketed to allow us to test function-like
  * macros too.
  */
-#if !defined(CONFIG_CC_IS_CLANG) || CONFIG_CLANG_VERSION >= 80000
 #define COMPILE_CHECK(fn, val, res)                                     \
     do {                                                                \
-        typeof(fn(val)) real = fn(val);                                 \
+        auto real = fn(val);                                            \
                                                                         \
         if ( !__builtin_constant_p(real) )                              \
             BUILD_ERROR("'" STR(fn(val)) "' not compile-time constant"); \
         else if ( real != (res) )                                       \
             BUILD_ERROR("Compile time check '" STR(fn(val) == res) "' failed"); \
     } while ( 0 )
-#else
-#define COMPILE_CHECK(fn, val, res)
-#endif
 
 /*
  * Check that Xen's runtime logic for fn(val) gives the expected answer.  This
@@ -43,7 +36,7 @@
  */
 #define RUNTIME_CHECK(fn, val, res)                     \
     do {                                                \
-        typeof(fn(val)) real = fn(HIDE(val));           \
+        auto real = fn(HIDE(val));                      \
                                                         \
         if ( real != (res) )                            \
             panic("%s: %s(%s) expected %u, got %u\n",   \

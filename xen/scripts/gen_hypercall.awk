@@ -2,7 +2,9 @@
 # the calls of the handlers inside a switch() statement.
 
 BEGIN {
-    printf("/* Generated file, do not edit! */\n\n");
+    printf("#ifndef XEN_HYPERCALL_DEFS_H\n");
+    printf("#define XEN_HYPERCALL_DEFS_H\n\n");
+    printf("/* Automatically generated from xen/include/hypercall-defs.c - do not edit! */\n\n");
     e = 0;
     n = 0;
     p = 0;
@@ -264,7 +266,7 @@ END {
         printf("({ \\\n");
         if (need_mask)
             printf("    uint64_t mask = (num) > 63 ? 0 : 1ULL << (num); \\\n");
-        printf("    ");
+
         for (pl = 1; pl <= n_prios[ca]; pl++) {
             if (prios[ca, p_list[pl]] > 1) {
                 if (pl < n_prios[ca]) {
@@ -290,7 +292,7 @@ END {
             } else {
                 for (i = 1; i <= nc; i++)
                     if (call[i] == ca && call_prio[i] == p_list[pl]) {
-                        printf("if ( likely((num) == __HYPERVISOR_%s) ) \\\n", fn[call_fn[i]]);
+                        printf("    if ( likely((num) == __HYPERVISOR_%s) ) \\\n", fn[call_fn[i]]);
                         do_call(call_fn[i], call_p[i]);
                     }
             }
@@ -311,4 +313,5 @@ END {
                 printf("[__HYPERVISOR_%s] = %d, \\\n", fn[call_fn[i]], n_args[call_fn[i]]);
         printf("}\n");
     }
+    printf("\n#endif /* XEN_HYPERCALL_DEFS_H */\n");
 }

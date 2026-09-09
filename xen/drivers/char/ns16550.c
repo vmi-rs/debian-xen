@@ -1,10 +1,10 @@
 /******************************************************************************
  * ns16550.c
- * 
+ *
  * Driver for 16550-series UARTs. This driver is to be kept within Xen as
  * it permits debugging of seriously-toasted machines (e.g., in situations
  * where a device driver within a guest OS would be inaccessible).
- * 
+ *
  * Copyright (c) 2003-2005, K A Fraser
  */
 
@@ -34,7 +34,7 @@
 #include <xen/8250-uart.h>
 #include <xen/vmap.h>
 #include <asm/io.h>
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 #include <asm/device.h>
 #endif
 #ifdef CONFIG_X86
@@ -57,7 +57,9 @@ static struct ns16550 {
 #endif
     /* UART with no IRQ line: periodically-polled I/O. */
     struct timer timer;
+#ifdef CONFIG_SYSTEM_SUSPEND
     struct timer resume_timer;
+#endif
     unsigned int timeout_ms;
     bool intr_works;
     bool force_polling;
@@ -66,8 +68,8 @@ static struct ns16550 {
     /* PCI card parameters. */
     bool pb_bdf_enable;     /* if =1, pb-bdf effective, port behind bridge */
     bool ps_bdf_enable;     /* if =1, ps_bdf effective, port on pci card */
-    unsigned int pb_bdf[3]; /* pci bridge BDF */
-    unsigned int ps_bdf[3]; /* pci serial port BDF */
+    pci_sbdf_t pci_bridge;
+    pci_sbdf_t pci_device;
     u32 bar;
     u32 bar64;
     u16 cr;
@@ -114,15 +116,20 @@ struct ns16550_config_param {
 static void enable_exar_enhanced_bits(const struct ns16550 *uart);
 #endif
 
+#ifdef CONFIG_SYSTEM_SUSPEND
 static void cf_check ns16550_delayed_resume(void *data);
+#endif
 
 static u8 ns_read_reg(const struct ns16550 *uart, unsigned int reg)
 {
-    void __iomem *addr = uart->remapped_io_base + (reg << uart->reg_shift);
+    const volatile void __iomem *addr;
+
 #ifdef CONFIG_HAS_IOPORTS
     if ( uart->remapped_io_base == NULL )
         return inb(uart->io_base + reg);
 #endif
+
+    addr = uart->remapped_io_base + (reg << uart->reg_shift);
     switch ( uart->reg_width )
     {
     case 1:
@@ -136,11 +143,14 @@ static u8 ns_read_reg(const struct ns16550 *uart, unsigned int reg)
 
 static void ns_write_reg(const struct ns16550 *uart, unsigned int reg, u8 c)
 {
-    void __iomem *addr = uart->remapped_io_base + (reg << uart->reg_shift);
+    volatile void __iomem *addr;
+
 #ifdef CONFIG_HAS_IOPORTS
     if ( uart->remapped_io_base == NULL )
         return outb(c, uart->io_base + reg);
 #endif
+
+    addr = uart->remapped_io_base + (reg << uart->reg_shift);
     switch ( uart->reg_width )
     {
     case 1:
@@ -305,31 +315,22 @@ static void pci_serial_early_init(struct ns16550 *uart)
     if ( !uart->ps_bdf_enable )
         return;
 
-    cmd = pci_conf_read16(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                  uart->ps_bdf[2]), PCI_COMMAND);
+    cmd = pci_conf_read16(uart->pci_device, PCI_COMMAND);
 
     if ( uart->io_base >= 0x10000 )
     {
-        pci_conf_write16(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                  uart->ps_bdf[2]),
-                         PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
+        pci_conf_write16(uart->pci_device, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
         return;
     }
 
     if ( uart->pb_bdf_enable )
-        pci_conf_write16(PCI_SBDF(0, uart->pb_bdf[0], uart->pb_bdf[1],
-                                  uart->pb_bdf[2]),
-                         PCI_IO_BASE,
+        pci_conf_write16(uart->pci_bridge, PCI_IO_BASE,
                          (uart->io_base & 0xF000) |
                          ((uart->io_base & 0xF000) >> 8));
 
-    pci_conf_write32(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                              uart->ps_bdf[2]),
-                     PCI_BASE_ADDRESS_0,
+    pci_conf_write32(uart->pci_device, PCI_BASE_ADDRESS_0,
                      uart->io_base | PCI_BASE_ADDRESS_SPACE_IO);
-    pci_conf_write16(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                              uart->ps_bdf[2]),
-                     PCI_COMMAND, cmd | PCI_COMMAND_IO);
+    pci_conf_write16(uart->pci_device, PCI_COMMAND, cmd | PCI_COMMAND_IO);
 #endif
 }
 
@@ -460,7 +461,9 @@ static void __init cf_check ns16550_init_postirq(struct serial_port *port)
     serial_async_transmit(port);
 
     init_timer(&uart->timer, ns16550_poll, port, 0);
+#ifdef CONFIG_SYSTEM_SUSPEND
     init_timer(&uart->resume_timer, ns16550_delayed_resume, port, 0);
+#endif
 
     /* Calculate time to fill RX FIFO and/or empty TX FIFO for polling. */
     bits = uart->data_bits + uart->stop_bits + !!uart->parity;
@@ -475,17 +478,16 @@ static void __init cf_check ns16550_init_postirq(struct serial_port *port)
                                 PFN_UP(uart->io_base + uart->io_size) - 1) )
             printk(XENLOG_INFO "Error while adding MMIO range of device to mmio_ro_ranges\n");
 
-        if ( pci_ro_device(0, uart->ps_bdf[0],
-                           PCI_DEVFN(uart->ps_bdf[1], uart->ps_bdf[2])) )
-            printk(XENLOG_INFO "Could not mark config space of %02x:%02x.%u read-only.\n",
-                   uart->ps_bdf[0], uart->ps_bdf[1],
-                   uart->ps_bdf[2]);
+        if ( pci_ro_device(uart->pci_device.seg, uart->pci_device.bus,
+                           uart->pci_device.devfn) )
+            printk(XENLOG_INFO
+                   "Could not mark config space of %pp read-only.\n",
+                   &uart->pci_device);
 
         if ( uart->msi )
         {
             struct msi_info msi = {
-                .sbdf = PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                 uart->ps_bdf[2]),
+                .sbdf = uart->pci_device,
                 .irq = uart->irq,
                 .entry_nr = 1
             };
@@ -527,9 +529,8 @@ static void __init cf_check ns16550_init_postirq(struct serial_port *port)
             }
 
             if ( rc )
-                printk(XENLOG_WARNING
-                       "MSI setup failed (%d) for %02x:%02x.%o\n",
-                       rc, uart->ps_bdf[0], uart->ps_bdf[1], uart->ps_bdf[2]);
+                printk(XENLOG_WARNING "MSI setup failed (%d) for %pp\n",
+                       rc, &uart->pci_device);
         }
     }
 #endif
@@ -546,6 +547,8 @@ static void __init cf_check ns16550_init_postirq(struct serial_port *port)
     ns16550_setup_postirq(uart);
 }
 
+#ifdef CONFIG_SYSTEM_SUSPEND
+
 static void cf_check ns16550_suspend(struct serial_port *port)
 {
     struct ns16550 *uart = port->uart;
@@ -554,8 +557,7 @@ static void cf_check ns16550_suspend(struct serial_port *port)
 
 #ifdef NS16550_PCI
     if ( uart->bar )
-       uart->cr = pci_conf_read16(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                  uart->ps_bdf[2]), PCI_COMMAND);
+       uart->cr = pci_conf_read16(uart->pci_device, PCI_COMMAND);
 #endif
 }
 
@@ -566,19 +568,15 @@ static void _ns16550_resume(struct serial_port *port)
 
     if ( uart->bar )
     {
-       pci_conf_write32(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                 uart->ps_bdf[2]),
+       pci_conf_write32(uart->pci_device,
                         PCI_BASE_ADDRESS_0 + uart->bar_idx*4, uart->bar);
 
         /* If 64 bit BAR, write higher 32 bits to BAR+4 */
         if ( uart->bar & PCI_BASE_ADDRESS_MEM_TYPE_64 )
-            pci_conf_write32(PCI_SBDF(0, uart->ps_bdf[0],  uart->ps_bdf[1],
-                                      uart->ps_bdf[2]),
+            pci_conf_write32(uart->pci_device,
                         PCI_BASE_ADDRESS_0 + (uart->bar_idx+1)*4, uart->bar64);
 
-       pci_conf_write16(PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
-                                 uart->ps_bdf[2]),
-                        PCI_COMMAND, uart->cr);
+       pci_conf_write16(uart->pci_device, PCI_COMMAND, uart->cr);
     }
 #endif
 
@@ -623,6 +621,8 @@ static void cf_check ns16550_resume(struct serial_port *port)
     else
         _ns16550_resume(port);
 }
+
+#endif /* CONFIG_SYSTEM_SUSPEND */
 
 static void __init cf_check ns16550_endboot(struct serial_port *port)
 {
@@ -678,8 +678,10 @@ static struct uart_driver __read_mostly ns16550_driver = {
     .init_irq     = ns16550_init_irq,
     .init_postirq = ns16550_init_postirq,
     .endboot      = ns16550_endboot,
+#ifdef CONFIG_SYSTEM_SUSPEND
     .suspend      = ns16550_suspend,
     .resume       = ns16550_resume,
+#endif
     .tx_ready     = ns16550_tx_ready,
     .putc         = ns16550_putc,
     .getc         = ns16550_getc,
@@ -710,13 +712,13 @@ static int __init parse_parity_char(int c)
     {
     case 'n':
         return UART_PARITY_NONE;
-    case 'o': 
+    case 'o':
         return UART_PARITY_ODD;
-    case 'e': 
+    case 'e':
         return UART_PARITY_EVEN;
-    case 'm': 
+    case 'm':
         return UART_PARITY_MARK;
-    case 's': 
+    case 's':
         return UART_PARITY_SPACE;
     }
     return 0;
@@ -1234,13 +1236,12 @@ pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
                 uint32_t bar, bar_64 = 0, len, len_64;
                 u64 size = 0;
                 const struct ns16550_config_param *param = uart_param;
+                pci_sbdf_t sbdf = PCI_SBDF(0, b, d, f);
 
-                nextf = (f || (pci_conf_read16(PCI_SBDF(0, b, d, f),
-                                               PCI_HEADER_TYPE) &
+                nextf = (f || (pci_conf_read16(sbdf, PCI_HEADER_TYPE) &
                                0x80)) ? f + 1 : 8;
 
-                switch ( pci_conf_read16(PCI_SBDF(0, b, d, f),
-                                         PCI_CLASS_DEVICE) )
+                switch ( pci_conf_read16(sbdf, PCI_CLASS_DEVICE) )
                 {
                 case 0x0700: /* single port serial */
                 case 0x0702: /* multi port serial */
@@ -1257,10 +1258,8 @@ pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
                 /* Check for params in uart_config lookup table */
                 for ( i = 0; i < ARRAY_SIZE(uart_config); i++ )
                 {
-                    u16 vendor = pci_conf_read16(PCI_SBDF(0, b, d, f),
-                                                 PCI_VENDOR_ID);
-                    u16 device = pci_conf_read16(PCI_SBDF(0, b, d, f),
-                                                 PCI_DEVICE_ID);
+                    u16 vendor = pci_conf_read16(sbdf, PCI_VENDOR_ID);
+                    u16 device = pci_conf_read16(sbdf, PCI_DEVICE_ID);
 
                     if ( uart_config[i].vendor_id == vendor &&
                          uart_config[i].dev_id == device )
@@ -1283,29 +1282,26 @@ pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
                 }
 
                 uart->io_base = 0;
-                bar = pci_conf_read32(PCI_SBDF(0, b, d, f),
-                                      PCI_BASE_ADDRESS_0 + bar_idx * 4);
+                bar = pci_conf_read32(sbdf, PCI_BASE_ADDRESS_0 + bar_idx * 4);
 
                 /* MMIO based */
                 if ( param->mmio && !(bar & PCI_BASE_ADDRESS_SPACE_IO) )
                 {
-                    pci_conf_write32(PCI_SBDF(0, b, d, f),
-                                     PCI_BASE_ADDRESS_0 + bar_idx*4, ~0u);
-                    len = pci_conf_read32(PCI_SBDF(0, b, d, f),
+                    pci_conf_write32(sbdf, PCI_BASE_ADDRESS_0 + bar_idx*4, ~0u);
+                    len = pci_conf_read32(sbdf,
                                           PCI_BASE_ADDRESS_0 + bar_idx * 4);
-                    pci_conf_write32(PCI_SBDF(0, b, d, f),
-                                     PCI_BASE_ADDRESS_0 + bar_idx*4, bar);
+                    pci_conf_write32(sbdf, PCI_BASE_ADDRESS_0 + bar_idx*4, bar);
 
                     /* Handle 64 bit BAR if found */
                     if ( bar & PCI_BASE_ADDRESS_MEM_TYPE_64 )
                     {
-                        bar_64 = pci_conf_read32(PCI_SBDF(0, b, d, f),
+                        bar_64 = pci_conf_read32(sbdf,
                                       PCI_BASE_ADDRESS_0 + (bar_idx + 1) * 4);
-                        pci_conf_write32(PCI_SBDF(0, b, d, f),
+                        pci_conf_write32(sbdf,
                                     PCI_BASE_ADDRESS_0 + (bar_idx+1)*4, ~0u);
-                        len_64 = pci_conf_read32(PCI_SBDF(0, b, d, f),
+                        len_64 = pci_conf_read32(sbdf,
                                     PCI_BASE_ADDRESS_0 + (bar_idx + 1) * 4);
-                        pci_conf_write32(PCI_SBDF(0, b, d, f),
+                        pci_conf_write32(sbdf,
                                     PCI_BASE_ADDRESS_0 + (bar_idx+1)*4, bar_64);
                         size  = ((u64)~0 << 32) | PCI_BASE_ADDRESS_MEM_MASK;
                         size &= ((u64)len_64 << 32) | len;
@@ -1319,12 +1315,9 @@ pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
                 /* IO based */
                 else if ( !param->mmio && (bar & PCI_BASE_ADDRESS_SPACE_IO) )
                 {
-                    pci_conf_write32(PCI_SBDF(0, b, d, f),
-                                     PCI_BASE_ADDRESS_0 + bar_idx*4, ~0u);
-                    len = pci_conf_read32(PCI_SBDF(0, b, d, f),
-                                          PCI_BASE_ADDRESS_0);
-                    pci_conf_write32(PCI_SBDF(0, b, d, f),
-                                     PCI_BASE_ADDRESS_0 + bar_idx*4, bar);
+                    pci_conf_write32(sbdf, PCI_BASE_ADDRESS_0 + bar_idx*4, ~0u);
+                    len = pci_conf_read32(sbdf, PCI_BASE_ADDRESS_0);
+                    pci_conf_write32(sbdf, PCI_BASE_ADDRESS_0 + bar_idx*4, bar);
                     size = len & PCI_BASE_ADDRESS_IO_MASK;
 
                     uart->io_base = bar & ~PCI_BASE_ADDRESS_SPACE_IO;
@@ -1357,19 +1350,15 @@ pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
                 if ( param->fifo_size )
                     uart->fifo_size = param->fifo_size;
 
-                uart->ps_bdf[0] = b;
-                uart->ps_bdf[1] = d;
-                uart->ps_bdf[2] = f;
+                uart->pci_device = sbdf;
                 uart->ps_bdf_enable = true;
                 uart->bar_idx = bar_idx;
                 uart->bar = bar;
                 uart->bar64 = bar_64;
                 uart->io_size = max(8U << param->reg_shift,
                                     param->uart_offset);
-                uart->irq = pci_conf_read8(PCI_SBDF(0, b, d, f),
-                                           PCI_INTERRUPT_PIN) ?
-                            pci_conf_read8(PCI_SBDF(0, b, d, f),
-                                           PCI_INTERRUPT_LINE) : 0;
+                uart->irq = pci_conf_read8(sbdf, PCI_INTERRUPT_PIN) ?
+                            pci_conf_read8(sbdf, PCI_INTERRUPT_LINE) : 0;
 
 #ifdef CONFIG_X86
                 /*
@@ -1611,18 +1600,22 @@ static bool __init parse_positional(struct ns16550 *uart, char **str)
 #ifdef CONFIG_HAS_PCI
     if ( *conf == ',' && *++conf != ',' )
     {
-        conf = parse_pci(conf, NULL, &uart->ps_bdf[0],
-                         &uart->ps_bdf[1], &uart->ps_bdf[2]);
+        unsigned int b, d, f;
+
+        conf = parse_pci(conf, NULL, &b, &d, &f);
         if ( !conf )
             PARSE_ERR_RET("Bad port PCI coordinates");
+        uart->pci_device = PCI_SBDF(0, b, d, f);
         uart->ps_bdf_enable = true;
     }
 
     if ( *conf == ',' && *++conf != ',' )
     {
-        if ( !parse_pci(conf, NULL, &uart->pb_bdf[0],
-                        &uart->pb_bdf[1], &uart->pb_bdf[2]) )
+        unsigned int b, d, f;
+
+        if ( !parse_pci(conf, NULL, &b, &d, &f) )
             PARSE_ERR_RET("Bad bridge PCI coordinates");
+        uart->pci_bridge = PCI_SBDF(0, b, d, f);
         uart->pb_bdf_enable = true;
     }
 #endif
@@ -1705,18 +1698,26 @@ static bool __init parse_namevalue_pairs(char *str, struct ns16550 *uart)
             break;
 
         case port_bdf:
-            if ( !parse_pci(param_value, NULL, &uart->ps_bdf[0],
-                            &uart->ps_bdf[1], &uart->ps_bdf[2]) )
+        {
+            unsigned int b, d, f;
+
+            if ( !parse_pci(param_value, NULL, &b, &d, &f) )
                 PARSE_ERR_RET("Bad port PCI coordinates\n");
+            uart->pci_device = PCI_SBDF(0, b, d, f);
             uart->ps_bdf_enable = true;
             break;
+        }
 
         case bridge_bdf:
-            if ( !parse_pci(param_value, NULL, &uart->pb_bdf[0],
-                            &uart->pb_bdf[1], &uart->pb_bdf[2]) )
+        {
+            unsigned int b, d, f;
+
+            if ( !parse_pci(param_value, NULL, &b, &d, &f) )
                 PARSE_ERR_RET("Bad bridge PCI coordinates\n");
+            uart->pci_bridge = PCI_SBDF(0, b, d, f);
             uart->pb_bdf_enable = true;
             break;
+        }
 #endif
 
         default:
@@ -1800,7 +1801,7 @@ void __init ns16550_init(int index, struct ns16550_defaults *defaults)
 
 #endif /* CONFIG_X86 */
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 static int __init ns16550_uart_dt_init(struct dt_device_node *dev,
                                        const void *data)
 {
@@ -1879,7 +1880,7 @@ DT_DEVICE_START(ns16550, "NS16550 UART", DEVICE_SERIAL)
         .init = ns16550_uart_dt_init,
 DT_DEVICE_END
 
-#endif /* HAS_DEVICE_TREE */
+#endif /* HAS_DEVICE_TREE_DISCOVERY */
 
 #if defined(CONFIG_ACPI) && defined(CONFIG_ARM)
 #include <xen/acpi.h>

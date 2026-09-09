@@ -10,12 +10,14 @@
 
 #include <xen/ioreq.h>
 
-#include <asm/mtrr.h>
-#include <asm/p2m.h>
+#include <asm/guest-msr.h>
+#include <asm/hvm/nestedhvm.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/hvm/vmx/vvmx.h>
-#include <asm/hvm/nestedhvm.h>
+#include <asm/msr.h>
+#include <asm/mtrr.h>
+#include <asm/p2m.h>
 
 static DEFINE_PER_CPU(u64 *, vvmcs_buf);
 
@@ -1057,10 +1059,10 @@ static void load_shadow_control(struct vcpu *v)
      * and EXCEPTION
      * Enforce the removed features
      */
-    nvmx_update_pin_control(v, vmx_pin_based_exec_control);
+    nvmx_update_pin_control(v, vmx_caps.pin_based_exec_control);
     vmx_update_cpu_exec_control(v);
     vmx_update_secondary_exec_control(v);
-    nvmx_update_exit_control(v, vmx_vmexit_control);
+    nvmx_update_exit_control(v, vmx_caps.vmexit_control);
     nvmx_update_entry_control(v);
     vmx_update_exception_bitmap(v);
     nvmx_update_apic_access_address(v);
@@ -1112,7 +1114,7 @@ static void load_shadow_guest_state(struct vcpu *v)
             hvm_inject_hw_exception(X86_EXC_GP, 0);
     }
 
-    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset, 0);
+    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset);
 
     vvmcs_to_shadow_bulk(v, ARRAY_SIZE(vmentry_fields), vmentry_fields);
 
@@ -1166,7 +1168,7 @@ static void nvmx_set_vmcs_pointer(struct vcpu *v, struct vmcs_struct *vvmcs)
     paddr_t vvmcs_maddr = v->arch.hvm.vmx.vmcs_shadow_maddr;
 
     __vmpclear(vvmcs_maddr);
-    vvmcs->vmcs_revision_id |= VMCS_RID_TYPE_MASK;
+    vvmcs->revision_id |= VMCS_RID_TYPE_MASK;
     v->arch.hvm.vmx.secondary_exec_control |=
         SECONDARY_EXEC_ENABLE_VMCS_SHADOWING;
     __vmwrite(SECONDARY_VM_EXEC_CONTROL,
@@ -1181,7 +1183,7 @@ static void nvmx_clear_vmcs_pointer(struct vcpu *v, struct vmcs_struct *vvmcs)
     paddr_t vvmcs_maddr = v->arch.hvm.vmx.vmcs_shadow_maddr;
 
     __vmpclear(vvmcs_maddr);
-    vvmcs->vmcs_revision_id &= ~VMCS_RID_TYPE_MASK;
+    vvmcs->revision_id &= ~VMCS_RID_TYPE_MASK;
     v->arch.hvm.vmx.secondary_exec_control &=
         ~SECONDARY_EXEC_ENABLE_VMCS_SHADOWING;
     __vmwrite(SECONDARY_VM_EXEC_CONTROL,
@@ -1235,9 +1237,6 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
     regs->rip = get_vvmcs(v, GUEST_RIP);
     regs->rsp = get_vvmcs(v, GUEST_RSP);
     regs->rflags = get_vvmcs(v, GUEST_RFLAGS);
-
-    /* updating host cr0 to sync TS bit */
-    __vmwrite(HOST_CR0, v->arch.hvm.vmx.host_cr0);
 
     /* Setup virtual ETP for L2 guest*/
     if ( nestedhvm_paging_mode_hap(v) )
@@ -1328,7 +1327,7 @@ static void load_vvmcs_host_state(struct vcpu *v)
             hvm_inject_hw_exception(X86_EXC_GP, 0);
     }
 
-    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset, 0);
+    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset);
 
     set_vvmcs(v, VM_ENTRY_INTR_INFO, 0);
 
@@ -1466,9 +1465,6 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
     /* VM exit clears all bits except bit 1 */
     regs->rflags = X86_EFLAGS_MBS;
 
-    /* updating host cr0 to sync TS bit */
-    __vmwrite(HOST_CR0, v->arch.hvm.vmx.host_cr0);
-
     if ( cpu_has_vmx_virtual_intr_delivery )
         nvmx_update_apicv(v);
 
@@ -1561,7 +1557,7 @@ static int nvmx_handle_vmxon(struct cpu_user_regs *regs)
     rc = hvm_copy_from_guest_phys(&nvmcs_revid, gpa, sizeof(nvmcs_revid));
     if ( rc != HVMTRANS_okay ||
          (nvmcs_revid & ~VMX_BASIC_REVISION_MASK) ||
-         ((nvmcs_revid ^ vmx_basic_msr) & VMX_BASIC_REVISION_MASK) )
+         ((nvmcs_revid ^ vmx_caps.basic_msr) & VMX_BASIC_REVISION_MASK) )
     {
         vmfail_invalid(regs);
         return X86EMUL_OKAY;
@@ -1799,10 +1795,10 @@ static int nvmx_handle_vmptrld(struct cpu_user_regs *regs)
             {
                 struct vmcs_struct *vvmcs = vvmcx;
 
-                if ( ((vvmcs->vmcs_revision_id ^ vmx_basic_msr) &
-                                         VMX_BASIC_REVISION_MASK) ||
+                if ( ((vvmcs->revision_id ^ vmx_caps.basic_msr) &
+                      VMX_BASIC_REVISION_MASK) ||
                      (!cpu_has_vmx_vmcs_shadowing &&
-                      (vvmcs->vmcs_revision_id & ~VMX_BASIC_REVISION_MASK)) )
+                      (vvmcs->revision_id & ~VMX_BASIC_REVISION_MASK)) )
                 {
                     hvm_unmap_guest_frame(vvmcx, 1);
                     vmfail(regs, VMX_INSN_VMPTRLD_INCORRECT_VMCS_ID);
@@ -1820,7 +1816,8 @@ static int nvmx_handle_vmptrld(struct cpu_user_regs *regs)
                 vvmcx = NULL;
             }
         }
-        else
+
+        if ( !vvmcx )
         {
             vmfail(regs, VMX_INSN_VMPTRLD_INVALID_PHYADDR);
             goto out;
@@ -2193,7 +2190,7 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
     case MSR_IA32_VMX_TRUE_PROCBASED_CTLS:
     case MSR_IA32_VMX_TRUE_EXIT_CTLS:
     case MSR_IA32_VMX_TRUE_ENTRY_CTLS:
-        if ( !(vmx_basic_msr & VMX_BASIC_DEFAULT1_ZERO) )
+        if ( !(vmx_caps.basic_msr & VMX_BASIC_DEFAULT1_ZERO) )
             return 0;
         break;
 
@@ -2215,7 +2212,7 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
             map_domain_page(_mfn(PFN_DOWN(v->arch.hvm.vmx.vmcs_pa)));
 
         data = (host_data & (~0ul << 32)) |
-               (vmcs->vmcs_revision_id & 0x7fffffff);
+               (vmcs->revision_id & 0x7fffffff);
         unmap_domain_page(vmcs);
 
         if ( !cpu_has_vmx_vmcs_shadowing )
@@ -2455,17 +2452,12 @@ int nvmx_n2_vmexit_handler(struct cpu_user_regs *regs,
         __vmread(VM_EXIT_INTR_INFO, &intr_info);
         vector = intr_info & INTR_INFO_VECTOR_MASK;
         /*
-         * decided by L0 and L1 exception bitmap, if the vetor is set by
-         * both, L0 has priority on #PF and #NM, L1 has priority on others
+         * decided by L0 and L1 exception bitmap, if the vector is set by
+         * both, L0 has priority on #PF, L1 has priority on others
          */
         if ( vector == X86_EXC_PF )
         {
             if ( paging_mode_hap(v->domain) )
-                nvcpu->nv_vmexit_pending = 1;
-        }
-        else if ( vector == X86_EXC_NM )
-        {
-            if ( v->fpu_dirtied )
                 nvcpu->nv_vmexit_pending = 1;
         }
         else if ( (intr_info & valid_mask) == valid_mask )
@@ -2674,7 +2666,7 @@ int nvmx_n2_vmexit_handler(struct cpu_user_regs *regs,
             {
             case VMX_CR_ACCESS_TYPE_MOV_TO_CR:
             {
-                val = *decode_gpr(guest_cpu_user_regs(), qual.gpr);
+                val = reg_read(regs, qual.gpr);
 
                 if ( qual.cr == 0 )
                 {

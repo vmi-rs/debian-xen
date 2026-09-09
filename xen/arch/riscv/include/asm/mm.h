@@ -5,12 +5,15 @@
 
 #include <public/xen.h>
 #include <xen/bug.h>
+#include <xen/compiler.h>
 #include <xen/const.h>
 #include <xen/mm-frame.h>
 #include <xen/pdx.h>
 #include <xen/pfn.h>
+#include <xen/sections.h>
 #include <xen/types.h>
 
+#include <asm/page.h>
 #include <asm/page-bits.h>
 
 extern vaddr_t directmap_virt_start;
@@ -18,12 +21,21 @@ extern vaddr_t directmap_virt_start;
 #define pfn_to_paddr(pfn) ((paddr_t)(pfn) << PAGE_SHIFT)
 #define paddr_to_pfn(pa)  ((unsigned long)((pa) >> PAGE_SHIFT))
 
-#define paddr_to_pdx(pa)    mfn_to_pdx(maddr_to_mfn(pa))
+static inline pte_t paddr_to_pte(paddr_t paddr,
+                                 unsigned int permissions)
+{
+    return (pte_t) { .pte = (paddr_to_pfn(paddr) << PTE_PPN_SHIFT) | permissions };
+}
+
+static inline paddr_t pte_to_paddr(pte_t pte)
+{
+    return pfn_to_paddr(pte.pte >> PTE_PPN_SHIFT);
+}
+
 #define gfn_to_gaddr(gfn)   pfn_to_paddr(gfn_x(gfn))
 #define gaddr_to_gfn(ga)    _gfn(paddr_to_pfn(ga))
 #define mfn_to_maddr(mfn)   pfn_to_paddr(mfn_x(mfn))
 #define maddr_to_mfn(ma)    _mfn(paddr_to_pfn(ma))
-#define vmap_to_mfn(va)     maddr_to_mfn(virt_to_maddr((vaddr_t)(va)))
 #define vmap_to_page(va)    mfn_to_page(vmap_to_mfn(va))
 
 static inline void *maddr_to_virt(paddr_t ma)
@@ -35,6 +47,15 @@ static inline void *maddr_to_virt(paddr_t ma)
     return (void *)va;
 }
 
+#define mfn_from_pte(pte) maddr_to_mfn(pte_to_paddr(pte))
+
+#define vmap_to_mfn(va)                             \
+({                                                  \
+    pte_t __entry = pt_walk((vaddr_t)(va), NULL);   \
+    BUG_ON(!pte_is_mapping(__entry));               \
+    maddr_to_mfn(pte_to_paddr(__entry));            \
+})
+
 /*
  * virt_to_maddr() is expected to work with virtual addresses from either
  * the directmap region or Xen's linkage (XEN_VIRT_START) region.
@@ -43,13 +64,21 @@ static inline void *maddr_to_virt(paddr_t ma)
  */
 static inline unsigned long virt_to_maddr(unsigned long va)
 {
+    const unsigned long xen_size = (unsigned long)(_end - _start);
+    const unsigned long xen_virt_start = _AC(XEN_VIRT_START, UL);
+    const unsigned long xen_virt_end = xen_virt_start + xen_size - 1;
+
     if ((va >= DIRECTMAP_VIRT_START) &&
         (va <= DIRECTMAP_VIRT_END))
         return directmapoff_to_maddr(va - directmap_virt_start);
 
-    BUILD_BUG_ON(XEN_VIRT_SIZE != MB(2));
-    ASSERT((va >> (PAGETABLE_ORDER + PAGE_SHIFT)) ==
-           (_AC(XEN_VIRT_START, UL) >> (PAGETABLE_ORDER + PAGE_SHIFT)));
+    ASSERT((va >= xen_virt_start) && (va <= xen_virt_end));
+
+    /*
+    * The .init* sections will be freed when Xen completes booting,
+    * so the [__init_begin, __init_end) range must be excluded.
+    */
+    ASSERT((system_state < SYS_STATE_active) || !is_init_section(va));
 
     /* phys_offset = load_start - XEN_VIRT_START */
     return phys_offset + va;
@@ -68,8 +97,6 @@ static inline unsigned long virt_to_maddr(unsigned long va)
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
 
-#define mfn_from_pte(pte) maddr_to_mfn(pte_to_paddr(pte))
-
 struct page_info
 {
     /* Each frame can be threaded onto a doubly-linked list. */
@@ -85,6 +112,18 @@ struct page_info
             /* Type reference count and various PGT_xxx flags and fields. */
             unsigned long type_info;
         } inuse;
+
+        /* Page is used as an intermediate P2M page table: count_info == 0 */
+        struct {
+            /*
+            * Tracks the number of used entries in the metadata page table.
+            *
+            * If used_entries == 0, then `page_info.v.md.pg` can be freed and
+            * returned to the P2M pool.
+            */
+            unsigned long used_entries;
+        } md;
+
 
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         union {
@@ -122,6 +161,15 @@ struct page_info
             /* Order-size of the free chunk this page is the head of. */
             unsigned int order;
         } free;
+
+        /* Page is used as an intermediate P2M page table */
+        struct {
+            /*
+             * Pointer to a page which store metadata for an intermediate page
+             * table.
+             */
+            struct page_info *pg;
+        } md;
     } v;
 
     union {
@@ -140,6 +188,10 @@ extern struct page_info *frametable_virt_start;
 /* Convert between machine frame numbers and page-info structures. */
 #define mfn_to_page(mfn)    (frametable_virt_start + mfn_x(mfn))
 #define page_to_mfn(pg)     _mfn((pg) - frametable_virt_start)
+
+/* Convert between machine addresses and page-info structures. */
+#define maddr_to_page(ma) mfn_to_page(maddr_to_mfn(ma))
+#define page_to_maddr(pg) mfn_to_maddr(page_to_mfn(pg))
 
 static inline void *page_to_virt(const struct page_info *pg)
 {
@@ -221,19 +273,22 @@ static inline bool arch_mfns_in_directmap(unsigned long mfn, unsigned long nr)
 #define PGT_count_width   PG_shift(2)
 #define PGT_count_mask    ((1UL << PGT_count_width) - 1)
 
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
-
 /* Cleared when the owning guest 'frees' this page. */
 #define _PGC_allocated    PG_shift(1)
 #define PGC_allocated     PG_mask(1, 1)
 /* Page is Xen heap? */
 #define _PGC_xen_heap     PG_shift(2)
 #define PGC_xen_heap      PG_mask(1, 2)
+#ifdef CONFIG_STATIC_MEMORY
+/* Page is static memory */
+#define _PGC_static       PG_shift(3)
+#define PGC_static        PG_mask(1, 3)
+#else
+#define PGC_static     0
+#endif
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(4)
+#define PGC_need_scrub    PG_mask(1, 4)
 /* Page is broken? */
 #define _PGC_broken       PG_shift(7)
 #define PGC_broken        PG_mask(1, 7)
@@ -263,11 +318,12 @@ static inline bool arch_mfns_in_directmap(unsigned long mfn, unsigned long nr)
 #define page_get_owner(p)    (p)->v.inuse.domain
 #define page_set_owner(p, d) ((p)->v.inuse.domain = (d))
 
-/* TODO: implement */
-#define mfn_valid(mfn) ({ (void)(mfn); 0; })
+extern unsigned long start_page;
 
-#define domain_set_alloc_bitsize(d) ((void)(d))
-#define domain_clamp_alloc_bitsize(d, b) ((void)(d), (b))
+#define mfn_valid(mfn) ({                                               \
+    unsigned long tmp_mfn = mfn_x(mfn);                                 \
+    likely((tmp_mfn >= start_page)) && likely(__mfn_valid(tmp_mfn));    \
+})
 
 #define PFN_ORDER(pg) ((pg)->v.free.order)
 

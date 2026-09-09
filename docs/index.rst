@@ -17,7 +17,7 @@ User documentation
 ------------------
 
 This is documentation for an administrator of a Xen system.  It is intended
-for someone who is not necesserily a developer, has installed Xen from their
+for someone who is not necessarily a developer, has installed Xen from their
 preferred distribution, and is attempting to run virtual machines and
 configure the system.
 
@@ -51,6 +51,7 @@ kind of development environment.
    :maxdepth: 2
 
    hypervisor-guide/index
+   misc/ci
 
 
 Unsorted documents

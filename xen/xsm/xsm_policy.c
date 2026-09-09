@@ -24,7 +24,7 @@
 #include <asm/setup.h>
 #endif
 #include <xen/bitops.h>
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 # include <asm/setup.h>
 # include <xen/device_tree.h>
 #endif
@@ -53,7 +53,7 @@ int __init xsm_multiboot_policy_init(
             printk("Policy len %#lx, start at %p.\n",
                    _policy_len,_policy_start);
 
-            bm->type = BOOTMOD_XSM_POLICY;
+            bm->kind = BOOTMOD_XSM_POLICY;
             break;
 
         }
@@ -65,10 +65,10 @@ int __init xsm_multiboot_policy_init(
 }
 #endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 int __init xsm_dt_policy_init(void **policy_buffer, size_t *policy_size)
 {
-    struct bootmodule *mod = boot_module_find_by_kind(BOOTMOD_XSM);
+    struct boot_module *mod = boot_module_find_by_kind(BOOTMOD_XSM_POLICY);
     paddr_t paddr, len;
 
     if ( !mod || !mod->size )

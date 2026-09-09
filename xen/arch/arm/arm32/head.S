@@ -54,7 +54,7 @@
          * It should be linked at XEN_VIRT_START, and loaded at any
          * 4K-aligned address.
          */
-GLOBAL(start)
+FUNC(start)
         /*
          * zImage magic header, see:
          * http://www.simtec.co.uk/products/SWLINUX/files/booting_article.html#d0e309
@@ -104,9 +104,9 @@ primary_switched:
         mov   r0, r8                 /* r0 := paddr(FDT) */
         mov_w r1, start_xen
         b     launch
-ENDPROC(start)
+END(start)
 
-GLOBAL(init_secondary)
+FUNC(init_secondary)
         cpsid aif                    /* Disable all interrupts */
 
         /* Find out where we are */
@@ -142,7 +142,7 @@ secondary_switched:
         /* Jump to C world */
         mov_w r1, start_secondary
         b     launch
-ENDPROC(init_secondary)
+END(init_secondary)
 
 /*
  * Check if the CPU supports virtualization extensions and has been booted
@@ -154,7 +154,7 @@ ENDPROC(init_secondary)
  *
  * Clobbers r0 - r3
  */
-check_cpu_mode:
+FUNC_LOCAL(check_cpu_mode)
         /* Check that this CPU has Hyp mode */
         mrc   CP32(r0, ID_PFR1)
         and   r0, r0, #0xf000        /* Bits 12-15 define virt extensions */
@@ -174,14 +174,14 @@ check_cpu_mode:
         PRINT("- Xen must be entered in NS Hyp mode -\r\n")
         PRINT("- Please update the bootloader -\r\n")
         b     fail
-ENDPROC(check_cpu_mode)
+END(check_cpu_mode)
 
 /*
  * Zero BSS
  *
  * Clobbers r0 - r3
  */
-zero_bss:
+FUNC_LOCAL(zero_bss)
         PRINT("- Zero BSS -\r\n")
         mov_w r0, __bss_start        /* r0 := vaddr(__bss_start) */
         mov_w r1, __bss_end          /* r1 := vaddr(__bss_end)   */
@@ -195,9 +195,9 @@ zero_bss:
 
 skip_bss:
         mov   pc, lr
-ENDPROC(zero_bss)
+END(zero_bss)
 
-cpu_init:
+FUNC_LOCAL(cpu_init)
         PRINT("- Setting up control registers -\r\n")
 
         mov   r5, lr                       /* r5 := return address */
@@ -218,27 +218,13 @@ cpu_init:
         add   pc, r1, r10                   /* Call paddr(init func) */
 
 cpu_init_done:
-        /* Set up memory attribute type tables */
-        mov_w r0, MAIR0VAL
-        mov_w r1, MAIR1VAL
-        mcr   CP32(r0, HMAIR0)
-        mcr   CP32(r1, HMAIR1)
-
-        /*
-         * Set up the HTCR:
-         * PT walks use Inner-Shareable accesses,
-         * PT walks are write-back, write-allocate in both cache levels,
-         * Full 32-bit address space goes through this table.
-         */
-        mov_w r0, (TCR_RES1|TCR_SH0_IS|TCR_ORGN0_WBWA|TCR_IRGN0_WBWA|TCR_T0SZ(0))
-        mcr   CP32(r0, HTCR)
 
         mov_w r0, HSCTLR_SET
         mcr   CP32(r0, HSCTLR)
         isb
 
         mov   pc, r5                        /* Return address is in r5 */
-ENDPROC(cpu_init)
+END(cpu_init)
 
 /*
  * Setup the initial stack and jump to the C world
@@ -249,7 +235,7 @@ ENDPROC(cpu_init)
  *
  * Clobbers r3
  */
-launch:
+FUNC_LOCAL(launch)
         mov_w r3, init_data
         add   r3, #INITINFO_stack    /* Find the boot-time stack */
         ldr   sp, [r3]
@@ -258,13 +244,14 @@ launch:
 
         /* Jump to C world */
        bx    r1
-ENDPROC(launch)
+END(launch)
 
 /* Fail-stop */
-fail:   PRINT("- Boot failed -\r\n")
+FUNC_LOCAL(fail)
+        PRINT("- Boot failed -\r\n")
 1:      wfe
         b     1b
-ENDPROC(fail)
+END(fail)
 
 #ifdef CONFIG_EARLY_PRINTK
 /*
@@ -275,14 +262,14 @@ ENDPROC(fail)
  *
  * Clobbers r0 - r3
  */
-init_uart:
+FUNC_LOCAL(init_uart)
         mov_w r11, CONFIG_EARLY_UART_BASE_ADDRESS
 #ifdef CONFIG_EARLY_UART_INIT
         early_uart_init r11, r1, r2
 #endif
         PRINT("- UART enabled -\r\n")
         mov   pc, lr
-ENDPROC(init_uart)
+END(init_uart)
 
 /*
  * Print early debug messages.
@@ -291,14 +278,14 @@ ENDPROC(init_uart)
  * r11: Early UART base address
  * Clobbers r0-r1
  */
-ENTRY(asm_puts)
+FUNC(asm_puts)
         early_uart_ready r11, r1
         ldrb  r1, [r0], #1           /* Load next char */
         teq   r1, #0                 /* Exit on nul */
         moveq pc, lr
         early_uart_transmit r11, r1
         b asm_puts
-ENDPROC(asm_puts)
+END(asm_puts)
 
 /*
  * Print a 32-bit number in hex.
@@ -307,7 +294,7 @@ ENDPROC(asm_puts)
  * r11: Early UART base address
  * Clobbers r0-r3
  */
-ENTRY(asm_putn)
+FUNC(asm_putn)
         adr_l r1, hex
         mov   r3, #8
 1:
@@ -319,18 +306,19 @@ ENTRY(asm_putn)
         subs  r3, r3, #1
         bne   1b
         mov   pc, lr
-ENDPROC(asm_putn)
+END(asm_putn)
 
 RODATA_SECT(.rodata.idmap, hex, "0123456789abcdef")
 
 #endif /* CONFIG_EARLY_PRINTK */
 
 /* This provides a C-API version of __lookup_processor_type */
-ENTRY(lookup_processor_type)
+FUNC(lookup_processor_type)
         stmfd sp!, {r4, lr}
         bl    __lookup_processor_type
         mov r0, r1
         ldmfd sp!, {r4, pc}
+END(lookup_processor_type)
 
 /*
  * Read processor ID register (CP#15, CR0), and Look up in the linker-built
@@ -341,7 +329,7 @@ ENTRY(lookup_processor_type)
  * r1: proc_info pointer
  * Clobbers r2-r4
  */
-__lookup_processor_type:
+FUNC_LOCAL(__lookup_processor_type)
         mrc   CP32(r0, MIDR)                /* r0 := our cpu id */
         adr_l r1, __proc_info_start
         adr_l r2, __proc_info_end
@@ -357,7 +345,7 @@ __lookup_processor_type:
         mov   r1, #0
 2:
         mov   pc, lr
-ENDPROC(__lookup_processor_type)
+END(__lookup_processor_type)
 
 /*
  * Local variables:

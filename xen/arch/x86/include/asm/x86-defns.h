@@ -27,6 +27,13 @@
     (X86_EFLAGS_CF | X86_EFLAGS_PF | X86_EFLAGS_AF |   \
      X86_EFLAGS_ZF | X86_EFLAGS_SF | X86_EFLAGS_OF)
 
+#define X86_EFLAGS_ALL                                          \
+    (X86_EFLAGS_ARITH_MASK | X86_EFLAGS_TF | X86_EFLAGS_IF |    \
+     X86_EFLAGS_DF | X86_EFLAGS_OF | X86_EFLAGS_IOPL |          \
+     X86_EFLAGS_NT | X86_EFLAGS_RF | X86_EFLAGS_VM |            \
+     X86_EFLAGS_AC | X86_EFLAGS_VIF | X86_EFLAGS_VIP |          \
+     X86_EFLAGS_ID)
+
 /*
  * Intel CPU flags in CR0
  */
@@ -75,6 +82,8 @@
 #define X86_CR4_PKE        0x00400000 /* enable PKE */
 #define X86_CR4_CET        0x00800000 /* Control-flow Enforcement Technology */
 #define X86_CR4_PKS        0x01000000 /* Protection Key Supervisor */
+#define X86_CR4_LASS       (_AC(1, ULL) << 27) /* Linear Address Space Separation */
+#define X86_CR4_FRED       (_AC(1, ULL) << 32) /* Flexible Return and Event Delivery */
 
 #define X86_CR8_VALID_MASK 0xf
 
@@ -157,7 +166,7 @@
 #define X86_INVPCID_ALL_INCL_GLOBAL 2
 #define X86_INVPCID_ALL_NON_GLOBAL  3
 
-#define X86_NR_VECTORS 256
+#define X86_IDT_VECTORS 256
 
 /* Exception Vectors */
 #define X86_EXC_DE             0 /* Divide Error */

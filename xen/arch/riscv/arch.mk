@@ -6,10 +6,11 @@ $(call cc-options-add,CFLAGS,CC,$(EMBEDDED_EXTRA_CFLAGS))
 riscv-abi-$(CONFIG_RISCV_32) := -mabi=ilp32
 riscv-abi-$(CONFIG_RISCV_64) := -mabi=lp64
 
-riscv-march-$(CONFIG_RISCV_ISA_RV64G) := rv64g
-riscv-march-$(CONFIG_RISCV_ISA_C)       := $(riscv-march-y)c
+riscv-march-$(CONFIG_RISCV_64) := rv64
+riscv-march-y += ima
+riscv-march-$(CONFIG_RISCV_ISA_C) += c
 
-riscv-generic-flags := $(riscv-abi-y) -march=$(riscv-march-y)
+riscv-generic-flags := $(riscv-abi-y) -march=$(subst $(space),,$(riscv-march-y))
 
 # check-extension: Check whether extenstion is supported by a compiler and
 #                  an assembler.
@@ -23,13 +24,18 @@ $(eval $(1) := \
 	$(call as-insn,$(CC) $(riscv-generic-flags)_$(1),$(value $(1)-insn),_$(1)))
 endef
 
-zbb-insn := "andn t0$(comma)t0$(comma)t0"
-$(call check-extension,zbb)
+h-insn := "hfence.gvma"
+$(call check-extension,h)
+
+ifneq ($(h),_h)
+hh-insn := "hfence.gvma"
+$(call check-extension,hh)
+endif
 
 zihintpause-insn := "pause"
 $(call check-extension,zihintpause)
 
-extensions := $(zbb) $(zihintpause)
+extensions := $(h) $(hh) $(zihintpause) _zicsr_zifencei_zbb
 
 extensions := $(subst $(space),,$(extensions))
 

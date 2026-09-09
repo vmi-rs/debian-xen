@@ -11,12 +11,6 @@
 
 /* smpboot.c */
 
-cpumask_t cpu_online_map;
-cpumask_t cpu_present_map;
-cpumask_t cpu_possible_map;
-
-/* ID of the PCPU we're running on */
-DEFINE_PER_CPU(unsigned int, cpu_id);
 /* XXX these seem awfully x86ish... */
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
@@ -26,18 +20,6 @@ DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
 
 /* time.c */
-
-unsigned long __ro_after_init cpu_khz;  /* CPU clock frequency in kHz. */
-
-s_time_t get_s_time(void)
-{
-    BUG_ON("unimplemented");
-}
-
-int reprogram_timer(s_time_t timeout)
-{
-    BUG_ON("unimplemented");
-}
 
 void send_timer_event(struct vcpu *v)
 {
@@ -78,16 +60,6 @@ int arch_monitor_domctl_event(struct domain *d,
 
 /* smp.c */
 
-void arch_flush_tlb_mask(const cpumask_t *mask)
-{
-    BUG_ON("unimplemented");
-}
-
-void smp_send_event_check_mask(const cpumask_t *mask)
-{
-    BUG_ON("unimplemented");
-}
-
 void smp_send_call_function_mask(const cpumask_t *mask)
 {
     BUG_ON("unimplemented");
@@ -95,32 +67,7 @@ void smp_send_call_function_mask(const cpumask_t *mask)
 
 /* irq.c */
 
-struct pirq *alloc_pirq_struct(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-int pirq_guest_bind(struct vcpu *v, struct pirq *pirq, int will_share)
-{
-    BUG_ON("unimplemented");
-}
-
-void pirq_guest_unbind(struct domain *d, struct pirq *pirq)
-{
-    BUG_ON("unimplemented");
-}
-
-void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
-{
-    BUG_ON("unimplemented");
-}
-
 void irq_ack_none(struct irq_desc *desc)
-{
-    BUG_ON("unimplemented");
-}
-
-int arch_init_one_irq_desc(struct irq_desc *desc)
 {
     BUG_ON("unimplemented");
 }
@@ -144,47 +91,12 @@ void continue_running(struct vcpu *same)
     BUG_ON("unimplemented");
 }
 
-void sync_local_execstate(void)
-{
-    BUG_ON("unimplemented");
-}
-
-void sync_vcpu_execstate(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
 void startup_cpu_idle_loop(void)
 {
     BUG_ON("unimplemented");
 }
 
-void free_domain_struct(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
 void dump_pageframe_info(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-void free_vcpu_struct(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-int arch_vcpu_create(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-void arch_vcpu_destroy(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-void vcpu_switch_to_aarch64_mode(struct vcpu *v)
 {
     BUG_ON("unimplemented");
 }
@@ -222,11 +134,6 @@ void arch_domain_pause(struct domain *d)
 }
 
 void arch_domain_unpause(struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
-int arch_domain_soft_reset(struct domain *d)
 {
     BUG_ON("unimplemented");
 }
@@ -281,21 +188,6 @@ void vcpu_block_unless_event_pending(struct vcpu *v)
     BUG_ON("unimplemented");
 }
 
-void vcpu_kick(struct vcpu *v)
-{
-    BUG_ON("unimplemented");
-}
-
-struct domain *alloc_domain_struct(void)
-{
-    BUG_ON("unimplemented");
-}
-
-struct vcpu *alloc_vcpu_struct(const struct domain *d)
-{
-    BUG_ON("unimplemented");
-}
-
 unsigned long
 hypercall_create_continuation(unsigned int op, const char *format, ...)
 {
@@ -320,6 +212,7 @@ unsigned long raw_copy_from_guest(void *to, const void __user *from,
     BUG_ON("unimplemented");
 }
 
+#ifdef CONFIG_SYSCTL
 /* sysctl.c */
 
 long arch_do_sysctl(struct xen_sysctl *sysctl,
@@ -332,13 +225,9 @@ void arch_do_physinfo(struct xen_sysctl_physinfo *pi)
 {
     BUG_ON("unimplemented");
 }
+#endif /* CONFIG_SYSCTL */
 
 /* p2m.c */
-
-int arch_set_paging_mempool_size(struct domain *d, uint64_t size)
-{
-    BUG_ON("unimplemented");
-}
 
 int unmap_mmio_regions(struct domain *d,
                        gfn_t start_gfn,
@@ -358,12 +247,6 @@ int map_mmio_regions(struct domain *d,
 
 int set_foreign_p2m_entry(struct domain *d, const struct domain *fd,
                           unsigned long gfn, mfn_t mfn)
-{
-    BUG_ON("unimplemented");
-}
-
-/* Return the size of the pool, in bytes. */
-int arch_get_paging_mempool_size(struct domain *d, uint64_t *size)
 {
     BUG_ON("unimplemented");
 }

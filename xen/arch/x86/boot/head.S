@@ -136,6 +136,7 @@ multiboot2_header:
 .Lno_nx_msg:   .asciz "ERR: Not an NX-capable CPU!"
 
         .section .init.data, "aw", @progbits
+        .subsection 1 /* Put data here after the page tables (in x86_64.S). */
         .align 4
 
         .word   0
@@ -504,9 +505,7 @@ trampoline_bios_setup:
         mov     %ecx,sym_esi(trampoline_phys)
 
 trampoline_setup:
-        /*
-         * Called on legacy BIOS and EFI platforms.
-         */
+        /* Called for Mutiboot entry, including MB2+EFI. */
 
         /* Save Xen image load base address for later use. */
         mov     %esi, sym_esi(xen_phys_start)

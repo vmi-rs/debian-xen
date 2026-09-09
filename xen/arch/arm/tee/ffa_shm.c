@@ -30,6 +30,14 @@ struct ffa_mem_access {
     uint64_t reserved;
 };
 
+/* Endpoint memory access descriptor (FF-A 1.2) */
+struct ffa_mem_access_1_2 {
+    struct ffa_mem_access_perm access_perm;
+    uint32_t region_offs;
+    uint8_t impdef[16];
+    uint8_t reserved[8];
+};
+
 /* Lend, donate or share memory transaction descriptor */
 struct ffa_mem_transaction_1_0 {
     uint16_t sender_id;
@@ -55,25 +63,10 @@ struct ffa_mem_transaction_1_1 {
     uint8_t reserved[12];
 };
 
-/* Calculate offset of struct ffa_mem_access from start of buffer */
-#define MEM_ACCESS_OFFSET(access_idx) \
-    ( sizeof(struct ffa_mem_transaction_1_1) + \
-      ( access_idx ) * sizeof(struct ffa_mem_access) )
-
-/* Calculate offset of struct ffa_mem_region from start of buffer */
-#define REGION_OFFSET(access_count, region_idx) \
-    ( MEM_ACCESS_OFFSET(access_count) + \
-      ( region_idx ) * sizeof(struct ffa_mem_region) )
-
-/* Calculate offset of struct ffa_address_range from start of buffer */
-#define ADDR_RANGE_OFFSET(access_count, region_count, range_idx) \
-    ( REGION_OFFSET(access_count, region_count) + \
-      ( range_idx ) * sizeof(struct ffa_address_range) )
-
 /*
  * The parts needed from struct ffa_mem_transaction_1_0 or struct
  * ffa_mem_transaction_1_1, used to provide an abstraction of difference in
- * data structures between version 1.0 and 1.1. This is just an internal
+ * data structures between version 1.0 and 1.2. This is just an internal
  * interface and can be changed without changing any ABI.
  */
 struct ffa_mem_transaction_int {
@@ -92,20 +85,20 @@ struct ffa_shm_mem {
     uint16_t sender_id;
     uint16_t ep_id;     /* endpoint, the one lending */
     uint64_t handle;    /* FFA_HANDLE_INVALID if not set yet */
+    /* Endpoint memory access descriptor IMPDEF value (FF-A 1.2). */
+    uint64_t impdef[2];
     unsigned int page_count;
     struct page_info *pages[];
 };
 
-static int32_t ffa_mem_share(uint32_t tot_len, uint32_t frag_len,
-                             register_t addr, uint32_t pg_count,
-                             uint64_t *handle)
+static int32_t ffa_spmc_share(uint32_t tot_len, uint64_t *handle)
 {
     struct arm_smccc_1_2_regs arg = {
         .a0 = FFA_MEM_SHARE_64,
         .a1 = tot_len,
-        .a2 = frag_len,
-        .a3 = addr,
-        .a4 = pg_count,
+        .a2 = tot_len,
+        .a3 = 0,
+        .a4 = 0,
     };
     struct arm_smccc_1_2_regs resp;
 
@@ -131,11 +124,15 @@ static int32_t ffa_mem_share(uint32_t tot_len, uint32_t frag_len,
     }
 }
 
-static int32_t ffa_mem_reclaim(uint32_t handle_lo, uint32_t handle_hi,
-                               uint32_t flags)
+static int32_t ffa_spmc_reclaim(struct ffa_shm_mem *shm, uint32_t flags)
 {
+    register_t handle_hi;
+    register_t handle_lo;
+
     if ( !ffa_fw_supports_fid(FFA_MEM_RECLAIM) )
         return FFA_RET_NOT_SUPPORTED;
+
+    uint64_to_regpair(&handle_hi, &handle_lo, shm->handle);
 
     return ffa_simple_call(FFA_MEM_RECLAIM, handle_lo, handle_hi, flags, 0);
 }
@@ -145,7 +142,7 @@ static int32_t ffa_mem_reclaim(uint32_t handle_lo, uint32_t handle_hi,
  * this function fails then the caller is still expected to call
  * put_shm_pages() as a cleanup.
  */
-static int get_shm_pages(struct domain *d, struct ffa_shm_mem *shm,
+static int32_t get_shm_pages(struct domain *d, struct ffa_shm_mem *shm,
                          const struct ffa_address_range *range,
                          uint32_t range_count)
 {
@@ -156,31 +153,70 @@ static int get_shm_pages(struct domain *d, struct ffa_shm_mem *shm,
     p2m_type_t t;
     uint64_t addr;
     uint64_t page_count;
+    uint64_t gaddr;
 
     for ( n = 0; n < range_count; n++ )
     {
         page_count = ACCESS_ONCE(range[n].page_count);
         addr = ACCESS_ONCE(range[n].address);
+
+        if ( !IS_ALIGNED(addr, FFA_PAGE_SIZE) )
+        {
+            gdprintk(XENLOG_DEBUG,
+                     "ffa: mem share pages invalid: unaligned range %u address %#lx\n",
+                     n, (unsigned long)addr);
+            return FFA_RET_INVALID_PARAMETERS;
+        }
+
         for ( m = 0; m < page_count; m++ )
         {
             if ( pg_idx >= shm->page_count )
+            {
+                gdprintk(XENLOG_DEBUG,
+                         "ffa: mem share pages invalid: range overflow rg %u pg %u\n",
+                         n, m);
                 return FFA_RET_INVALID_PARAMETERS;
+            }
 
-            gfn = gaddr_to_gfn(addr + m * FFA_PAGE_SIZE);
+            if ( !ffa_safe_addr_add(addr, m) )
+            {
+                gdprintk(XENLOG_DEBUG,
+                         "ffa: mem share pages invalid: addr overflow rg %u pg %u base %#lx\n",
+                         n, m, (unsigned long)addr);
+                return FFA_RET_INVALID_PARAMETERS;
+            }
+
+            gaddr = addr + m * FFA_PAGE_SIZE;
+            gfn = gaddr_to_gfn(gaddr);
             shm->pages[pg_idx] = get_page_from_gfn(d, gfn_x(gfn), &t,
 						   P2M_ALLOC);
             if ( !shm->pages[pg_idx] )
+            {
+                gdprintk(XENLOG_DEBUG,
+                         "ffa: mem share pages invalid: gfn unmapped rg %u pg %u addr %#lx\n",
+                         n, m, (unsigned long)gaddr);
                 return FFA_RET_DENIED;
+            }
             /* Only normal RW RAM for now */
             if ( t != p2m_ram_rw )
+            {
+                gdprintk(XENLOG_DEBUG,
+                         "ffa: mem share pages invalid: p2m type %u rg %u pg %u addr %#lx\n",
+                         t, n, m, (unsigned long)gaddr);
                 return FFA_RET_DENIED;
+            }
             pg_idx++;
         }
     }
 
     /* The ranges must add up */
     if ( pg_idx < shm->page_count )
-            return FFA_RET_INVALID_PARAMETERS;
+    {
+        gdprintk(XENLOG_DEBUG,
+                 "ffa: mem share pages invalid: range short pg %u\n",
+                 pg_idx);
+        return FFA_RET_INVALID_PARAMETERS;
+    }
 
     return FFA_RET_OK;
 }
@@ -198,15 +234,11 @@ static void put_shm_pages(struct ffa_shm_mem *shm)
 
 static bool inc_ctx_shm_count(struct domain *d, struct ffa_ctx *ctx)
 {
-    bool ret = true;
+    bool ret = false;
 
     spin_lock(&ctx->lock);
 
-    if ( ctx->shm_count >= FFA_MAX_SHM_COUNT )
-    {
-        ret = false;
-    }
-    else
+    if ( ctx->shm_count < FFA_MAX_SHM_COUNT )
     {
         /*
          * If this is the first shm added, increase the domain reference
@@ -217,6 +249,7 @@ static bool inc_ctx_shm_count(struct domain *d, struct ffa_ctx *ctx)
             get_knownalive_domain(d);
 
         ctx->shm_count++;
+        ret = true;
     }
 
     spin_unlock(&ctx->lock);
@@ -251,7 +284,7 @@ static struct ffa_shm_mem *alloc_ffa_shm_mem(struct domain *d,
     struct ffa_ctx *ctx = d->arch.tee;
     struct ffa_shm_mem *shm;
 
-    if ( page_count >= FFA_MAX_SHM_PAGE_COUNT )
+    if ( page_count > FFA_MAX_SHM_PAGE_COUNT )
         return NULL;
     if ( !inc_ctx_shm_count(d, ctx) )
         return NULL;
@@ -286,44 +319,70 @@ static void init_range(struct ffa_address_range *addr_range,
 }
 
 /*
- * This function uses the ffa_tx buffer to transmit the memory transaction
- * descriptor. The function depends ffa_tx_buffer_lock to be used to guard
- * the buffer from concurrent use.
+ * This function uses the ffa_spmc tx buffer to transmit the memory transaction
+ * descriptor.
  */
-static int share_shm(struct ffa_shm_mem *shm)
+static int share_shm(struct ffa_shm_mem *shm, uint32_t ffa_vers)
 {
     const uint32_t max_frag_len = FFA_RXTX_PAGE_COUNT * FFA_PAGE_SIZE;
     struct ffa_mem_access *mem_access_array;
+    struct ffa_mem_access_1_2 *mem_access_array_1_2;
     struct ffa_mem_transaction_1_1 *descr;
     struct ffa_address_range *addr_range;
     struct ffa_mem_region *region_descr;
-    const unsigned int region_count = 1;
-    void *buf = ffa_tx;
-    uint32_t frag_len;
     uint32_t tot_len;
+    uint32_t mem_access_size;
+    uint32_t mem_access_offs;
+    uint32_t region_offs;
     paddr_t last_pa;
+    uint32_t range_count;
     unsigned int n;
     paddr_t pa;
+    int32_t ret;
+    void *buf;
 
-    ASSERT(spin_is_locked(&ffa_tx_buffer_lock));
     ASSERT(shm->page_count);
 
+    buf = ffa_rxtx_spmc_tx_acquire();
+    if ( !buf )
+        return FFA_RET_NOT_SUPPORTED;
+
     descr = buf;
+
     memset(descr, 0, sizeof(*descr));
     descr->sender_id = shm->sender_id;
     descr->handle = shm->handle;
     descr->mem_reg_attr = FFA_NORMAL_MEM_REG_ATTR;
     descr->mem_access_count = 1;
-    descr->mem_access_size = sizeof(*mem_access_array);
-    descr->mem_access_offs = MEM_ACCESS_OFFSET(0);
+    if ( ffa_vers >= FFA_VERSION_1_2 )
+        mem_access_size = sizeof(struct ffa_mem_access_1_2);
+    else
+        mem_access_size = sizeof(struct ffa_mem_access);
+    mem_access_offs = sizeof(struct ffa_mem_transaction_1_1);
+    region_offs = mem_access_offs + mem_access_size;
+    descr->mem_access_size = mem_access_size;
+    descr->mem_access_offs = mem_access_offs;
 
-    mem_access_array = buf + descr->mem_access_offs;
-    memset(mem_access_array, 0, sizeof(*mem_access_array));
-    mem_access_array[0].access_perm.endpoint_id = shm->ep_id;
-    mem_access_array[0].access_perm.perm = FFA_MEM_ACC_RW;
-    mem_access_array[0].region_offs = REGION_OFFSET(descr->mem_access_count, 0);
+    if ( ffa_vers >= FFA_VERSION_1_2 )
+    {
+        mem_access_array_1_2 = buf + mem_access_offs;
+        memset(mem_access_array_1_2, 0, sizeof(*mem_access_array_1_2));
+        mem_access_array_1_2[0].access_perm.endpoint_id = shm->ep_id;
+        mem_access_array_1_2[0].access_perm.perm = FFA_MEM_ACC_RW;
+        mem_access_array_1_2[0].region_offs = region_offs;
+        memcpy(mem_access_array_1_2[0].impdef, shm->impdef,
+               sizeof(mem_access_array_1_2[0].impdef));
+    }
+    else
+    {
+        mem_access_array = buf + mem_access_offs;
+        memset(mem_access_array, 0, sizeof(*mem_access_array));
+        mem_access_array[0].access_perm.endpoint_id = shm->ep_id;
+        mem_access_array[0].access_perm.perm = FFA_MEM_ACC_RW;
+        mem_access_array[0].region_offs = region_offs;
+    }
 
-    region_descr = buf + mem_access_array[0].region_offs;
+    region_descr = buf + region_offs;
     memset(region_descr, 0, sizeof(*region_descr));
     region_descr->total_page_count = shm->page_count;
 
@@ -337,13 +396,16 @@ static int share_shm(struct ffa_shm_mem *shm)
         region_descr->address_range_count++;
     }
 
-    tot_len = ADDR_RANGE_OFFSET(descr->mem_access_count, region_count,
-                                region_descr->address_range_count);
+    range_count = region_descr->address_range_count;
+    tot_len = region_offs + sizeof(*region_descr) +
+              range_count * sizeof(struct ffa_address_range);
     if ( tot_len > max_frag_len )
-        return FFA_RET_NOT_SUPPORTED;
+    {
+        ret = FFA_RET_NOT_SUPPORTED;
+        goto out;
+    }
 
     addr_range = region_descr->address_range_array;
-    frag_len = ADDR_RANGE_OFFSET(descr->mem_access_count, region_count, 1);
     last_pa = page_to_maddr(shm->pages[0]);
     init_range(addr_range, last_pa);
     for ( n = 1; n < shm->page_count; last_pa = pa, n++ )
@@ -355,12 +417,16 @@ static int share_shm(struct ffa_shm_mem *shm)
             continue;
         }
 
-        frag_len += sizeof(*addr_range);
         addr_range++;
         init_range(addr_range, pa);
     }
 
-    return ffa_mem_share(tot_len, frag_len, 0, 0, &shm->handle);
+    ret = ffa_spmc_share(tot_len, &shm->handle);
+
+out:
+    ffa_rxtx_spmc_tx_release();
+
+    return ret;
 }
 
 static int read_mem_transaction(uint32_t ffa_vers, const void *buf, size_t blen,
@@ -428,6 +494,12 @@ static int read_mem_transaction(uint32_t ffa_vers, const void *buf, size_t blen,
     if ( size * count + offs > blen )
         return FFA_RET_INVALID_PARAMETERS;
 
+    if ( size < sizeof(struct ffa_mem_access) )
+        return FFA_RET_INVALID_PARAMETERS;
+
+    if ( offs & 0xF )
+        return FFA_RET_INVALID_PARAMETERS;
+
     trans->mem_reg_attr = mem_reg_attr;
     trans->flags = flags;
     trans->mem_access_size = size;
@@ -444,17 +516,22 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
     uint64_t addr = get_user_reg(regs, 3);
     uint32_t page_count = get_user_reg(regs, 4);
     const struct ffa_mem_region *region_descr;
-    const struct ffa_mem_access *mem_access;
+    const struct ffa_mem_access_1_2 *mem_access;
     struct ffa_mem_transaction_int trans;
     struct domain *d = current->domain;
     struct ffa_ctx *ctx = d->arch.tee;
+    const void *tx_buf;
+    size_t tx_size;
     struct ffa_shm_mem *shm = NULL;
     register_t handle_hi = 0;
     register_t handle_lo = 0;
     int ret = FFA_RET_DENIED;
+    uint32_t ffa_vers;
     uint32_t range_count;
     uint32_t region_offs;
     uint16_t dst_id;
+    uint8_t perm;
+    uint64_t impdef[2];
 
     if ( !ffa_fw_supports_fid(FFA_MEM_SHARE_64) )
     {
@@ -486,18 +563,23 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
         goto out_set_ret;
     }
 
-    if ( !spin_trylock(&ctx->tx_lock) )
-    {
-        ret = FFA_RET_BUSY;
+    ret = ffa_tx_acquire(ctx, &tx_buf, &tx_size);
+    if ( ret != FFA_RET_OK )
         goto out_set_ret;
-    }
 
-    if ( frag_len > ctx->page_count * FFA_PAGE_SIZE )
+    if ( frag_len > tx_size )
         goto out_unlock;
 
-    ret = read_mem_transaction(ctx->guest_vers, ctx->tx, frag_len, &trans);
+    ffa_vers = ACCESS_ONCE(ctx->guest_vers);
+    ret = read_mem_transaction(ffa_vers, tx_buf, frag_len, &trans);
     if ( ret )
         goto out_unlock;
+
+    if ( trans.mem_reg_attr & FFA_MEM_ATTR_NS )
+    {
+        ret = FFA_RET_INVALID_PARAMETERS;
+        goto out_unlock;
+    }
 
     if ( trans.mem_reg_attr != FFA_NORMAL_MEM_REG_ATTR )
     {
@@ -518,13 +600,35 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
         goto out_unlock;
     }
 
+    if ( trans.mem_access_size < sizeof(struct ffa_mem_access) )
+    {
+        ret = FFA_RET_INVALID_PARAMETERS;
+        goto out_unlock;
+    }
+
     /* Check that it fits in the supplied data */
     if ( trans.mem_access_offs + trans.mem_access_size > frag_len )
         goto out_unlock;
 
-    mem_access = ctx->tx + trans.mem_access_offs;
-
+    mem_access = tx_buf + trans.mem_access_offs;
     dst_id = ACCESS_ONCE(mem_access->access_perm.endpoint_id);
+    perm = ACCESS_ONCE(mem_access->access_perm.perm);
+    region_offs = ACCESS_ONCE(mem_access->region_offs);
+
+    /*
+     * FF-A 1.2 introduced an extended mem_access descriptor with impdef
+     * fields, but guests can still use the 1.1 format if they don't need
+     * implementation-defined data. Detect which format is used based on
+     * the mem_access_size field rather than the negotiated FF-A version.
+     */
+    if ( trans.mem_access_size >= sizeof(struct ffa_mem_access_1_2) )
+        memcpy(impdef, mem_access->impdef, sizeof(impdef));
+    else
+    {
+        impdef[0] = 0;
+        impdef[1] = 0;
+    }
+
     if ( !FFA_ID_IS_SECURE(dst_id) )
     {
         /* we do not support sharing with VMs */
@@ -532,20 +636,18 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
         goto out_unlock;
     }
 
-    if ( ACCESS_ONCE(mem_access->access_perm.perm) != FFA_MEM_ACC_RW )
+    if ( perm != FFA_MEM_ACC_RW )
     {
         ret = FFA_RET_NOT_SUPPORTED;
         goto out_unlock;
     }
-
-    region_offs = ACCESS_ONCE(mem_access->region_offs);
     if ( sizeof(*region_descr) + region_offs > frag_len )
     {
         ret = FFA_RET_NOT_SUPPORTED;
         goto out_unlock;
     }
 
-    region_descr = ctx->tx + region_offs;
+    region_descr = tx_buf + region_offs;
     range_count = ACCESS_ONCE(region_descr->address_range_count);
     page_count = ACCESS_ONCE(region_descr->total_page_count);
 
@@ -563,6 +665,7 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
     }
     shm->sender_id = trans.sender_id;
     shm->ep_id = dst_id;
+    memcpy(shm->impdef, impdef, sizeof(shm->impdef));
 
     /*
      * Check that the Composite memory region descriptor fits.
@@ -578,10 +681,7 @@ void ffa_handle_mem_share(struct cpu_user_regs *regs)
     if ( ret )
         goto out;
 
-    /* Note that share_shm() uses our tx buffer */
-    spin_lock(&ffa_tx_buffer_lock);
-    ret = share_shm(shm);
-    spin_unlock(&ffa_tx_buffer_lock);
+    ret = share_shm(shm, ffa_fw_version);
     if ( ret )
         goto out;
 
@@ -595,7 +695,7 @@ out:
     if ( ret )
         free_ffa_shm_mem(d, shm);
 out_unlock:
-    spin_unlock(&ctx->tx_lock);
+    ffa_tx_release(ctx);
 
 out_set_ret:
     if ( ret == 0)
@@ -616,14 +716,12 @@ static struct ffa_shm_mem *find_shm_mem(struct ffa_ctx *ctx, uint64_t handle)
     return NULL;
 }
 
-int ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags)
+int32_t ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags)
 {
     struct domain *d = current->domain;
     struct ffa_ctx *ctx = d->arch.tee;
     struct ffa_shm_mem *shm;
-    register_t handle_hi;
-    register_t handle_lo;
-    int ret;
+    int32_t ret;
 
     if ( !ffa_fw_supports_fid(FFA_MEM_RECLAIM) )
         return FFA_RET_NOT_SUPPORTED;
@@ -636,8 +734,7 @@ int ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags)
     if ( !shm )
         return FFA_RET_INVALID_PARAMETERS;
 
-    uint64_to_regpair(&handle_hi, &handle_lo, handle);
-    ret = ffa_mem_reclaim(handle_lo, handle_hi, flags);
+    ret = ffa_spmc_reclaim(shm, flags);
 
     if ( ret )
     {
@@ -661,11 +758,7 @@ bool ffa_shm_domain_destroy(struct domain *d)
 
     list_for_each_entry_safe(shm, tmp, &ctx->shm_list, list)
     {
-        register_t handle_hi;
-        register_t handle_lo;
-
-        uint64_to_regpair(&handle_hi, &handle_lo, shm->handle);
-        res = ffa_mem_reclaim(handle_lo, handle_hi, 0);
+        res = ffa_spmc_reclaim(shm, 0);
         switch ( res ) {
         case FFA_RET_OK:
             printk(XENLOG_G_DEBUG "%pd: ffa: Reclaimed handle %#lx\n",
@@ -678,8 +771,10 @@ bool ffa_shm_domain_destroy(struct domain *d)
              * A temporary error that may get resolved a bit later, it's
              * worth retrying.
              */
-            printk(XENLOG_G_INFO "%pd: ffa: Failed to reclaim handle %#lx : %d\n",
-                   d, shm->handle, res);
+            if ( printk_ratelimit() )
+                printk(XENLOG_G_WARNING
+                       "%pd: ffa: Failed to reclaim handle %#lx : %d\n",
+                       d, shm->handle, res);
             break; /* We will retry later */
         default:
             /*
@@ -691,7 +786,8 @@ bool ffa_shm_domain_destroy(struct domain *d)
              * FFA_RET_NO_MEMORY might be a temporary error as it it could
              * succeed if retried later, but treat it as permanent for now.
              */
-            printk(XENLOG_G_INFO "%pd: ffa: Permanent failure to reclaim handle %#lx : %d\n",
+            printk(XENLOG_G_ERR
+                   "%pd: ffa: Permanent failure to reclaim handle %#lx : %d\n",
                    d, shm->handle, res);
 
             /*

@@ -3,7 +3,7 @@
 
 #include <public/version.h>
 #include <asm/p2m.h>
-#include <xen/bootfdt.h>
+#include <xen/bootinfo.h>
 #include <xen/device_tree.h>
 
 #if defined(CONFIG_MMU)
@@ -43,21 +43,12 @@ int acpi_make_efi_nodes(void *fdt, struct membank tbl_add[]);
 void create_dom0(void);
 
 void discard_initial_modules(void);
-void fw_unreserved_regions(paddr_t s, paddr_t e,
-                           void (*cb)(paddr_t ps, paddr_t pe),
-                           unsigned int first);
 
 void init_pdx(void);
 void setup_mm(void);
 
 extern uint32_t hyp_traps_vector[];
 void init_traps(void);
-
-void device_tree_get_reg(const __be32 **cell, uint32_t address_cells,
-                         uint32_t size_cells, paddr_t *start, paddr_t *size);
-
-u32 device_tree_get_u32(const void *fdt, int node,
-                        const char *prop_name, u32 dflt);
 
 int handle_device(struct domain *d, struct dt_device_node *dev, p2m_type_t p2mt,
                   struct rangeset *iomem_ranges, struct rangeset *irq_ranges);
@@ -71,7 +62,7 @@ int map_irq_to_domain(struct domain *d, unsigned int irq,
 int map_range_to_domain(const struct dt_device_node *dev,
                         uint64_t addr, uint64_t len, void *data);
 
-extern const char __ro_after_init_start[], __ro_after_init_end[];
+extern const char __init_data_begin[], __bss_start[], __bss_end[];
 
 struct init_info
 {
@@ -83,6 +74,9 @@ struct init_info
 
 paddr_t consider_modules(paddr_t s, paddr_t e, uint32_t size, paddr_t align,
                          int first_mod);
+
+/* Modify some mappings after the init is done */
+void modify_after_init_mappings(void);
 
 #endif
 /*

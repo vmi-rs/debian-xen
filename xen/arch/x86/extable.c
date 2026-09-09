@@ -1,15 +1,17 @@
 
+#include <xen/domain_page.h>
 #include <xen/init.h>
 #include <xen/list.h>
+#include <xen/livepatch.h>
 #include <xen/perfc.h>
 #include <xen/rcupdate.h>
 #include <xen/sort.h>
 #include <xen/spinlock.h>
-#include <asm/uaccess.h>
-#include <xen/domain_page.h>
 #include <xen/virtual_region.h>
-#include <xen/livepatch.h>
 #include <xen/warning.h>
+
+#include <asm/stubs.h>
+#include <asm/uaccess.h>
 
 #define EX_FIELD(ptr, field) ((unsigned long)&(ptr)->field + (ptr)->field)
 
@@ -37,7 +39,7 @@ static int init_or_livepatch cf_check cmp_ex(const void *a, const void *b)
 	return 0;
 }
 
-static void init_or_livepatch cf_check swap_ex(void *a, void *b, size_t size)
+static void init_or_livepatch cf_check swap_ex(void *a, void *b)
 {
 	struct exception_table_entry *l = a, *r = b, tmp;
 	long delta = b - a;
@@ -59,7 +61,6 @@ void init_or_livepatch sort_exception_table(struct exception_table_entry *start,
 void __init sort_exception_tables(void)
 {
     sort_exception_table(__start___ex_table, __stop___ex_table);
-    sort_exception_table(__start___pre_ex_table, __stop___pre_ex_table);
 }
 
 static unsigned long
@@ -156,7 +157,7 @@ int __init cf_check stub_selftest(void)
         union stub_exception_token res;
     } tests[] __initconst = {
 #define endbr64 0xf3, 0x0f, 0x1e, 0xfa
-        { .opc = { endbr64, 0x0f, 0xb9, 0x90 }, /* ud1 */
+        { .opc = { endbr64, 0x0f, 0xb9, 0xc0 }, /* ud1 %eax,%eax */
           .res.fields.trapnr = X86_EXC_UD },
         { .opc = { endbr64, 0x90, 0x02, 0x00 }, /* nop; add (%rax),%al */
           .rax = 0x0123456789abcdef,
@@ -186,16 +187,17 @@ int __init cf_check stub_selftest(void)
         place_ret(ptr + ARRAY_SIZE(tests[i].opc));
         unmap_domain_page(ptr);
 
-        asm volatile ( "INDIRECT_CALL %[stb]\n"
-                       ".Lret%=:\n\t"
-                       ".pushsection .fixup,\"ax\"\n"
-                       ".Lfix%=:\n\t"
-                       "pop %[exn]\n\t"
-                       "jmp .Lret%=\n\t"
-                       ".popsection\n\t"
-                       _ASM_EXTABLE(.Lret%=, .Lfix%=)
-                       : [exn] "+m" (res) ASM_CALL_CONSTRAINT
-                       : [stb] "r" (addr), "a" (tests[i].rax));
+        asm_inline volatile (
+            "INDIRECT_CALL %[stb]\n"
+            ".Lret%=:\n\t"
+            ".pushsection .fixup,\"ax\"\n"
+            ".Lfix%=:\n\t"
+            "pop %[exn]\n\t"
+            "jmp .Lret%=\n\t"
+            ".popsection\n\t"
+            _ASM_EXTABLE(.Lret%=, .Lfix%=)
+            : [exn] "+m" (res) ASM_CALL_CONSTRAINT
+            : [stb] "r" (addr), "a" (tests[i].rax) );
 
         if ( res.raw != tests[i].res.raw )
         {
@@ -216,16 +218,3 @@ int __init cf_check stub_selftest(void)
 }
 __initcall(stub_selftest);
 #endif /* CONFIG_SELF_TESTS */
-
-unsigned long asmlinkage search_pre_exception_table(struct cpu_user_regs *regs)
-{
-    unsigned long addr = regs->rip;
-    unsigned long fixup = search_one_extable(
-        __start___pre_ex_table, __stop___pre_ex_table, addr);
-    if ( fixup )
-    {
-        dprintk(XENLOG_INFO, "Pre-exception: %p -> %p\n", _p(addr), _p(fixup));
-        perfc_incr(exception_fixed);
-    }
-    return fixup;
-}

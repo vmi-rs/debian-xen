@@ -257,38 +257,20 @@ typedef union cr_access_qual {
 #define X86_SEG_AR_GRANULARITY  (1u << 15) /* 15, granularity */
 #define X86_SEG_AR_SEG_UNUSABLE (1u << 16) /* 16, segment unusable */
 
-#define VMCALL_OPCODE   ".byte 0x0f,0x01,0xc1\n"
-#define VMCLEAR_OPCODE  ".byte 0x66,0x0f,0xc7\n"        /* reg/opcode: /6 */
-#define VMLAUNCH_OPCODE ".byte 0x0f,0x01,0xc2\n"
-#define VMPTRLD_OPCODE  ".byte 0x0f,0xc7\n"             /* reg/opcode: /6 */
-#define VMPTRST_OPCODE  ".byte 0x0f,0xc7\n"             /* reg/opcode: /7 */
-#define VMREAD_OPCODE   ".byte 0x0f,0x78\n"
-#define VMRESUME_OPCODE ".byte 0x0f,0x01,0xc3\n"
-#define VMWRITE_OPCODE  ".byte 0x0f,0x79\n"
-#define INVEPT_OPCODE   ".byte 0x66,0x0f,0x38,0x80\n"   /* m128,r64/32 */
-#define INVVPID_OPCODE  ".byte 0x66,0x0f,0x38,0x81\n"   /* m128,r64/32 */
-#define VMXOFF_OPCODE   ".byte 0x0f,0x01,0xc4\n"
-#define VMXON_OPCODE    ".byte 0xf3,0x0f,0xc7\n"
-
-#define MODRM_EAX_08    ".byte 0x08\n" /* ECX, [EAX] */
-#define MODRM_EAX_06    ".byte 0x30\n" /* [EAX], with reg/opcode: /6 */
-#define MODRM_EAX_07    ".byte 0x38\n" /* [EAX], with reg/opcode: /7 */
-#define MODRM_EAX_ECX   ".byte 0xc1\n" /* EAX, ECX */
-
 extern uint8_t posted_intr_vector;
 
 #define cpu_has_vmx_ept_exec_only_supported        \
-    (vmx_ept_vpid_cap & VMX_EPT_EXEC_ONLY_SUPPORTED)
+    (vmx_caps.ept & VMX_EPT_EXEC_ONLY_SUPPORTED)
 
 #define cpu_has_vmx_ept_wl4_supported           \
-    (vmx_ept_vpid_cap & VMX_EPT_WALK_LENGTH_4_SUPPORTED)
-#define cpu_has_vmx_ept_mt_uc (vmx_ept_vpid_cap & VMX_EPT_MEMORY_TYPE_UC)
-#define cpu_has_vmx_ept_mt_wb (vmx_ept_vpid_cap & VMX_EPT_MEMORY_TYPE_WB)
-#define cpu_has_vmx_ept_2mb   (vmx_ept_vpid_cap & VMX_EPT_SUPERPAGE_2MB)
-#define cpu_has_vmx_ept_1gb   (vmx_ept_vpid_cap & VMX_EPT_SUPERPAGE_1GB)
-#define cpu_has_vmx_ept_ad    (vmx_ept_vpid_cap & VMX_EPT_AD_BIT)
+    (vmx_caps.ept & VMX_EPT_WALK_LENGTH_4_SUPPORTED)
+#define cpu_has_vmx_ept_mt_uc (vmx_caps.ept & VMX_EPT_MEMORY_TYPE_UC)
+#define cpu_has_vmx_ept_mt_wb (vmx_caps.ept & VMX_EPT_MEMORY_TYPE_WB)
+#define cpu_has_vmx_ept_2mb   (vmx_caps.ept & VMX_EPT_SUPERPAGE_2MB)
+#define cpu_has_vmx_ept_1gb   (vmx_caps.ept & VMX_EPT_SUPERPAGE_1GB)
+#define cpu_has_vmx_ept_ad    (vmx_caps.ept & VMX_EPT_AD_BIT)
 #define cpu_has_vmx_ept_invept_single_context   \
-    (vmx_ept_vpid_cap & VMX_EPT_INVEPT_SINGLE_CONTEXT)
+    (vmx_caps.ept & VMX_EPT_INVEPT_SINGLE_CONTEXT)
 
 #define EPT_2MB_SHIFT     16
 #define EPT_1GB_SHIFT     17
@@ -299,110 +281,78 @@ extern uint8_t posted_intr_vector;
 #define INVEPT_ALL_CONTEXT      2
 
 #define cpu_has_vmx_vpid_invvpid_individual_addr                    \
-    (vmx_ept_vpid_cap & VMX_VPID_INVVPID_INDIVIDUAL_ADDR)
+    (vmx_caps.vpid & VMX_VPID_INVVPID_INDIVIDUAL_ADDR)
 #define cpu_has_vmx_vpid_invvpid_single_context                     \
-    (vmx_ept_vpid_cap & VMX_VPID_INVVPID_SINGLE_CONTEXT)
+    (vmx_caps.vpid & VMX_VPID_INVVPID_SINGLE_CONTEXT)
 #define cpu_has_vmx_vpid_invvpid_single_context_retaining_global    \
-    (vmx_ept_vpid_cap & VMX_VPID_INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL)
+    (vmx_caps.vpid & VMX_VPID_INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL)
 
 #define INVVPID_INDIVIDUAL_ADDR                 0
 #define INVVPID_SINGLE_CONTEXT                  1
 #define INVVPID_ALL_CONTEXT                     2
 #define INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL 3
 
-#ifdef HAVE_AS_VMX
-# define GAS_VMX_OP(yes, no) yes
-#else
-# define GAS_VMX_OP(yes, no) no
-#endif
-
 static always_inline void __vmptrld(u64 addr)
 {
-    asm volatile (
-#ifdef HAVE_AS_VMX
-                   "vmptrld %0\n"
-#else
-                   VMPTRLD_OPCODE MODRM_EAX_06
-#endif
-                   /* CF==1 or ZF==1 --> BUG() */
-                   UNLIKELY_START(be, vmptrld)
-                   _ASM_BUGFRAME_TEXT(0)
-                   UNLIKELY_END_SECTION
-                   :
-#ifdef HAVE_AS_VMX
-                   : "m" (addr),
-#else
-                   : "a" (&addr),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-                   : "memory");
+    asm goto ( "vmptrld %[addr]\n\t"
+               "jbe %l[vmfail]"
+               :
+               : [addr] "m" (addr)
+               : "memory"
+               : vmfail );
+    return;
+
+ vmfail:
+    BUG();
 }
 
 static always_inline void __vmpclear(u64 addr)
 {
-    asm volatile (
-#ifdef HAVE_AS_VMX
-                   "vmclear %0\n"
-#else
-                   VMCLEAR_OPCODE MODRM_EAX_06
-#endif
-                   /* CF==1 or ZF==1 --> BUG() */
-                   UNLIKELY_START(be, vmclear)
-                   _ASM_BUGFRAME_TEXT(0)
-                   UNLIKELY_END_SECTION
-                   :
-#ifdef HAVE_AS_VMX
-                   : "m" (addr),
-#else
-                   : "a" (&addr),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-                   : "memory");
+    asm goto ( "vmclear %[addr]\n\t"
+               "jbe %l[vmfail]"
+               :
+               : [addr] "m" (addr)
+               : "memory"
+               : vmfail );
+    return;
+
+ vmfail:
+    BUG();
 }
 
-static always_inline void __vmread(unsigned long field, unsigned long *value)
+static always_inline unsigned long vmread(unsigned long field)
 {
-    asm volatile (
-#ifdef HAVE_AS_VMX
-                   "vmread %1, %0\n\t"
-#else
-                   VMREAD_OPCODE MODRM_EAX_ECX
-#endif
+    unsigned long value;
+
+    asm volatile ( "vmread %[field], %[value]\n\t"
                    /* CF==1 or ZF==1 --> BUG() */
                    UNLIKELY_START(be, vmread)
                    _ASM_BUGFRAME_TEXT(0)
                    UNLIKELY_END_SECTION
-#ifdef HAVE_AS_VMX
-                   : "=rm" (*value)
-                   : "r" (field),
-#else
-                   : "=c" (*value)
-                   : "a" (field),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-        );
+                   : [value] "=rm" (value)
+                   : [field] "r" (field),
+                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0) );
+
+    return value;
+}
+
+static always_inline void __vmread(unsigned long field, unsigned long *value)
+{
+    *value = vmread(field);
 }
 
 static always_inline void __vmwrite(unsigned long field, unsigned long value)
 {
-    asm volatile (
-#ifdef HAVE_AS_VMX
-                   "vmwrite %1, %0\n"
-#else
-                   VMWRITE_OPCODE MODRM_EAX_ECX
-#endif
-                   /* CF==1 or ZF==1 --> BUG() */
-                   UNLIKELY_START(be, vmwrite)
-                   _ASM_BUGFRAME_TEXT(0)
-                   UNLIKELY_END_SECTION
-                   :
-#ifdef HAVE_AS_VMX
-                   : "r" (field) , "rm" (value),
-#else
-                   : "a" (field) , "c" (value),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-        );
+    asm goto ( "vmwrite %[value], %[field]\n\t"
+               "jbe %l[vmfail]"
+               :
+               : [field] "r" (field), [value] "rm" (value)
+               :
+               : vmfail );
+    return;
+
+ vmfail:
+    BUG();
 }
 
 static inline enum vmx_insn_errno vmread_safe(unsigned long field,
@@ -411,19 +361,18 @@ static inline enum vmx_insn_errno vmread_safe(unsigned long field,
     unsigned long ret = VMX_INSN_SUCCEED;
     bool fail_invalid, fail_valid;
 
-    asm volatile ( GAS_VMX_OP("vmread %[field], %[value]\n\t",
-                              VMREAD_OPCODE MODRM_EAX_ECX)
+    asm volatile ( "vmread %[field], %[value]\n\t"
                    ASM_FLAG_OUT(, "setc %[invalid]\n\t")
                    ASM_FLAG_OUT(, "setz %[valid]\n\t")
                    : ASM_FLAG_OUT("=@ccc", [invalid] "=rm") (fail_invalid),
                      ASM_FLAG_OUT("=@ccz", [valid] "=rm") (fail_valid),
-                     [value] GAS_VMX_OP("=rm", "=c") (*value)
-                   : [field] GAS_VMX_OP("r", "a") (field));
+                     [value] "=rm" (*value)
+                   : [field] "r" (field) );
 
     if ( unlikely(fail_invalid) )
         ret = VMX_INSN_FAIL_INVALID;
     else if ( unlikely(fail_valid) )
-        __vmread(VM_INSTRUCTION_ERROR, &ret);
+        ret = vmread(VM_INSTRUCTION_ERROR);
 
     return ret;
 }
@@ -431,24 +380,20 @@ static inline enum vmx_insn_errno vmread_safe(unsigned long field,
 static inline enum vmx_insn_errno vmwrite_safe(unsigned long field,
                                                unsigned long value)
 {
-    unsigned long ret = VMX_INSN_SUCCEED;
-    bool fail_invalid, fail_valid;
+    asm goto ( "vmwrite %[value], %[field]\n\t"
+               "jc %l[vmfail_invalid]\n\t"
+               "jz %l[vmfail_valid]"
+               :
+               : [field] "r" (field), [value] "rm" (value)
+               :
+               : vmfail_invalid, vmfail_valid );
+    return VMX_INSN_SUCCEED;
 
-    asm volatile ( GAS_VMX_OP("vmwrite %[value], %[field]\n\t",
-                              VMWRITE_OPCODE MODRM_EAX_ECX)
-                   ASM_FLAG_OUT(, "setc %[invalid]\n\t")
-                   ASM_FLAG_OUT(, "setz %[valid]\n\t")
-                   : ASM_FLAG_OUT("=@ccc", [invalid] "=rm") (fail_invalid),
-                     ASM_FLAG_OUT("=@ccz", [valid] "=rm") (fail_valid)
-                   : [field] GAS_VMX_OP("r", "a") (field),
-                     [value] GAS_VMX_OP("rm", "c") (value));
+ vmfail_invalid:
+    return VMX_INSN_FAIL_INVALID;
 
-    if ( unlikely(fail_invalid) )
-        ret = VMX_INSN_FAIL_INVALID;
-    else if ( unlikely(fail_valid) )
-        __vmread(VM_INSTRUCTION_ERROR, &ret);
-
-    return ret;
+ vmfail_valid:
+    return vmread(VM_INSTRUCTION_ERROR);
 }
 
 static always_inline void __invept(unsigned long type, uint64_t eptp)
@@ -465,24 +410,16 @@ static always_inline void __invept(unsigned long type, uint64_t eptp)
          !cpu_has_vmx_ept_invept_single_context )
         type = INVEPT_ALL_CONTEXT;
 
-    asm volatile (
-#ifdef HAVE_AS_EPT
-                   "invept %0, %1\n"
-#else
-                   INVEPT_OPCODE MODRM_EAX_08
-#endif
-                   /* CF==1 or ZF==1 --> BUG() */
-                   UNLIKELY_START(be, invept)
-                   _ASM_BUGFRAME_TEXT(0)
-                   UNLIKELY_END_SECTION
-                   :
-#ifdef HAVE_AS_EPT
-                   : "m" (operand), "r" (type),
-#else
-                   : "a" (&operand), "c" (type),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-                   : "memory" );
+    asm goto ( "invept %[operand], %[type]\n\t"
+               "jbe %l[vmfail]"
+               :
+               : [operand] "m" (operand), [type] "r" (type)
+               : "memory"
+               : vmfail );
+    return;
+
+ vmfail:
+    BUG();
 }
 
 static always_inline void __invvpid(unsigned long type, u16 vpid, u64 gva)
@@ -494,26 +431,18 @@ static always_inline void __invvpid(unsigned long type, u16 vpid, u64 gva)
     }  operand = {vpid, 0, gva};
 
     /* Fix up #UD exceptions which occur when TLBs are flushed before VMXON. */
-    asm volatile ( "1: "
-#ifdef HAVE_AS_EPT
-                   "invvpid %0, %1\n"
-#else
-                   INVVPID_OPCODE MODRM_EAX_08
-#endif
-                   /* CF==1 or ZF==1 --> BUG() */
-                   UNLIKELY_START(be, invvpid)
-                   _ASM_BUGFRAME_TEXT(0)
-                   UNLIKELY_END_SECTION "\n"
-                   "2:"
-                   _ASM_EXTABLE(1b, 2b)
-                   :
-#ifdef HAVE_AS_EPT
-                   : "m" (operand), "r" (type),
-#else
-                   : "a" (&operand), "c" (type),
-#endif
-                     _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__, __FILE__, 0)
-                   : "memory" );
+    asm_inline goto (
+        "1: invvpid %[operand], %[type]\n\t"
+        "   jbe %l[vmfail]\n\t"
+        "2:" _ASM_EXTABLE(1b, 2b)
+        :
+        : [operand] "m" (operand), [type] "r" (type)
+        : "memory"
+        : vmfail );
+    return;
+
+ vmfail:
+    BUG();
 }
 
 static inline void ept_sync_all(void)
@@ -550,32 +479,6 @@ execute_invvpid:
 static inline void vpid_sync_all(void)
 {
     __invvpid(INVVPID_ALL_CONTEXT, 0, 0);
-}
-
-static inline void __vmxoff(void)
-{
-    asm volatile (
-        VMXOFF_OPCODE
-        : : : "memory" );
-}
-
-static inline int __vmxon(u64 addr)
-{
-    int rc;
-
-    asm volatile ( 
-        "1: " VMXON_OPCODE MODRM_EAX_06 "\n"
-        "   setna %b0 ; neg %0\n" /* CF==1 or ZF==1 --> rc = -1 */
-        "2:\n"
-        ".section .fixup,\"ax\"\n"
-        "3: sub $2,%0 ; jmp 2b\n"    /* #UD or #GP --> rc = -2 */
-        ".previous\n"
-        _ASM_EXTABLE(1b, 3b)
-        : "=q" (rc)
-        : "0" (0), "a" (&addr)
-        : "memory");
-
-    return rc;
 }
 
 int cf_check vmx_guest_x86_mode(struct vcpu *v);

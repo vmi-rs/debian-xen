@@ -87,51 +87,55 @@
  * doing the final put_page(), and remove it from the iommu if so.
  */
 
+#include <xen/domain.h>
+#include <xen/domain_page.h>
+#include <xen/efi.h>
+#include <xen/err.h>
+#include <xen/event.h>
+#include <xen/guest_access.h>
+#include <xen/hypercall.h>
 #include <xen/init.h>
+#include <xen/io.h>
+#include <xen/iocap.h>
 #include <xen/ioreq.h>
+#include <xen/irq.h>
 #include <xen/kernel.h>
 #include <xen/lib.h>
 #include <xen/livepatch.h>
 #include <xen/mm.h>
 #include <xen/param.h>
-#include <xen/domain.h>
-#include <xen/sched.h>
-#include <xen/err.h>
 #include <xen/perfc.h>
-#include <xen/irq.h>
-#include <xen/softirq.h>
-#include <xen/domain_page.h>
-#include <xen/event.h>
-#include <xen/iocap.h>
-#include <xen/guest_access.h>
 #include <xen/pfn.h>
+#include <xen/sched.h>
+#include <xen/softirq.h>
+#include <xen/trace.h>
 #include <xen/vmap.h>
 #include <xen/xmalloc.h>
-#include <xen/efi.h>
-#include <xen/hypercall.h>
-#include <xen/mm.h>
-#include <asm/paging.h>
-#include <asm/shadow.h>
-#include <asm/page.h>
-#include <asm/flushtlb.h>
-#include <asm/io.h>
-#include <asm/ldt.h>
-#include <asm/x86_emulate.h>
+
 #include <asm/e820.h>
-#include <asm/shared.h>
-#include <asm/mem_sharing.h>
-#include <public/memory.h>
-#include <public/sched.h>
-#include <xsm/xsm.h>
-#include <xen/trace.h>
-#include <asm/setup.h>
 #include <asm/fixmap.h>
-#include <asm/io_apic.h>
-#include <asm/pci.h>
+#include <asm/flushtlb.h>
 #include <asm/guest.h>
+#include <asm/idt.h>
+#include <asm/io_apic.h>
+#include <asm/ldt.h>
+#include <asm/mem_sharing.h>
+#include <asm/page.h>
+#include <asm/paging.h>
+#include <asm/pci.h>
 #include <asm/pv/domain.h>
 #include <asm/pv/mm.h>
+#include <asm/setup.h>
+#include <asm/shadow.h>
+#include <asm/shared.h>
 #include <asm/trampoline.h>
+#include <asm/traps.h>
+#include <asm/x86_emulate.h>
+
+#include <public/memory.h>
+#include <public/sched.h>
+
+#include <xsm/xsm.h>
 
 #ifdef CONFIG_PV
 #include "pv/mm.h"
@@ -154,13 +158,6 @@ struct rangeset *__read_mostly mmio_ro_ranges;
 static uint32_t __ro_after_init base_disallow_mask;
 
 /* Handling sub-page read-only MMIO regions */
-struct subpage_ro_range {
-    struct list_head list;
-    mfn_t mfn;
-    void __iomem *mapped;
-    DECLARE_BITMAP(ro_elems, PAGE_SIZE / MMIO_RO_SUBPAGE_GRAN);
-};
-
 static LIST_HEAD_RO_AFTER_INIT(subpage_ro_ranges);
 static DEFINE_SPINLOCK(subpage_ro_lock);
 
@@ -176,9 +173,7 @@ static DEFINE_SPINLOCK(subpage_ro_lock);
 
 #define l1_disallow_mask(d)                                     \
     (((d) != dom_io) &&                                         \
-     (rangeset_is_empty((d)->iomem_caps) &&                     \
-      rangeset_is_empty((d)->arch.ioport_caps) &&               \
-      !has_arch_pdevs(d) &&                                     \
+     (!cache_flush_permitted(d) &&                              \
       is_pv_domain(d)) ?                                        \
      L1_DISALLOW_MASK : (L1_DISALLOW_MASK & ~PAGE_CACHE_ATTRS))
 
@@ -281,8 +276,6 @@ static void __init assign_io_page(struct page_info *page)
 
 void __init arch_init_memory(void)
 {
-    unsigned long i, pfn, rstart_pfn, rend_pfn, iostart_pfn, ioend_pfn;
-
     /*
      * Basic guest-accessible flags:
      *   PRESENT, R/W, USER, A/D, AVAIL[0,1,2], AVAIL_HIGH, NX (if available).
@@ -298,12 +291,17 @@ void __init arch_init_memory(void)
      * case the low 1MB.
      */
     BUG_ON(pvh_boot && trampoline_phys != 0x1000);
-    for ( i = 0; i < 0x100; i++ )
+    for ( unsigned int i = 0; i < PFN_DOWN(MB(1)); i++ )
         assign_io_page(mfn_to_page(_mfn(i)));
 
-    /* Any areas not specified as RAM by the e820 map are considered I/O. */
-    for ( i = 0, pfn = 0; pfn < max_page; i++ )
+    /*
+     * Any areas not specified as RAM or UNUSABLE by the e820 map are
+     * considered I/O.
+     */
+    for ( unsigned long i = 0, pfn = 0; pfn < max_page; i++ )
     {
+        unsigned long rstart_pfn, rend_pfn;
+
         while ( (i < e820.nr_map) &&
                 (e820.map[i].type != E820_RAM) &&
                 (e820.map[i].type != E820_UNUSABLE) )
@@ -322,17 +320,6 @@ void __init arch_init_memory(void)
             rend_pfn   = max_t(unsigned long, rstart_pfn,
                                PFN_DOWN(e820.map[i].addr + e820.map[i].size));
         }
-
-        /*
-         * Make sure any Xen mappings of RAM holes above 1MB are blown away.
-         * In particular this ensures that RAM holes are respected even in
-         * the statically-initialised 1-16MB mapping area.
-         */
-        iostart_pfn = max_t(unsigned long, pfn, 1UL << (20 - PAGE_SHIFT));
-        ioend_pfn = min(rstart_pfn, 16UL << (20 - PAGE_SHIFT));
-        if ( iostart_pfn < ioend_pfn )
-            destroy_xen_mappings((unsigned long)mfn_to_virt(iostart_pfn),
-                                 (unsigned long)mfn_to_virt(ioend_pfn));
 
         /* Mark as I/O up to next RAM region. */
         for ( ; pfn < rstart_pfn; pfn++ )
@@ -371,6 +358,7 @@ void __init arch_init_memory(void)
                     const l3_pgentry_t *l3idle = map_l3t_from_l4e(
                             idle_pg_table[l4_table_offset(split_va)]);
                     l3_pgentry_t *l3tab = map_domain_page(l3mfn);
+                    unsigned int i;
 
                     for ( i = 0; i < l3_table_offset(split_va); ++i )
                         l3tab[i] = l3idle[i];
@@ -391,7 +379,7 @@ void __init arch_init_memory(void)
     ASM_CONSTANT(FIXADDR_X_SIZE, FIXADDR_X_SIZE);
 }
 
-int page_is_ram_type(unsigned long mfn, unsigned long mem_type)
+bool page_is_ram_type(unsigned long mfn, unsigned int mem_type)
 {
     uint64_t maddr = pfn_to_paddr(mfn);
     int i;
@@ -425,10 +413,15 @@ int page_is_ram_type(unsigned long mfn, unsigned long mem_type)
         /* Test the range. */
         if ( (e820.map[i].addr <= maddr) &&
              ((e820.map[i].addr + e820.map[i].size) >= (maddr + PAGE_SIZE)) )
-            return 1;
+            return true;
     }
 
-    return 0;
+    return false;
+}
+
+bool page_is_offlinable(mfn_t mfn)
+{
+    return page_is_ram_type(mfn_x(mfn), RAM_TYPE_CONVENTIONAL);
 }
 
 unsigned int page_get_ram_type(mfn_t mfn)
@@ -2670,15 +2663,17 @@ static int validate_page(struct page_info *page, unsigned long type,
                  get_gpfn_from_mfn(mfn_x(page_to_mfn(page))),
                  type, page->count_info, page->u.inuse.type_info);
         if ( page != current->arch.old_guest_table )
-            page->u.inuse.type_info = 0;
-        else
         {
-            ASSERT((page->u.inuse.type_info &
-                    (PGT_count_mask | PGT_validated)) == 1);
-    case -ERESTART:
-            get_page_light(page);
-            page->u.inuse.type_info |= PGT_partial;
+            page->u.inuse.type_info = 0;
+            break;
         }
+
+        ASSERT((page->u.inuse.type_info &
+                (PGT_count_mask | PGT_validated)) == 1);
+        fallthrough;
+    case -ERESTART:
+        get_page_light(page);
+        page->u.inuse.type_info |= PGT_partial;
         break;
     }
 
@@ -3415,7 +3410,7 @@ int new_guest_cr3(mfn_t mfn)
 static int vcpumask_to_pcpumask(
     struct domain *d, XEN_GUEST_HANDLE_PARAM(const_void) bmap, cpumask_t *pmask)
 {
-    unsigned int vcpu_id, vcpu_bias, offs;
+    unsigned int vcpu_bias, offs;
     unsigned long vmask;
     struct vcpu *v;
     bool is_native = !is_pv_32bit_domain(d);
@@ -3436,12 +3431,10 @@ static int vcpumask_to_pcpumask(
             return -EFAULT;
         }
 
-        while ( vmask )
+        for_each_set_bit ( vcpu_id, vmask )
         {
             unsigned int cpu;
 
-            vcpu_id = ffsl(vmask) - 1;
-            vmask &= ~(1UL << vcpu_id);
             vcpu_id += vcpu_bias;
             if ( (vcpu_id >= d->max_vcpus) )
                 return 0;
@@ -3829,7 +3822,7 @@ long do_mmuext_op(
                     if ( !cpumask_intersects(mask,
                                              per_cpu(cpu_sibling_mask, cpu)) )
                         __cpumask_set_cpu(cpu, mask);
-                flush_mask(mask, FLUSH_CACHE);
+                flush_mask(mask, FLUSH_CACHE_EVICT);
             }
             else
                 rc = -EACCES;
@@ -4576,7 +4569,7 @@ static int __do_update_va_mapping(
 }
 
 long do_update_va_mapping(
-    unsigned long va, u64 val64, unsigned long flags)
+    unsigned long va, uint64_t val64, unsigned long flags)
 {
     int rc = __do_update_va_mapping(va, val64, flags, current->domain);
 
@@ -4588,7 +4581,7 @@ long do_update_va_mapping(
 }
 
 long do_update_va_mapping_otherdomain(
-    unsigned long va, u64 val64, unsigned long flags, domid_t domid)
+    unsigned long va, uint64_t val64, unsigned long flags, domid_t domid)
 {
     struct domain *pg_owner;
     int rc;
@@ -4923,7 +4916,12 @@ long arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     return rc;
 }
 
-static struct subpage_ro_range *subpage_mmio_find_page(mfn_t mfn)
+bool subpage_ro_active(void)
+{
+    return !list_empty(&subpage_ro_ranges);
+}
+
+struct subpage_ro_range *subpage_mmio_find_page(mfn_t mfn)
 {
     struct subpage_ro_range *entry;
 
@@ -5012,6 +5010,17 @@ int __init subpage_mmio_ro_add(
          !IS_ALIGNED(size, MMIO_RO_SUBPAGE_GRAN) )
         return -EINVAL;
 
+    /*
+     * Force all r/o subregions to be registered before initial domain
+     * creation, so that the emulation handlers can be added only when there
+     * are pages registered.
+     */
+    if ( system_state >= SYS_STATE_smp_boot )
+    {
+        ASSERT_UNREACHABLE();
+        return -EILSEQ;
+    }
+
     if ( !size )
         return 0;
 
@@ -5068,7 +5077,7 @@ int __init subpage_mmio_ro_add(
     return rc;
 }
 
-static void __iomem *subpage_mmio_map_page(
+void __iomem *subpage_mmio_map_page(
     struct subpage_ro_range *entry)
 {
     void __iomem *mapped_page;
@@ -5093,10 +5102,10 @@ static void __iomem *subpage_mmio_map_page(
     return entry->mapped;
 }
 
-static void subpage_mmio_write_emulate(
+void subpage_mmio_write_emulate(
     mfn_t mfn,
     unsigned int offset,
-    const void *data,
+    unsigned long data,
     unsigned int len)
 {
     struct subpage_ro_range *entry;
@@ -5125,110 +5134,8 @@ static void subpage_mmio_write_emulate(
         return;
     }
 
-    addr += offset;
-    switch ( len )
-    {
-    case 1:
-        writeb(*(const uint8_t*)data, addr);
-        break;
-    case 2:
-        writew(*(const uint16_t*)data, addr);
-        break;
-    case 4:
-        writel(*(const uint32_t*)data, addr);
-        break;
-    case 8:
-        writeq(*(const uint64_t*)data, addr);
-        break;
-    default:
-        /* mmio_ro_emulated_write() already validated the size */
-        ASSERT_UNREACHABLE();
+    if ( !write_mmio(addr + offset, data, len) )
         goto write_ignored;
-    }
-}
-
-#ifdef CONFIG_HVM
-bool subpage_mmio_write_accept(mfn_t mfn, unsigned long gla)
-{
-    unsigned int offset = PAGE_OFFSET(gla);
-    const struct subpage_ro_range *entry;
-
-    entry = subpage_mmio_find_page(mfn);
-    if ( !entry )
-        return false;
-
-    if ( !test_bit(offset / MMIO_RO_SUBPAGE_GRAN, entry->ro_elems) )
-    {
-        /*
-         * We don't know the write size at this point yet, so it could be
-         * an unaligned write, but accept it here anyway and deal with it
-         * later.
-         */
-        return true;
-    }
-
-    return false;
-}
-#endif
-
-int cf_check mmio_ro_emulated_write(
-    enum x86_segment seg,
-    unsigned long offset,
-    void *p_data,
-    unsigned int bytes,
-    struct x86_emulate_ctxt *ctxt)
-{
-    struct mmio_ro_emulate_ctxt *mmio_ro_ctxt = ctxt->data;
-
-    /* Only allow naturally-aligned stores at the original %cr2 address. */
-    if ( ((bytes | offset) & (bytes - 1)) || !bytes ||
-         offset != mmio_ro_ctxt->cr2 )
-    {
-        gdprintk(XENLOG_WARNING, "bad access (cr2=%lx, addr=%lx, bytes=%u)\n",
-                mmio_ro_ctxt->cr2, offset, bytes);
-        return X86EMUL_UNHANDLEABLE;
-    }
-
-    if ( bytes <= 8 )
-        subpage_mmio_write_emulate(mmio_ro_ctxt->mfn, PAGE_OFFSET(offset),
-                                   p_data, bytes);
-    else if ( subpage_mmio_find_page(mmio_ro_ctxt->mfn) )
-        gprintk(XENLOG_WARNING,
-                "unsupported %u-byte write to R/O MMIO 0x%"PRI_mfn"%03lx\n",
-                bytes, mfn_x(mmio_ro_ctxt->mfn), PAGE_OFFSET(offset));
-
-    return X86EMUL_OKAY;
-}
-
-int cf_check mmcfg_intercept_write(
-    enum x86_segment seg,
-    unsigned long offset,
-    void *p_data,
-    unsigned int bytes,
-    struct x86_emulate_ctxt *ctxt)
-{
-    struct mmio_ro_emulate_ctxt *mmio_ctxt = ctxt->data;
-
-    /*
-     * Only allow naturally-aligned stores no wider than 4 bytes to the
-     * original %cr2 address.
-     */
-    if ( ((bytes | offset) & (bytes - 1)) || bytes > 4 || !bytes ||
-         offset != mmio_ctxt->cr2 )
-    {
-        gdprintk(XENLOG_WARNING, "bad write (cr2=%lx, addr=%lx, bytes=%u)\n",
-                mmio_ctxt->cr2, offset, bytes);
-        return X86EMUL_UNHANDLEABLE;
-    }
-
-    offset &= 0xfff;
-    if ( pci_conf_write_intercept(mmio_ctxt->seg, mmio_ctxt->bdf,
-                                  offset, bytes, p_data) >= 0 )
-        pci_mmcfg_write(mmio_ctxt->seg, PCI_BUS(mmio_ctxt->bdf),
-                        PCI_DEVFN(mmio_ctxt->bdf), offset, bytes,
-                        *(uint32_t *)p_data);
-
-    return X86EMUL_OKAY;
 }
 
 /*
@@ -5472,7 +5379,7 @@ int map_pages_to_xen(
     unsigned long virt,
     mfn_t mfn,
     unsigned long nr_mfns,
-    unsigned int flags)
+    pte_attr_t flags)
 {
     bool locking = system_state > SYS_STATE_boot;
     l3_pgentry_t *pl3e = NULL, ol3e;
@@ -5489,7 +5396,7 @@ int map_pages_to_xen(
     if ( (flags & _PAGE_PRESENT) &&            \
          (((o_) ^ flags) & PAGE_CACHE_ATTRS) ) \
     {                                          \
-        flush_flags |= FLUSH_CACHE;            \
+        flush_flags |= FLUSH_CACHE_EVICT;      \
         if ( virt >= DIRECTMAP_VIRT_START &&   \
              virt < HYPERVISOR_VIRT_END )      \
             flush_flags |= FLUSH_VA_VALID;     \
@@ -5890,7 +5797,7 @@ int __init populate_pt_range(unsigned long virt, unsigned long nr_mfns)
  *
  * It is an error to call with present flags over an unpopulated range.
  */
-int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf)
+int modify_xen_mappings(unsigned long s, unsigned long e, pte_attr_t nf)
 {
     bool locking = system_state > SYS_STATE_boot;
     l3_pgentry_t *pl3e = NULL;
@@ -6186,7 +6093,7 @@ int destroy_xen_mappings(unsigned long s, unsigned long e)
  * the non-inclusive boundary will be updated.
  */
 void init_or_livepatch modify_xen_mappings_lite(
-    unsigned long s, unsigned long e, unsigned int nf)
+    unsigned long s, unsigned long e, pte_attr_t nf)
 {
     unsigned long v = s, fm, flags;
 
@@ -6297,6 +6204,12 @@ void __iomem *__init ioremap_wc(paddr_t pa, size_t len)
     va = __vmap(&mfn, nr, 1, 1, PAGE_HYPERVISOR_WC, VMAP_DEFAULT);
 
     return (void __force __iomem *)(va ? va + offs : NULL);
+}
+
+static bool perdomain_l1e_needs_freeing(l1_pgentry_t l1e)
+{
+    return (l1e_get_flags(l1e) & (_PAGE_PRESENT | _PAGE_AVAIL0)) ==
+           (_PAGE_PRESENT | _PAGE_AVAIL0);
 }
 
 int create_perdomain_mapping(struct domain *d, unsigned long va,
@@ -6451,9 +6364,7 @@ void destroy_perdomain_mapping(struct domain *d, unsigned long va,
 
                 for ( ; nr && i < L1_PAGETABLE_ENTRIES; --nr, ++i )
                 {
-                    if ( (l1e_get_flags(l1tab[i]) &
-                          (_PAGE_PRESENT | _PAGE_AVAIL0)) ==
-                         (_PAGE_PRESENT | _PAGE_AVAIL0) )
+                    if ( perdomain_l1e_needs_freeing(l1tab[i]) )
                         free_domheap_page(l1e_get_page(l1tab[i]));
                     l1tab[i] = l1e_empty();
                 }
@@ -6503,9 +6414,7 @@ void free_perdomain_mappings(struct domain *d)
                         unsigned int k;
 
                         for ( k = 0; k < L1_PAGETABLE_ENTRIES; ++k )
-                            if ( (l1e_get_flags(l1tab[k]) &
-                                  (_PAGE_PRESENT | _PAGE_AVAIL0)) ==
-                                 (_PAGE_PRESENT | _PAGE_AVAIL0) )
+                            if ( perdomain_l1e_needs_freeing(l1tab[k]) )
                                 free_domheap_page(l1e_get_page(l1tab[k]));
 
                         unmap_domain_page(l1tab);
@@ -6537,8 +6446,15 @@ static void write_sss_token(unsigned long *ptr)
 
 void memguard_guard_stack(void *p)
 {
-    /* IST Shadow stacks.  4x 1k in stack page 0. */
-    if ( IS_ENABLED(CONFIG_XEN_SHSTK) )
+    ASSERT(opt_fred >= 0); /* Confirm that FRED-ness has been resolved */
+
+    /*
+     * IST Shadow stacks.  4x 1k in stack page 0.
+     *
+     * With IDT delivery, we need Supervisor Shadow Stack tokens at the base
+     * of each stack.  With FRED delivery, these no longer exist.
+     */
+    if ( IS_ENABLED(CONFIG_XEN_SHSTK) && !opt_fred )
     {
         write_sss_token(p + (IST_MCE * IST_SHSTK_SIZE) - 8);
         write_sss_token(p + (IST_NMI * IST_SHSTK_SIZE) - 8);
@@ -6549,7 +6465,7 @@ void memguard_guard_stack(void *p)
 
     /* Primary Shadow Stack.  1x 4k in stack page 5. */
     p += PRIMARY_SHSTK_SLOT * PAGE_SIZE;
-    if ( IS_ENABLED(CONFIG_XEN_SHSTK) )
+    if ( IS_ENABLED(CONFIG_XEN_SHSTK) && !opt_fred )
         write_sss_token(p + PAGE_SIZE - 8);
 
     map_pages_to_xen((unsigned long)p, virt_to_mfn(p), 1, PAGE_HYPERVISOR_SHSTK);
@@ -6642,6 +6558,9 @@ static void __init __maybe_unused build_assertions(void)
      * using different PATs will not work.
      */
     BUILD_BUG_ON(XEN_MSR_PAT != 0x050100070406ULL);
+
+    /* IST_MAX IST pages + at least 1 guard page + primary stack. */
+    BUILD_BUG_ON((IST_MAX + 1) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
 }
 
 /*

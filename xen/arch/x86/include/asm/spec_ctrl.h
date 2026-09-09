@@ -45,7 +45,7 @@
  */
 #define SCF_DOM_MASK (SCF_verw | SCF_entry_ibpb | SCF_entry_bhb)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <asm/alternative.h>
 #include <asm/current.h>
@@ -79,7 +79,6 @@ static always_inline void spec_ctrl_new_guest_context(void)
 extern int8_t opt_ibpb_ctxt_switch;
 extern bool opt_ssbd;
 extern int8_t opt_bhi_dis_s;
-extern int8_t opt_eager_fpu;
 extern int8_t opt_l1d_flush;
 
 extern bool bsp_delay_spec_ctrl;
@@ -99,10 +98,8 @@ extern bool opt_bp_spec_reduce;
  */
 extern paddr_t l1tf_addr_mask, l1tf_safe_maddr;
 
-static inline void init_shadow_spec_ctrl_state(void)
+static inline void init_shadow_spec_ctrl_state(struct cpu_info *info)
 {
-    struct cpu_info *info = get_cpu_info();
-
     info->shadow_spec_ctrl = 0;
     info->xen_spec_ctrl = default_xen_spec_ctrl;
     info->scf = default_scf;
@@ -203,7 +200,7 @@ static always_inline void spec_ctrl_exit_idle(struct cpu_info *info)
      */
 }
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* !__X86_SPEC_CTRL_H__ */
 
 /*

@@ -12,6 +12,21 @@
 #include <public/vcpu.h>
 #include <public/hvm/hvm_info_table.h>
 
+unsigned int arch_domain_struct_memflags(void);
+#define arch_domain_struct_memflags arch_domain_struct_memflags
+
+/*
+ * This structure contains embedded PAE PDPTEs, used when an HVM guest
+ * runs on shadow pagetables outside of Long mode. In this case the CPU
+ * may require that the shadow CR3 points below 4GB, and hence the whole
+ * structure must satisfy this restriction. Thus we specify MEMF_bits(32).
+ */
+#define arch_vcpu_struct_memflags(d) ({                                 \
+    const struct domain *d_ = (d);                                      \
+                                                                        \
+    (is_hvm_domain(d_) && paging_mode_shadow(d_) ? MEMF_bits(32) : 0);  \
+})
+
 #define has_32bit_shinfo(d)    ((d)->arch.has_32bit_shinfo)
 
 /*
@@ -257,11 +272,12 @@ struct paging_vcpu {
     struct shadow_vcpu shadow;
 };
 
-#define MAX_NESTEDP2M 10
-
-#define MAX_ALTP2M      10 /* arbitrary */
-#define INVALID_ALTP2M  0xffff
 #define MAX_EPTP        (PAGE_SIZE / sizeof(uint64_t))
+#define MAX_NR_ALTP2M   MAX_EPTP
+#define MAX_NESTEDP2M   10
+
+#define INVALID_ALTP2M  0xffff
+
 struct p2m_domain;
 struct time_scale {
     int shift;
@@ -282,6 +298,13 @@ struct pv_domain
     bool pcid;
     /* Mitigate L1TF with shadow/crashing? */
     bool check_l1tf;
+
+#ifdef CONFIG_PV32
+    unsigned int hv_compat_vstart;
+
+    /* Maximum physical-address bitwidth supported by this guest. */
+    unsigned int physaddr_bitsize;
+#endif
 
     /* map_domain_page() mapping cache. */
     struct mapcache_domain mapcache;
@@ -309,13 +332,6 @@ struct monitor_write_data {
 struct arch_domain
 {
     struct page_info *perdomain_l3_pg;
-
-#ifdef CONFIG_PV32
-    unsigned int hv_compat_vstart;
-#endif
-
-    /* Maximum physical-address bitwidth supported by this guest. */
-    unsigned int physaddr_bitsize;
 
     /* I/O-port admin-specified access capabilities. */
     struct rangeset *ioport_caps;
@@ -350,12 +366,14 @@ struct arch_domain
     struct p2m_domain *nested_p2m[MAX_NESTEDP2M];
     mm_lock_t nested_p2m_lock;
 
+#ifdef CONFIG_ALTP2M
     /* altp2m: allow multiple copies of host p2m */
     bool altp2m_active;
-    struct p2m_domain *altp2m_p2m[MAX_ALTP2M];
+    struct p2m_domain **altp2m_p2m;
     mm_lock_t altp2m_list_lock;
     uint64_t *altp2m_eptp;
     uint64_t *altp2m_visible_eptp;
+#endif
 #endif
 
     /* NB. protected by d->event_lock and by irq_desc[irq].lock */
@@ -545,6 +563,8 @@ struct pv_vcpu
     bool syscall32_disables_events;
     bool sysenter_disables_events;
 
+    uint16_t ds, es, fs, gs;
+
     /*
      * 64bit segment bases.
      *
@@ -594,8 +614,8 @@ struct arch_vcpu
 
     /* Debug registers. */
     unsigned long dr[4];
-    unsigned long dr7; /* Ideally int, but __vmread() needs long. */
     unsigned int dr6;
+    unsigned int dr7;
 
     /* other state */
 
@@ -646,12 +666,6 @@ struct arch_vcpu
      * it explicitly enables it via xcr0.
      */
     uint64_t xcr0_accum;
-    /* This variable determines whether nonlazy extended state has been used,
-     * and thus should be saved/restored. */
-    bool nonlazy_xstate_used;
-
-    /* Restore all FPU state (lazy and non-lazy state) on context switch? */
-    bool fully_eager_fpu;
 
     struct vmce vmce;
 
@@ -687,7 +701,7 @@ bool update_secondary_system_time(struct vcpu *v,
 void force_update_secondary_system_time(struct vcpu *v,
                                         struct vcpu_time_info *map);
 
-void vcpu_show_registers(const struct vcpu *v);
+void vcpu_show_registers(struct vcpu *v);
 
 static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
 {
@@ -703,6 +717,8 @@ void arch_vcpu_regs_init(struct vcpu *v);
 
 struct vcpu_hvm_context;
 int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx);
+
+void pv_inject_callback(unsigned int type);
 
 #ifdef CONFIG_PV
 void pv_inject_event(const struct x86_event *event);

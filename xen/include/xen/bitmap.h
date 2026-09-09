@@ -1,11 +1,11 @@
 #ifndef __XEN_BITMAP_H
 #define __XEN_BITMAP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
-#include <xen/lib.h>
-#include <xen/types.h>
 #include <xen/bitops.h>
+#include <xen/macros.h>
+#include <xen/string.h>
 
 /*
  * bitmaps provide bit arrays that consume one or more unsigned
@@ -230,7 +230,7 @@ static inline unsigned int bitmap_weight(const unsigned long *src,
 	return __bitmap_weight(src, nbits);
 }
 
-#include <asm/byteorder.h>
+#include <xen/byteorder.h>
 
 #ifdef __LITTLE_ENDIAN
 #define BITMAP_MEM_ALIGNMENT 8
@@ -290,6 +290,6 @@ int xenctl_bitmap_to_bitmap(unsigned long *bitmap,
 int bitmap_to_xenctl_bitmap(struct xenctl_bitmap *xenctl_bitmap,
                             const unsigned long *bitmap, unsigned int nbits);
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __XEN_BITMAP_H */

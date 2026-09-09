@@ -13,10 +13,14 @@
 #include <xen/softirq.h>
 
 #include <asm/debugreg.h>
+#include <asm/idt.h>
 #include <asm/irq-vectors.h>
 #include <asm/pv/trace.h>
+#include <asm/pv/traps.h>
 #include <asm/shared.h>
 #include <asm/traps.h>
+
+#include <public/callback.h>
 
 void pv_inject_event(const struct x86_event *event)
 {
@@ -94,11 +98,48 @@ void pv_inject_event(const struct x86_event *event)
     }
 }
 
+void pv_inject_callback(unsigned int type)
+{
+    struct vcpu *curr = current;
+    struct trap_bounce *tb = &curr->arch.pv.trap_bounce;
+    unsigned long rip;
+    bool irq;
+
+    ASSERT(is_pv_64bit_vcpu(curr));
+
+    switch ( type )
+    {
+    case CALLBACKTYPE_syscall:
+        rip = curr->arch.pv.syscall_callback_eip;
+        irq = curr->arch.pv.vgc_flags & VGCF_syscall_disables_events;
+        break;
+
+    case CALLBACKTYPE_syscall32:
+        rip = curr->arch.pv.syscall32_callback_eip;
+        irq = curr->arch.pv.syscall32_disables_events;
+        break;
+
+    case CALLBACKTYPE_sysenter:
+        rip = curr->arch.pv.sysenter_callback_eip;
+        irq = curr->arch.pv.sysenter_disables_events;
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        rip = 0;
+        irq = false;
+        break;
+    }
+
+    tb->flags = TBF_EXCEPTION | (irq ? TBF_INTERRUPT : 0);
+    tb->eip = rip;
+}
+
 /*
  * Called from asm to set up the MCE trapbounce info.
  * Returns false no callback is set up, else true.
  */
-bool set_guest_machinecheck_trapbounce(void)
+bool asmlinkage set_guest_machinecheck_trapbounce(void)
 {
     struct vcpu *curr = current;
     struct trap_bounce *tb = &curr->arch.pv.trap_bounce;
@@ -113,7 +154,7 @@ bool set_guest_machinecheck_trapbounce(void)
  * Called from asm to set up the NMI trapbounce info.
  * Returns false if no callback is set up, else true.
  */
-bool set_guest_nmi_trapbounce(void)
+bool asmlinkage set_guest_nmi_trapbounce(void)
 {
     struct vcpu *curr = current;
     struct trap_bounce *tb = &curr->arch.pv.trap_bounce;
@@ -140,23 +181,13 @@ static void cf_check nmi_softirq(void)
     *v_ptr = NULL;
 }
 
-void nocall entry_int80(void);
-void nocall entry_int82(void);
-
-void __init pv_trap_init(void)
+static int __init cf_check pv_trap_init(void)
 {
-#ifdef CONFIG_PV32
-    /* The 32-on-64 hypercall vector is only accessible from ring 1. */
-    _set_gate(idt_table + HYPERCALL_VECTOR,
-              SYS_DESC_irq_gate, 1, entry_int82);
-#endif
-
-    /* Fast trap for int80 (faster than taking the #GP-fixup path). */
-    _set_gate(idt_table + LEGACY_SYSCALL_VECTOR, SYS_DESC_irq_gate, 3,
-              &entry_int80);
-
     open_softirq(NMI_SOFTIRQ, nmi_softirq);
+
+    return 0;
 }
+__initcall(pv_trap_init);
 
 /*
  * Deliver NMI to PV guest. Return 0 on success.

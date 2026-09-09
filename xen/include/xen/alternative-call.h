@@ -13,10 +13,12 @@
  *
  * For architectures to support:
  *
- * - Implement alternative_{,v}call() in asm/alternative.h.  Code generation
- *   requirements are to emit a function pointer call at build time, and stash
- *   enough metadata to simplify the call at boot once the implementation has
- *   been resolved.
+ * - Implement alternative_{,v}call() in asm/alternative-call.h.  Code
+ *   generation requirements are to emit a function pointer call at build
+ *   time, and stash enough metadata to simplify the call at boot once the
+ *   implementation has been resolved.
+ * - Implement {boot,livepatch}_apply_alt_calls() to convert the function
+ *   pointer calls into direct calls on boot/livepatch.
  * - Select ALTERNATIVE_CALL in Kconfig.
  *
  * To use:
@@ -48,7 +50,7 @@
 
 #ifdef CONFIG_ALTERNATIVE_CALL
 
-#include <asm/alternative.h>
+#include <asm/alternative-call.h>
 
 #ifdef CONFIG_LIVEPATCH
 /* Must keep for livepatches to resolve alternative calls. */
@@ -57,7 +59,17 @@
 # define __alt_call_maybe_initdata __initdata
 #endif
 
-#else
+/*
+ * Devirtualise the alternative_{,v}call()'s on boot.  Convert still-NULL
+ * function pointers into traps.
+ */
+void boot_apply_alt_calls(void);
+
+/* As per boot_apply_alt_calls() but for a livepatch. */
+int livepatch_apply_alt_calls(const struct alt_call *start,
+                              const struct alt_call *end);
+
+#else /* CONFIG_ALTERNATIVE_CALL */
 
 #define alternative_call(func, args...)  (func)(args)
 #define alternative_vcall(func, args...) (func)(args)

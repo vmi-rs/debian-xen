@@ -114,10 +114,6 @@ static void evtchn_initialize(void)
     ftype_evtchn = alloc_file_type(&evtchn_ops);
 }
 
-/*
- * XENEVTCHN_NO_CLOEXEC is being ignored, as there is no exec() call supported
- * in Mini-OS.
- */
 int osdep_evtchn_open(xenevtchn_handle *xce, unsigned int flags)
 {
     int fd;
@@ -137,6 +133,8 @@ int osdep_evtchn_open(xenevtchn_handle *xce, unsigned int flags)
         return -1;
     }
 
+    if ( !(flags & XENEVTCHN_NO_CLOEXEC) )
+        file->cloexec = true;
     file->dev = ports;
     XEN_LIST_INIT(&ports->list);
     xce->fd = fd;
@@ -259,6 +257,23 @@ xenevtchn_port_or_error_t xenevtchn_bind_interdomain(xenevtchn_handle *xce,
     unmask_evtchn(local_port);
 
     return local_port;
+}
+
+int xenevtchn_bind(xenevtchn_handle *xce, evtchn_port_t port)
+{
+    struct port_info *port_info;
+    port_info = port_alloc(xce);
+    if ( port_info == NULL )
+        return -1;
+
+    printf("xenevtchn_bind(%"PRId32")\n", port);
+    bind_evtchn(port, evtchn_handler, xce);
+
+    port_info->bound = true;
+    port_info->port = port;
+    unmask_evtchn(port);
+
+    return 0;
 }
 
 int xenevtchn_unbind(xenevtchn_handle *xce, evtchn_port_t port)

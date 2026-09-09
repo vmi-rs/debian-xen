@@ -22,9 +22,9 @@
 typedef uint32_t xsm_magic_t;
 
 #ifdef CONFIG_XSM_FLASK
-#define XSM_MAGIC 0xf97cff8c
+#define XSM_MAGIC 0xf97cff8cU
 #else
-#define XSM_MAGIC 0x0
+#define XSM_MAGIC 0x0U
 #endif
 
 /*
@@ -58,7 +58,9 @@ struct xsm_ops {
     int (*getdomaininfo)(struct domain *d);
     int (*set_target)(struct domain *d, struct domain *e);
     int (*domctl)(struct domain *d, struct xen_domctl *op);
+#ifdef CONFIG_SYSCTL
     int (*sysctl)(const struct xen_sysctl *op);
+#endif
 
     int (*evtchn_unbound)(struct domain *d, struct evtchn *chn, domid_t id2);
     int (*evtchn_interdomain)(struct domain *d1, struct evtchn *chn1,
@@ -95,8 +97,6 @@ struct xsm_ops {
     int (*claim_pages)(struct domain *d);
 
     int (*console_io)(struct domain *d, int cmd);
-
-    int (*profile)(struct domain *d, int op);
 
     int (*kexec)(void);
     int (*schedop_shutdown)(struct domain *d1, struct domain *d2);
@@ -140,7 +140,7 @@ struct xsm_ops {
     int (*hvm_altp2mhvm_op)(struct domain *d, uint64_t mode, uint32_t op);
     int (*get_vnumainfo)(struct domain *d);
 
-#ifdef CONFIG_MEM_ACCESS
+#ifdef CONFIG_VM_EVENT
     int (*mem_access)(struct domain *d);
 #endif
 
@@ -186,6 +186,7 @@ struct xsm_ops {
     int (*argo_register_any_source)(const struct domain *d);
     int (*argo_send)(const struct domain *d, const struct domain *t);
 #endif
+    int (*get_domain_state)(struct domain *d);
 };
 
 #ifdef CONFIG_XSM
@@ -216,6 +217,11 @@ static inline int xsm_getdomaininfo(xsm_default_t def, struct domain *d)
     return alternative_call(xsm_ops.getdomaininfo, d);
 }
 
+static inline int xsm_get_domain_state(xsm_default_t def, struct domain *d)
+{
+    return alternative_call(xsm_ops.get_domain_state, d);
+}
+
 static inline int xsm_set_target(
     xsm_default_t def, struct domain *d, struct domain *e)
 {
@@ -228,10 +234,12 @@ static inline int xsm_domctl(xsm_default_t def, struct domain *d,
     return alternative_call(xsm_ops.domctl, d, op);
 }
 
+#ifdef CONFIG_SYSCTL
 static inline int xsm_sysctl(xsm_default_t def, const struct xen_sysctl *op)
 {
     return alternative_call(xsm_ops.sysctl, op);
 }
+#endif
 
 static inline int xsm_evtchn_unbound(
     xsm_default_t def, struct domain *d1, struct evtchn *chn, domid_t id2)
@@ -400,11 +408,6 @@ static inline int xsm_console_io(xsm_default_t def, struct domain *d, int cmd)
     return alternative_call(xsm_ops.console_io, d, cmd);
 }
 
-static inline int xsm_profile(xsm_default_t def, struct domain *d, int op)
-{
-    return alternative_call(xsm_ops.profile, d, op);
-}
-
 static inline int xsm_kexec(xsm_default_t def)
 {
     return alternative_call(xsm_ops.kexec);
@@ -559,7 +562,7 @@ static inline int xsm_get_vnumainfo(xsm_default_t def, struct domain *d)
     return alternative_call(xsm_ops.get_vnumainfo, d);
 }
 
-#ifdef CONFIG_MEM_ACCESS
+#ifdef CONFIG_VM_EVENT
 static inline int xsm_mem_access(xsm_default_t def, struct domain *d)
 {
     return alternative_call(xsm_ops.mem_access, d);
@@ -705,7 +708,7 @@ int xsm_multiboot_policy_init(
     struct boot_info *bi, void **policy_buffer, size_t *policy_size);
 #endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 /*
  * Initialize XSM
  *
@@ -713,7 +716,7 @@ int xsm_multiboot_policy_init(
  */
 int xsm_dt_init(void);
 int xsm_dt_policy_init(void **policy_buffer, size_t *policy_size);
-bool has_xsm_magic(paddr_t);
+bool has_xsm_magic(paddr_t start);
 #endif
 
 void xsm_fixup_ops(struct xsm_ops *ops);
@@ -755,7 +758,7 @@ static inline int xsm_multiboot_init(struct boot_info *bi)
 }
 #endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 static inline int xsm_dt_init(void)
 {
     return 0;
@@ -765,7 +768,7 @@ static inline bool has_xsm_magic(paddr_t start)
 {
     return false;
 }
-#endif /* CONFIG_HAS_DEVICE_TREE */
+#endif /* CONFIG_HAS_DEVICE_TREE_DISCOVERY */
 
 #endif /* CONFIG_XSM */
 

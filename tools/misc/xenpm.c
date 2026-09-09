@@ -32,11 +32,14 @@
 
 #include <xen-tools/common-macros.h>
 
+#include <xen/asm/msr-index.h>
+
 #define MAX_PKG_RESIDENCIES 12
 #define MAX_CORE_RESIDENCIES 8
 
 static xc_interface *xc_handle;
 static unsigned int max_cpu_nr;
+static xc_physinfo_t physinfo;
 
 /* help message */
 void show_help(void)
@@ -69,7 +72,7 @@ void show_help(void)
             " set-max-cstate        <num>|'unlimited' [<num2>|'unlimited']\n"
             "                                     set the C-State limitation (<num> >= 0) and\n"
             "                                     optionally the C-sub-state limitation (<num2> >= 0)\n"
-            " set-cpufreq-cppc      [cpuid] [balance|performance|powersave] <param:val>*\n"
+            " set-cpufreq-cppc      [cpuid] [ondemand|performance|powersave] <param:val>*\n"
             "                                     set Hardware P-State (HWP) parameters\n"
             "                                     on CPU <cpuid> or all if omitted.\n"
             "                                     optionally a preset of one of:\n"
@@ -93,6 +96,7 @@ void show_help(void)
             "                                           units default to \"us\" if unspecified.\n"
             "                                           truncates un-representable values.\n"
             "                                           0 lets the hardware decide.\n"
+            " get-core-temp          [cpuid]      get CPU temperature for <cpuid> or all (Intel only)\n"
             " start [seconds]                     start collect Cx/Px statistics,\n"
             "                                     output after CTRL-C or SIGINT or several seconds.\n"
             " enable-turbo-mode     [cpuid]       enable Turbo Mode for processors that support it.\n"
@@ -112,7 +116,7 @@ static void parse_cpuid(const char *arg, int *cpuid)
         if ( strcasecmp(arg, "all") )
         {
             fprintf(stderr, "Invalid CPU identifier: '%s'\n", arg);
-            exit(EINVAL);
+            exit(EXIT_FAILURE);
         }
         *cpuid = -1;
     }
@@ -124,7 +128,7 @@ static void parse_cpuid_and_int(int argc, char *argv[],
     if ( argc == 0 )
     {
          fprintf(stderr, "Missing %s\n", what);
-         exit(EINVAL);
+         exit(EXIT_FAILURE);
     }
 
     if ( argc > 1 )
@@ -133,7 +137,7 @@ static void parse_cpuid_and_int(int argc, char *argv[],
     if ( sscanf(argv[argc > 1], "%d", val) != 1 )
     {
         fprintf(stderr, "Invalid %s '%s'\n", what, argv[argc > 1]);
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -662,7 +666,7 @@ static void signal_int_handler(int signo)
 out:
     free(cputopo);
     xc_interface_close(xc_handle);
-    exit(0);
+    exit(EXIT_SUCCESS);
 }
 
 void start_gather_func(int argc, char *argv[])
@@ -801,11 +805,43 @@ static unsigned int calculate_activity_window(const xc_cppc_para_t *cppc,
     return mantissa * multiplier;
 }
 
+/* print out parameters about cpu cppc */
+static void print_cppc_para(unsigned int cpuid,
+                            const xc_cppc_para_t *cppc)
+{
+    printf("cppc variables       :\n");
+    printf("  hardware limits    : lowest [%"PRIu32"] lowest nonlinear [%"PRIu32"]\n",
+           cppc->lowest, cppc->lowest_nonlinear);
+    printf("                     : nominal [%"PRIu32"] highest [%"PRIu32"]\n",
+           cppc->nominal, cppc->highest);
+    printf("  configured limits  : min [%"PRIu32"] max [%"PRIu32"] energy perf [%"PRIu32"]\n",
+           cppc->minimum, cppc->maximum, cppc->energy_perf);
+
+    if ( cppc->features & XEN_SYSCTL_CPPC_FEAT_ACT_WINDOW )
+    {
+        unsigned int activity_window;
+        const char *units;
+
+        activity_window = calculate_activity_window(cppc, &units);
+        printf("                     : activity_window [%"PRIu32" %s]\n",
+               activity_window, units);
+    }
+
+    printf("                     : desired [%"PRIu32"%s]\n",
+           cppc->desired,
+           cppc->desired ? "" : " hw autonomous");
+    printf("\n");
+}
+
 /* print out parameters about cpu frequency */
 static void print_cpufreq_para(int cpuid, struct xc_get_cpufreq_para *p_cpufreq)
 {
-    bool hwp = strcmp(p_cpufreq->scaling_driver, XEN_HWP_DRIVER_NAME) == 0;
+    bool is_governor_less = false;
     int i;
+
+    if ( !strcmp(p_cpufreq->scaling_driver, XEN_HWP_DRIVER_NAME) ||
+         !strcmp(p_cpufreq->scaling_driver, XEN_AMD_CPPC_EPP_DRIVER_NAME) )
+        is_governor_less = true;
 
     printf("cpu id               : %d\n", cpuid);
 
@@ -814,7 +850,7 @@ static void print_cpufreq_para(int cpuid, struct xc_get_cpufreq_para *p_cpufreq)
         printf(" %d", p_cpufreq->affected_cpus[i]);
     printf("\n");
 
-    if ( hwp )
+    if ( is_governor_less )
         printf("cpuinfo frequency    : base [%"PRIu32"] max [%"PRIu32"]\n",
                p_cpufreq->cpuinfo_min_freq,
                p_cpufreq->cpuinfo_max_freq);
@@ -826,76 +862,68 @@ static void print_cpufreq_para(int cpuid, struct xc_get_cpufreq_para *p_cpufreq)
 
     printf("scaling_driver       : %s\n", p_cpufreq->scaling_driver);
 
-    if ( hwp )
-    {
-        const xc_cppc_para_t *cppc = &p_cpufreq->u.cppc_para;
-
-        printf("cppc variables       :\n");
-        printf("  hardware limits    : lowest [%"PRIu32"] lowest nonlinear [%"PRIu32"]\n",
-               cppc->lowest, cppc->lowest_nonlinear);
-        printf("                     : nominal [%"PRIu32"] highest [%"PRIu32"]\n",
-               cppc->nominal, cppc->highest);
-        printf("  configured limits  : min [%"PRIu32"] max [%"PRIu32"] energy perf [%"PRIu32"]\n",
-               cppc->minimum, cppc->maximum, cppc->energy_perf);
-
-        if ( cppc->features & XEN_SYSCTL_CPPC_FEAT_ACT_WINDOW )
-        {
-            unsigned int activity_window;
-            const char *units;
-
-            activity_window = calculate_activity_window(cppc, &units);
-            printf("                     : activity_window [%"PRIu32" %s]\n",
-                   activity_window, units);
-        }
-
-        printf("                     : desired [%"PRIu32"%s]\n",
-               cppc->desired,
-               cppc->desired ? "" : " hw autonomous");
-    }
-    else
+    if ( !is_governor_less )
     {
         if ( p_cpufreq->gov_num )
             printf("scaling_avail_gov    : %s\n",
                    p_cpufreq->scaling_available_governors);
 
-        printf("current_governor     : %s\n", p_cpufreq->u.s.scaling_governor);
-        if ( !strncmp(p_cpufreq->u.s.scaling_governor,
+        printf("current_governor     : %s\n", p_cpufreq->s.scaling_governor);
+        if ( !strncmp(p_cpufreq->s.scaling_governor,
                       "userspace", CPUFREQ_NAME_LEN) )
         {
             printf("  userspace specific :\n");
             printf("    scaling_setspeed : %u\n",
-                   p_cpufreq->u.s.u.userspace.scaling_setspeed);
+                   p_cpufreq->s.u.userspace.scaling_setspeed);
         }
-        else if ( !strncmp(p_cpufreq->u.s.scaling_governor,
+        else if ( !strncmp(p_cpufreq->s.scaling_governor,
                            "ondemand", CPUFREQ_NAME_LEN) )
         {
             printf("  ondemand specific  :\n");
             printf("    sampling_rate    : max [%u] min [%u] cur [%u]\n",
-                   p_cpufreq->u.s.u.ondemand.sampling_rate_max,
-                   p_cpufreq->u.s.u.ondemand.sampling_rate_min,
-                   p_cpufreq->u.s.u.ondemand.sampling_rate);
+                   p_cpufreq->s.u.ondemand.sampling_rate_max,
+                   p_cpufreq->s.u.ondemand.sampling_rate_min,
+                   p_cpufreq->s.u.ondemand.sampling_rate);
             printf("    up_threshold     : %u\n",
-                   p_cpufreq->u.s.u.ondemand.up_threshold);
+                   p_cpufreq->s.u.ondemand.up_threshold);
         }
 
         printf("scaling_avail_freq   :");
         for ( i = 0; i < p_cpufreq->freq_num; i++ )
             if ( p_cpufreq->scaling_available_frequencies[i] ==
-                 p_cpufreq->u.s.scaling_cur_freq )
+                 p_cpufreq->s.scaling_cur_freq )
                 printf(" *%d", p_cpufreq->scaling_available_frequencies[i]);
             else
                 printf(" %d", p_cpufreq->scaling_available_frequencies[i]);
         printf("\n");
 
         printf("scaling frequency    : max [%u] min [%u] cur [%u]\n",
-               p_cpufreq->u.s.scaling_max_freq,
-               p_cpufreq->u.s.scaling_min_freq,
-               p_cpufreq->u.s.scaling_cur_freq);
+               p_cpufreq->s.scaling_max_freq,
+               p_cpufreq->s.scaling_min_freq,
+               p_cpufreq->s.scaling_cur_freq);
     }
 
     printf("turbo mode           : %s\n",
            p_cpufreq->turbo_enabled ? "enabled" : "disabled or n/a");
     printf("\n");
+}
+
+/* show cpu cppc parameters information on CPU cpuid */
+static int show_cppc_para_by_cpuid(xc_interface *xc_handle, unsigned int cpuid)
+{
+    int ret;
+    xc_cppc_para_t cppc_para;
+
+    ret = xc_get_cppc_para(xc_handle, cpuid, &cppc_para);
+    if ( !ret )
+        print_cppc_para(cpuid, &cppc_para);
+    else if ( errno == ENODEV )
+        ret = 0; /* Ignore unsupported platform */
+    else
+        fprintf(stderr, "[CPU%u] failed to get cppc parameter: %s\n",
+                cpuid, strerror(errno));
+
+    return ret;
 }
 
 /* show cpu frequency parameters information on CPU cpuid */
@@ -957,7 +985,12 @@ static int show_cpufreq_para_by_cpuid(xc_interface *xc_handle, int cpuid)
     } while ( ret && errno == EAGAIN );
 
     if ( ret == 0 )
+    {
         print_cpufreq_para(cpuid, p_cpufreq);
+
+        /* Show CPPC parameters if available */
+        ret = show_cppc_para_by_cpuid(xc_handle, cpuid);
+    }
     else if ( errno == ENODEV )
     {
         ret = -ENODEV;
@@ -1125,7 +1158,7 @@ void scaling_governor_func(int argc, char *argv[])
     else
     {
         fprintf(stderr, "Missing argument(s)\n");
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 
     if ( cpuid < 0 )
@@ -1186,7 +1219,7 @@ void cpu_topology_func(int argc, char *argv[])
 out:
     free(cputopo);
     if ( rc )
-        exit(rc);
+        exit(EXIT_FAILURE);
 }
 
 void set_sched_smt_func(int argc, char *argv[])
@@ -1195,7 +1228,7 @@ void set_sched_smt_func(int argc, char *argv[])
 
     if ( argc != 1 ) {
         fprintf(stderr, "Missing or invalid argument(s)\n");
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 
     if ( !strcasecmp(argv[0], "disable") )
@@ -1205,7 +1238,7 @@ void set_sched_smt_func(int argc, char *argv[])
     else
     {
         fprintf(stderr, "Invalid argument: %s\n", argv[0]);
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 
     if ( !xc_set_sched_opt_smt(xc_handle, value) )
@@ -1225,12 +1258,12 @@ void set_vcpu_migration_delay_func(int argc, char *argv[])
 
     if ( argc != 1 || (value = atoi(argv[0])) < 0 ) {
         fprintf(stderr, "Missing or invalid argument(s)\n");
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 
     if ( xc_sched_credit_params_get(xc_handle, 0, &sparam) < 0 ) {
         fprintf(stderr, "getting Credit scheduler parameters failed\n");
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
     sparam.vcpu_migr_delay_us = value;
 
@@ -1275,7 +1308,7 @@ void set_max_cstate_func(int argc, char *argv[])
            : (subval = XEN_SYSCTL_CX_UNLIMITED, strcmp(argv[1], "unlimited")))) )
     {
         fprintf(stderr, "Missing, excess, or invalid argument(s)\n");
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
     }
 
     snprintf(buf, ARRAY_SIZE(buf), "C%d", value);
@@ -1323,6 +1356,121 @@ void enable_turbo_mode(int argc, char *argv[])
     else if ( xc_enable_turbo(xc_handle, cpuid) )
         fprintf(stderr, "failed to enable turbo mode (%d - %s)\n",
                 errno, strerror(errno));
+}
+
+static int fetch_dts_temp(xc_interface *xch, uint32_t cpu, bool package, int *temp)
+{
+    xc_resource_entry_t entries[] = {
+        { .idx = package ? MSR_PACKAGE_THERM_STATUS : MSR_IA32_THERM_STATUS },
+        { .idx = MSR_TEMPERATURE_TARGET },
+    };
+    struct xc_resource_op ops = {
+        .cpu = cpu,
+        .entries = entries,
+        .nr_entries = ARRAY_SIZE(entries),
+    };
+    int tjmax;
+
+    int ret = xc_resource_op(xch, 1, &ops);
+
+    switch ( ret )
+    {
+    case 0:
+        /* This CPU isn't online or can't query this MSR */
+        errno = ENODEV;
+        return -1;
+
+    case 1:
+    {
+        /*
+         * The CPU doesn't support MSR_TEMPERATURE_TARGET, we assume it's 100
+         * which is correct aside a few selected Atom CPUs. Check Linux
+         * kernel's coretemp.c for more information.
+         */
+        static bool has_reported_once = false;
+
+        if ( !has_reported_once )
+        {
+            fprintf(stderr, "MSR_TEMPERATURE_TARGET is not supported, assume "
+                            "tjmax = 100, readings may be incorrect.\n");
+            has_reported_once = true;
+        }
+
+        tjmax = 100;
+        break;
+    }
+
+    case 2:
+        tjmax = (entries[1].val >> 16) & 0xff;
+        break;
+
+    default:
+        if ( ret > 0 )
+        {
+            fprintf(stderr, "Got unexpected xc_resource_op return value: %d", ret);
+            errno = EINVAL;
+        }
+        return -1;
+    }
+
+    *temp = tjmax - ((entries[0].val >> 16) & 0xff);
+    return 0;
+}
+
+static void get_core_temp(int argc, char *argv[])
+{
+    int temp = -1, cpu = -1;
+    unsigned int socket;
+    bool has_data = false;
+
+    if ( argc > 0 )
+        parse_cpuid(argv[0], &cpu);
+
+    if ( cpu != -1 )
+    {
+        if ( fetch_dts_temp(xc_handle, cpu, false, &temp) )
+        {
+            fprintf(stderr, "Unable to fetch temperature (%d - %s)\n",
+                    errno, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        else
+            printf("CPU%d: %d°C\n", cpu, temp);
+        return;
+    }
+
+    /* Per socket measurement */
+    for ( socket = 0, cpu = 0; cpu < max_cpu_nr;
+          socket++, cpu += physinfo.cores_per_socket * physinfo.threads_per_core )
+    {
+        if ( fetch_dts_temp(xc_handle, cpu, true, &temp) )
+        {
+            fprintf(stderr,
+                    "[Package%u] Unable to fetch temperature (%d - %s)\n",
+                    cpu, errno, strerror(errno));
+            /* CPU may not support package temperatures, but still support DTS */
+            break;
+        }
+
+        has_data = true;
+        printf("Package%u: %d°C\n", socket, temp);
+    }
+
+    for ( cpu = 0; cpu < max_cpu_nr; cpu += physinfo.threads_per_core )
+    {
+        if ( fetch_dts_temp(xc_handle, cpu, false, &temp) )
+        {
+            fprintf(stderr, "[CPU%d] Unable to fetch temperature (%d - %s)\n",
+                    cpu, errno, strerror(errno));
+            continue;
+        }
+
+        has_data = true;
+        printf("CPU%d: %d°C\n", cpu, temp);
+    }
+
+    if ( !has_data )
+        exit(EXIT_FAILURE);
 }
 
 void disable_turbo_mode(int argc, char *argv[])
@@ -1447,9 +1595,9 @@ static int parse_cppc_opts(xc_set_cppc_para_t *set_cppc, int *cpuid,
         set_cppc->set_params = XEN_SYSCTL_CPPC_SET_PRESET_PERFORMANCE;
         i++;
     }
-    else if ( strcasecmp(argv[i], "balance") == 0 )
+    else if ( strcasecmp(argv[i], "ondemand") == 0 )
     {
-        set_cppc->set_params = XEN_SYSCTL_CPPC_SET_PRESET_BALANCE;
+        set_cppc->set_params = XEN_SYSCTL_CPPC_SET_PRESET_ONDEMAND;
         i++;
     }
 
@@ -1546,7 +1694,7 @@ static void cppc_set_func(int argc, char *argv[])
     uint32_t set_params;
 
     if ( parse_cppc_opts(&set_cppc, &cpuid, argc, argv) )
-        exit(EINVAL);
+        exit(EXIT_FAILURE);
 
     if ( cpuid != -1 )
     {
@@ -1589,12 +1737,12 @@ struct {
     { "set-max-cstate", set_max_cstate_func},
     { "enable-turbo-mode", enable_turbo_mode },
     { "disable-turbo-mode", disable_turbo_mode },
+    { "get-core-temp", get_core_temp },
 };
 
 int main(int argc, char *argv[])
 {
     int i, ret = 0;
-    xc_physinfo_t physinfo;
     int nr_matches = 0;
     int matches_main_options[ARRAY_SIZE(main_options)];
 
@@ -1608,7 +1756,7 @@ int main(int argc, char *argv[])
     if ( !xc_handle )
     {
         fprintf(stderr, "failed to get the handler\n");
-        return EIO;
+        return EXIT_FAILURE;
     }
 
     ret = xc_physinfo(xc_handle, &physinfo);
@@ -1618,7 +1766,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "failed to get processor information (%d - %s)\n",
                 ret, strerror(ret));
         xc_interface_close(xc_handle);
-        return ret;
+        return EXIT_FAILURE;
     }
     max_cpu_nr = physinfo.max_cpu_id + 1;
 
@@ -1633,7 +1781,8 @@ int main(int argc, char *argv[])
         for ( i = 0; i < nr_matches; i++ )
             fprintf(stderr, " %s", main_options[matches_main_options[i]].name);
         fprintf(stderr, "\n");
-        ret = EINVAL;
+        xc_interface_close(xc_handle);
+        return EXIT_FAILURE;
     }
     else if ( nr_matches == 1 )
         /* dispatch to the corresponding function handler */
@@ -1641,10 +1790,11 @@ int main(int argc, char *argv[])
     else
     {
         show_help();
-        ret = EINVAL;
+        xc_interface_close(xc_handle);
+        return EXIT_FAILURE;
     }
 
     xc_interface_close(xc_handle);
-    return ret;
+    return EXIT_SUCCESS;
 }
 

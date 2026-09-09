@@ -10,6 +10,7 @@
 #include <xen/bitops.h>
 #include <public/xen.h>
 #include <asm/current.h>
+#include <asm/mm.h>
 #include <asm/setup.h>
 #include <asm/smccc.h>
 
@@ -68,6 +69,14 @@ void __dummy__(void)
    OFFSET(ARM_SMCCC_1_2_REGS_X14_OFFS, struct arm_smccc_1_2_regs, a14);
    OFFSET(ARM_SMCCC_1_2_REGS_X16_OFFS, struct arm_smccc_1_2_regs, a16);
    BLANK();
+
+#ifdef CONFIG_MPU
+   DEFINE(XEN_MPUMAP_MASK_sizeof, sizeof(xen_mpumap_mask));
+   DEFINE(XEN_MPUMAP_sizeof, sizeof(xen_mpumap));
+   DEFINE(XEN_MPUMAP_ENTRY_SHIFT, ilog2(sizeof(pr_t)));
+   DEFINE(XEN_MPUMAP_ENTRY_ZERO_OFFSET, sizeof(prbar_t) + sizeof(prlar_t));
+   BLANK();
+#endif
 }
 
 /*

@@ -40,6 +40,7 @@
 #include <xen/domain.h>
 #include <xen/cpu.h>
 #include <xen/pmstat.h>
+#include <xen/xvmalloc.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 
@@ -64,11 +65,52 @@ LIST_HEAD_READ_MOSTLY(cpufreq_governor_list);
 /* set xen as default cpufreq */
 enum cpufreq_controller cpufreq_controller = FREQCTL_xen;
 
-enum cpufreq_xen_opt __initdata cpufreq_xen_opts[2] = { CPUFREQ_xen,
-                                                        CPUFREQ_none };
+enum cpufreq_xen_opt __initdata cpufreq_xen_opts[3] = { [0] = CPUFREQ_xen };
 unsigned int __initdata cpufreq_xen_cnt = 1;
 
 static int __init cpufreq_cmdline_parse(const char *s, const char *e);
+
+static bool __init cpufreq_opts_contain(enum cpufreq_xen_opt option)
+{
+    unsigned int count = cpufreq_xen_cnt;
+
+    while ( count-- )
+    {
+        if ( cpufreq_xen_opts[count] == option )
+            return true;
+    }
+
+    return false;
+}
+
+static int __init handle_cpufreq_cmdline(enum cpufreq_xen_opt option)
+{
+    int ret = 0;
+
+    if ( cpufreq_opts_contain(option) )
+        return 0;
+
+    cpufreq_controller = FREQCTL_xen;
+    cpufreq_xen_opts[cpufreq_xen_cnt++] = option;
+    switch ( option )
+    {
+    case CPUFREQ_hwp:
+    case CPUFREQ_xen:
+        xen_processor_pmbits |= XEN_PROCESSOR_PM_PX;
+        break;
+
+    case CPUFREQ_amd_cppc:
+        xen_processor_pmbits |= XEN_PROCESSOR_PM_CPPC;
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        ret = -EINVAL;
+        break;
+    }
+
+    return ret;
+}
 
 static int __init cf_check setup_cpufreq_option(const char *str)
 {
@@ -113,22 +155,23 @@ static int __init cf_check setup_cpufreq_option(const char *str)
 
         if ( choice > 0 || !cmdline_strcmp(str, "xen") )
         {
-            xen_processor_pmbits |= XEN_PROCESSOR_PM_PX;
-            cpufreq_controller = FREQCTL_xen;
-            cpufreq_xen_opts[cpufreq_xen_cnt++] = CPUFREQ_xen;
-            ret = 0;
-            if ( arg[0] && arg[1] )
+            ret = handle_cpufreq_cmdline(CPUFREQ_xen);
+            if ( !ret && arg[0] && arg[1] )
                 ret = cpufreq_cmdline_parse(arg + 1, end);
         }
         else if ( IS_ENABLED(CONFIG_INTEL) && choice < 0 &&
                   !cmdline_strcmp(str, "hwp") )
         {
-            xen_processor_pmbits |= XEN_PROCESSOR_PM_PX;
-            cpufreq_controller = FREQCTL_xen;
-            cpufreq_xen_opts[cpufreq_xen_cnt++] = CPUFREQ_hwp;
-            ret = 0;
-            if ( arg[0] && arg[1] )
+            ret = handle_cpufreq_cmdline(CPUFREQ_hwp);
+            if ( !ret && arg[0] && arg[1] )
                 ret = hwp_cmdline_parse(arg + 1, end);
+        }
+        else if ( IS_ENABLED(CONFIG_AMD) && choice < 0 &&
+                  !cmdline_strcmp(str, "amd-cppc") )
+        {
+            ret = handle_cpufreq_cmdline(CPUFREQ_amd_cppc);
+            if ( !ret && arg[0] && arg[1] )
+                ret = amd_cppc_cmdline_parse(arg + 1, end);
         }
         else
             ret = -EINVAL;
@@ -191,9 +234,34 @@ int cpufreq_limit_change(unsigned int cpu)
     return __cpufreq_set_policy(data, &policy);
 }
 
-int cpufreq_add_cpu(unsigned int cpu)
+static int get_psd_info(unsigned int cpu, unsigned int *shared_type,
+                        const struct xen_psd_package **domain_info)
 {
     int ret = 0;
+
+    switch ( processor_pminfo[cpu]->init )
+    {
+    case XEN_PX_INIT:
+        *shared_type = processor_pminfo[cpu]->perf.shared_type;
+        *domain_info = &processor_pminfo[cpu]->perf.domain_info;
+        break;
+
+    case XEN_CPPC_INIT:
+        *shared_type = processor_pminfo[cpu]->cppc_data.shared_type;
+        *domain_info = &processor_pminfo[cpu]->cppc_data.domain_info;
+        break;
+
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    return ret;
+}
+
+int cpufreq_add_cpu(unsigned int cpu)
+{
+    int ret;
     unsigned int firstcpu;
     unsigned int dom, domexist = 0;
     unsigned int hw_all = 0;
@@ -201,15 +269,14 @@ int cpufreq_add_cpu(unsigned int cpu)
     struct cpufreq_dom *cpufreq_dom = NULL;
     struct cpufreq_policy new_policy;
     struct cpufreq_policy *policy;
-    struct processor_performance *perf;
+    const struct xen_psd_package *domain_info;
+    unsigned int shared_type;
 
     /* to protect the case when Px was not controlled by xen */
     if ( !processor_pminfo[cpu] || !cpu_online(cpu) )
         return -EINVAL;
 
-    perf = &processor_pminfo[cpu]->perf;
-
-    if ( !(perf->init & XEN_PX_INIT) )
+    if ( !(processor_pminfo[cpu]->init & (XEN_PX_INIT | XEN_CPPC_INIT)) )
         return -EINVAL;
 
     if (!cpufreq_driver.init)
@@ -218,10 +285,14 @@ int cpufreq_add_cpu(unsigned int cpu)
     if (per_cpu(cpufreq_cpu_policy, cpu))
         return 0;
 
-    if (perf->shared_type == CPUFREQ_SHARED_TYPE_HW)
+    ret = get_psd_info(cpu, &shared_type, &domain_info);
+    if ( ret )
+        return ret;
+
+    if ( shared_type == CPUFREQ_SHARED_TYPE_HW )
         hw_all = 1;
 
-    dom = perf->domain_info.domain;
+    dom = domain_info->domain;
 
     list_for_each(pos, &cpufreq_dom_list_head) {
         cpufreq_dom = list_entry(pos, struct cpufreq_dom, node);
@@ -244,21 +315,27 @@ int cpufreq_add_cpu(unsigned int cpu)
         cpufreq_dom->dom = dom;
         list_add(&cpufreq_dom->node, &cpufreq_dom_list_head);
     } else {
+        unsigned int firstcpu_shared_type;
+        const struct xen_psd_package *firstcpu_domain_info;
+
         /* domain sanity check under whatever coordination type */
         firstcpu = cpumask_first(cpufreq_dom->map);
-        if ((perf->domain_info.coord_type !=
-            processor_pminfo[firstcpu]->perf.domain_info.coord_type) ||
-            (perf->domain_info.num_processors !=
-            processor_pminfo[firstcpu]->perf.domain_info.num_processors)) {
+        ret = get_psd_info(firstcpu, &firstcpu_shared_type,
+                           &firstcpu_domain_info);
+        if ( ret )
+            return ret;
 
+        if ( domain_info->coord_type != firstcpu_domain_info->coord_type ||
+             domain_info->num_processors !=
+             firstcpu_domain_info->num_processors )
+        {
             printk(KERN_WARNING "cpufreq fail to add CPU%d:"
                    "incorrect _PSD(%"PRIu64":%"PRIu64"), "
                    "expect(%"PRIu64"/%"PRIu64")\n",
-                   cpu, perf->domain_info.coord_type,
-                   perf->domain_info.num_processors,
-                   processor_pminfo[firstcpu]->perf.domain_info.coord_type,
-                   processor_pminfo[firstcpu]->perf.domain_info.num_processors
-                );
+                   cpu, domain_info->coord_type,
+                   domain_info->num_processors,
+                   firstcpu_domain_info->coord_type,
+                   firstcpu_domain_info->num_processors);
             return -EINVAL;
         }
     }
@@ -304,10 +381,17 @@ int cpufreq_add_cpu(unsigned int cpu)
     if (ret)
         goto err1;
 
-    if (hw_all || (cpumask_weight(cpufreq_dom->map) ==
-                   perf->domain_info.num_processors)) {
+    if ( hw_all || cpumask_weight(cpufreq_dom->map) ==
+                   domain_info->num_processors )
+    {
         memcpy(&new_policy, policy, sizeof(struct cpufreq_policy));
-        policy->governor = NULL;
+
+        /*
+         * Only when cpufreq_driver.setpolicy == NULL, we need to deliberately
+         * set old gov as NULL to trigger the according gov starting.
+         */
+        if ( cpufreq_driver.setpolicy == NULL )
+            policy->governor = NULL;
 
         cpufreq_cmdline_common_para(&new_policy);
 
@@ -354,29 +438,33 @@ err0:
 
 int cpufreq_del_cpu(unsigned int cpu)
 {
+    int ret;
     unsigned int dom, domexist = 0;
     unsigned int hw_all = 0;
     struct list_head *pos;
     struct cpufreq_dom *cpufreq_dom = NULL;
     struct cpufreq_policy *policy;
-    struct processor_performance *perf;
+    unsigned int shared_type;
+    const struct xen_psd_package *domain_info;
 
     /* to protect the case when Px was not controlled by xen */
     if ( !processor_pminfo[cpu] || !cpu_online(cpu) )
         return -EINVAL;
 
-    perf = &processor_pminfo[cpu]->perf;
-
-    if ( !(perf->init & XEN_PX_INIT) )
+    if ( !(processor_pminfo[cpu]->init & (XEN_PX_INIT | XEN_CPPC_INIT)) )
         return -EINVAL;
 
     if (!per_cpu(cpufreq_cpu_policy, cpu))
         return 0;
 
-    if (perf->shared_type == CPUFREQ_SHARED_TYPE_HW)
+    ret = get_psd_info(cpu, &shared_type, &domain_info);
+    if ( ret )
+        return ret;
+
+    if ( shared_type == CPUFREQ_SHARED_TYPE_HW )
         hw_all = 1;
 
-    dom = perf->domain_info.domain;
+    dom = domain_info->domain;
     policy = per_cpu(cpufreq_cpu_policy, cpu);
 
     list_for_each(pos, &cpufreq_dom_list_head) {
@@ -392,8 +480,8 @@ int cpufreq_del_cpu(unsigned int cpu)
 
     /* for HW_ALL, stop gov for each core of the _PSD domain */
     /* for SW_ALL & SW_ANY, stop gov for the 1st core of the _PSD domain */
-    if (hw_all || (cpumask_weight(cpufreq_dom->map) ==
-                   perf->domain_info.num_processors))
+    if ( hw_all || cpumask_weight(cpufreq_dom->map) ==
+                   domain_info->num_processors )
         __cpufreq_governor(policy, CPUFREQ_GOV_STOP);
 
     cpufreq_statistic_exit(cpu);
@@ -456,6 +544,17 @@ static void print_PSD( struct xen_psd_package *ptr)
 static void print_PPC(unsigned int platform_limit)
 {
     printk("\t_PPC: %d\n", platform_limit);
+}
+
+static bool check_psd_pminfo(unsigned int shared_type)
+{
+    /* Check domain coordination */
+    if ( shared_type != CPUFREQ_SHARED_TYPE_ALL &&
+         shared_type != CPUFREQ_SHARED_TYPE_ANY &&
+         shared_type != CPUFREQ_SHARED_TYPE_HW )
+        return false;
+
+    return true;
 }
 
 int set_px_pminfo(uint32_t acpi_id, struct xen_processor_performance *perf)
@@ -540,10 +639,7 @@ int set_px_pminfo(uint32_t acpi_id, struct xen_processor_performance *perf)
 
     if ( perf->flags & XEN_PX_PSD )
     {
-        /* check domain coordination */
-        if ( perf->shared_type != CPUFREQ_SHARED_TYPE_ALL &&
-             perf->shared_type != CPUFREQ_SHARED_TYPE_ANY &&
-             perf->shared_type != CPUFREQ_SHARED_TYPE_HW )
+        if ( !check_psd_pminfo(perf->shared_type) )
         {
             ret = -EINVAL;
             goto out;
@@ -564,7 +660,7 @@ int set_px_pminfo(uint32_t acpi_id, struct xen_processor_performance *perf)
         if ( cpufreq_verbose )
             print_PPC(pxpt->platform_limit);
 
-        if ( pxpt->init == XEN_PX_INIT )
+        if ( pmpt->init == XEN_PX_INIT )
         {
             ret = cpufreq_limit_change(cpu);
             goto out;
@@ -573,13 +669,168 @@ int set_px_pminfo(uint32_t acpi_id, struct xen_processor_performance *perf)
 
     if ( perf->flags == ( XEN_PX_PCT | XEN_PX_PSS | XEN_PX_PSD | XEN_PX_PPC ) )
     {
-        pxpt->init = XEN_PX_INIT;
+        pmpt->init = XEN_PX_INIT;
 
         ret = cpufreq_cpu_init(cpu);
         goto out;
     }
 
 out:
+    return ret;
+}
+
+int acpi_set_pdc_bits(unsigned int acpi_id, XEN_GUEST_HANDLE(uint32) pdc)
+{
+    uint32_t bits[3];
+    int ret;
+
+    if ( copy_from_guest(bits, pdc, 2) )
+        ret = -EFAULT;
+    else if ( bits[0] != ACPI_PDC_REVISION_ID || !bits[1] )
+        ret = -EINVAL;
+    else if ( copy_from_guest_offset(bits + 2, pdc, 2, 1) )
+        ret = -EFAULT;
+    else
+    {
+        uint32_t mask = 0;
+
+        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_CX )
+            mask |= ACPI_PDC_C_MASK | ACPI_PDC_SMP_C1PT;
+        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_PX )
+            mask |= ACPI_PDC_P_MASK | ACPI_PDC_SMP_C1PT;
+        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_TX )
+            mask |= ACPI_PDC_T_MASK | ACPI_PDC_SMP_C1PT;
+        bits[2] &= (ACPI_PDC_C_MASK | ACPI_PDC_P_MASK | ACPI_PDC_T_MASK |
+                    ACPI_PDC_SMP_C1PT) & ~mask;
+        ret = arch_acpi_set_pdc_bits(acpi_id, bits, mask);
+    }
+    if ( !ret && __copy_to_guest_offset(pdc, 2, bits + 2, 1) )
+        ret = -EFAULT;
+
+    return ret;
+}
+
+static void print_CPPC(const struct xen_processor_cppc *cppc_data)
+{
+    printk("\t_CPC: highest_perf=%u, lowest_perf=%u, "
+           "nominal_perf=%u, lowest_nonlinear_perf=%u, "
+           "nominal_mhz=%uMHz, lowest_mhz=%uMHz\n",
+           cppc_data->cpc.highest_perf, cppc_data->cpc.lowest_perf,
+           cppc_data->cpc.nominal_perf, cppc_data->cpc.lowest_nonlinear_perf,
+           cppc_data->cpc.nominal_mhz, cppc_data->cpc.lowest_mhz);
+}
+
+int set_cppc_pminfo(unsigned int acpi_id,
+                    const struct xen_processor_cppc *cppc_data)
+{
+    int ret = 0, cpu_id;
+    struct processor_pminfo *pm_info;
+
+    cpu_id = get_cpu_id(acpi_id);
+    if ( cpu_id < 0 )
+    {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if ( cppc_data->pad[0] || cppc_data->pad[1] || cppc_data->pad[2] )
+    {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if ( cpufreq_verbose )
+        printk("Set CPU%d (ACPI ID %u) CPPC state info:\n",
+               cpu_id, acpi_id);
+
+    pm_info = processor_pminfo[cpu_id];
+    if ( !pm_info )
+    {
+        pm_info = xvzalloc(struct processor_pminfo);
+        if ( !pm_info )
+        {
+            ret = -ENOMEM;
+            goto out;
+        }
+        processor_pminfo[cpu_id] = pm_info;
+    }
+    pm_info->acpi_id = acpi_id;
+    pm_info->id = cpu_id;
+    pm_info->cppc_data = *cppc_data;
+
+    if ( (cppc_data->flags & XEN_CPPC_PSD) &&
+         !check_psd_pminfo(cppc_data->shared_type) )
+    {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    /* Right now, HW_ALL shall be the only expected value in CPPC mode */
+    if ( cppc_data->shared_type != CPUFREQ_SHARED_TYPE_HW )
+    {
+        ret = -EINVAL;
+        printk_once(XENLOG_ERR
+                    "Unsupported sharing type %u in CPPC mode\n",
+                    cppc_data->shared_type);
+        goto out;
+    }
+
+    if ( cppc_data->flags & XEN_CPPC_CPC )
+    {
+        if ( cppc_data->cpc.highest_perf == 0 ||
+             cppc_data->cpc.highest_perf > UINT8_MAX ||
+             cppc_data->cpc.nominal_perf == 0 ||
+             cppc_data->cpc.lowest_nonlinear_perf == 0 ||
+             cppc_data->cpc.lowest_perf == 0 ||
+             cppc_data->cpc.lowest_perf >
+                 cppc_data->cpc.lowest_nonlinear_perf ||
+             cppc_data->cpc.lowest_nonlinear_perf >
+                 cppc_data->cpc.nominal_perf ||
+             cppc_data->cpc.nominal_perf > cppc_data->cpc.highest_perf )
+            /*
+             * Right now, Xen doesn't actually use highest_perf/nominal_perf/
+             * lowest_nonlinear_perf/lowest_perf values read from ACPI _CPC
+             * table. Xen reads CPPC capability MSR to get these four values.
+             * So warning is enough.
+             */
+            printk_once(XENLOG_WARNING
+                        "Broken CPPC perf values: lowest(%u), nonlinear_lowest(%u), nominal(%u), highest(%u)\n",
+                        cppc_data->cpc.lowest_perf,
+                        cppc_data->cpc.lowest_nonlinear_perf,
+                        cppc_data->cpc.nominal_perf,
+                        cppc_data->cpc.highest_perf);
+
+        /* lowest_mhz and nominal_mhz are optional value */
+        if ( cppc_data->cpc.nominal_mhz &&
+             cppc_data->cpc.lowest_mhz > cppc_data->cpc.nominal_mhz )
+        {
+            printk_once(XENLOG_WARNING
+                        "Broken CPPC freq values: lowest(%u), nominal(%u)\n",
+                        cppc_data->cpc.lowest_mhz,
+                        cppc_data->cpc.nominal_mhz);
+            /* Re-set with zero values, instead of keeping invalid values */
+            pm_info->cppc_data.cpc.nominal_mhz = 0;
+            pm_info->cppc_data.cpc.lowest_mhz = 0;
+        }
+    }
+
+    if ( cppc_data->flags == (XEN_CPPC_PSD | XEN_CPPC_CPC) )
+    {
+        if ( cpufreq_verbose )
+        {
+            print_PSD(&pm_info->cppc_data.domain_info);
+            print_CPPC(&pm_info->cppc_data);
+        }
+
+        pm_info->init = XEN_CPPC_INIT;
+        ret = cpufreq_cpu_init(cpu_id);
+        if ( ret )
+            printk_once(XENLOG_WARNING
+                        "CPU%d failed amd-cppc mode init; use \"cpufreq=xen\" instead",
+                        cpu_id);
+    }
+
+ out:
     return ret;
 }
 

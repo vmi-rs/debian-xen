@@ -43,7 +43,6 @@ CONFIG_OVMF         := @ovmf@
 CONFIG_ROMBIOS      := @rombios@
 CONFIG_SEABIOS      := @seabios@
 CONFIG_IPXE         := @ipxe@
-CONFIG_QEMU_TRAD    := @qemu_traditional@
 CONFIG_QEMU_XEN     := @qemu_xen@
 CONFIG_QEMUU_EXTRA_ARGS:= @EXTRA_QEMUU_CONFIGURE_ARGS@
 CONFIG_LIBNL        := @libnl@
@@ -54,6 +53,7 @@ CONFIG_LIBFSIMAGE   := @libfsimage@
 CONFIG_SYSTEMD      := @systemd@
 XEN_SYSTEMD_DIR     := @SYSTEMD_DIR@
 XEN_SYSTEMD_MODULES_LOAD := @SYSTEMD_MODULES_LOAD@
+XEN_SYSTEMD_SLEEP_DIR := @SYSTEMD_SLEEP_DIR@
 CONFIG_9PFS         := @ninepfs@
 
 LINUX_BACKEND_MODULES := @LINUX_BACKEND_MODULES@
@@ -65,6 +65,7 @@ EXTFS_LIBS          := @EXTFS_LIBS@
 CURSES_LIBS         := @CURSES_LIBS@
 TINFO_LIBS          := @TINFO_LIBS@
 ARGP_LDFLAGS        := @argp_ldflags@
+XEN_JSON_LIBS       := @YAJL_LIBS@ @libjsonc_LIBS@
 
 FILE_OFFSET_BITS    := @FILE_OFFSET_BITS@
 

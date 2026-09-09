@@ -7,24 +7,7 @@ AC_INIT([Xen Hypervisor Tools], m4_esyscmd([../version.sh ../xen/Makefile]),
 AC_CONFIG_SRCDIR([libs/light/libxl.c])
 AC_CONFIG_FILES([
 ../config/Tools.mk
-hotplug/common/hotplugpath.sh
-hotplug/FreeBSD/rc.d/xencommons
-hotplug/FreeBSD/rc.d/xendriverdomain
-hotplug/Linux/init.d/sysconfig.xencommons
-hotplug/Linux/init.d/sysconfig.xendomains
-hotplug/Linux/init.d/xen-watchdog
-hotplug/Linux/init.d/xencommons
-hotplug/Linux/init.d/xendomains
-hotplug/Linux/init.d/xendriverdomain
-hotplug/Linux/launch-xenstore
-hotplug/Linux/vif-setup
-hotplug/Linux/xen-hotplug-common.sh
-hotplug/Linux/xendomains
-hotplug/NetBSD/rc.d/xencommons
-hotplug/NetBSD/rc.d/xendriverdomain
-ocaml/libs/xs/paths.ml
-ocaml/xenstored/paths.ml
-ocaml/xenstored/oxenstored.conf
+../config/Tools-paths.mk
 ])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([../])
@@ -121,25 +104,11 @@ esac])
 LINUX_BACKEND_MODULES="`eval echo $LINUX_BACKEND_MODULES`"
 AC_SUBST(LINUX_BACKEND_MODULES)
 
-AC_ARG_ENABLE([qemu-traditional],
-    AS_HELP_STRING([--enable-qemu-traditional],
-                   [Enable qemu traditional device model, (DEFAULT is off)]))
-AS_IF([test "x$enable_qemu_traditional" = "xyes"], [
-AC_DEFINE([HAVE_QEMU_TRADITIONAL], [1], [Qemu traditional enabled])
-    qemu_traditional=y],[
-    qemu_traditional=n
-])
-AC_SUBST(qemu_traditional)
-
 AC_ARG_ENABLE([ipxe],
     AS_HELP_STRING([--enable-ipxe],
                    [Enable in-tree IPXE,
                     (DEFAULT is off, see also --with-system-ipxe)]),,[
-    AS_IF([test "x$enable_qemu_traditional" = "xyes"], [
-        enable_ipxe="yes"
-    ], [
         enable_ipxe="no"
-    ])
 ])
 AS_IF([test "x$enable_ipxe" = "xno"], [ipxe=n], [ipxe=y])
 AC_ARG_WITH([system-ipxe],
@@ -162,18 +131,15 @@ AC_SUBST(ipxe)
 
 AC_ARG_ENABLE([rombios],
     AS_HELP_STRING([--enable-rombios],
-                   [Enable ROMBIOS, (DEFAULT is on if qemu-traditional or ipxe is enabled,
+                   [Enable ROMBIOS, (DEFAULT is on if ipxe is enabled,
                     otherwise off)]),,[
-    AS_IF([test "x$enable_qemu_traditional" = "xyes" -o "x$enable_ipxe" = "xyes"], [
+    AS_IF([test "x$enable_ipxe" = "xyes"], [
         enable_rombios="yes"
     ], [
         enable_rombios="no"
     ])
 ])
 AS_IF([test "x$enable_rombios" = "xyes"], [
-    dnl as86, ld86, and bcc are only required when building rombios. They
-    dnl are only needed when the host system is x86 but that check is done
-    dnl for us above when checking if we should build with qemu-traditional.
     AX_PATH_PROG_OR_FAIL([AS86], [as86])
     AX_PATH_PROG_OR_FAIL([LD86], [ld86])
     AX_PATH_PROG_OR_FAIL([BCC], [bcc])
@@ -437,12 +403,22 @@ PKG_CHECK_MODULES([libzstd], [libzstd],
     [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_ZSTD $libzstd_CFLAGS"
      ZLIB_LIBS="$ZLIB_LIBS $libzstd_LIBS"],
     [true])
+PKG_CHECK_MODULES([liblz4], [liblz4],
+    [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_LZ4 $liblz4_CFLAGS"
+     ZLIB_LIBS="$ZLIB_LIBS $liblz4_LIBS"],
+    [true])
 AC_SUBST([ZLIB_CFLAGS])
 AC_SUBST([ZLIB_LIBS])
 AX_CHECK_EXTFS
 AX_CHECK_PTHREAD
-AC_CHECK_LIB([yajl], [yajl_alloc], [],
-    [AC_MSG_ERROR([Could not find yajl])])
+PKG_CHECK_MODULES([libjsonc], [json-c >= 0.15],
+    [AC_DEFINE([HAVE_LIBJSONC], [1], [Use library json-c])],
+    [AC_CHECK_LIB([yajl], [yajl_alloc],
+        [AC_SUBST([YAJL_LIBS],[-lyajl])
+         AC_DEFINE([HAVE_LIBYAJL],[1],[Define to 1 if you have the `yajl' library (-lyajl).])],
+        [AC_MSG_ERROR([Could not find yajl])])
+])
+
 AC_CHECK_LIB([z], [deflateCopy], [], [AC_MSG_ERROR([Could not find zlib])])
 AC_CHECK_HEADER([argp.h], [
 AC_CHECK_LIB([argp], [argp_usage], [argp_ldflags="-largp"])

@@ -20,7 +20,6 @@
 #include <asm/hvm/io.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/hvm/vmx/vmcs.h>
-#include <asm/hvm/vpic.h>
 #include <asm/hvm/vlapic.h>
 #include <asm/hvm/nestedhvm.h>
 #include <public/hvm/ioreq.h>
@@ -240,7 +239,7 @@ void asmlinkage vmx_intr_assist(void)
     }
 
     /* Block event injection while handling a sync vm_event. */
-    if ( unlikely(v->arch.vm_event) && v->arch.vm_event->sync_event )
+    if ( unlikely(vm_event_is_enabled(v)) && v->arch.vm_event->sync_event )
         return;
 
 #ifdef CONFIG_MEM_SHARING
@@ -356,7 +355,7 @@ void asmlinkage vmx_intr_assist(void)
                 {
                     word = (const void *)&vlapic->regs->data[APIC_IRR];
                     printk(XENLOG_ERR "vIRR:");
-                    for ( i = X86_NR_VECTORS / 32; i-- ; )
+                    for ( i = X86_IDT_VECTORS / 32; i-- ; )
                         printk(" %08x", word[i*4]);
                     printk("\n");
                 }
@@ -366,7 +365,7 @@ void asmlinkage vmx_intr_assist(void)
                 {
                     word = (const void *)&pi_desc->pir;
                     printk(XENLOG_ERR " PIR:");
-                    for ( i = X86_NR_VECTORS / 32; i-- ; )
+                    for ( i = X86_IDT_VECTORS / 32; i-- ; )
                         printk(" %08x", word[i]);
                     printk("\n");
                 }

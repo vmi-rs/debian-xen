@@ -17,10 +17,11 @@
 
 #ifdef __XEN__
 
+#include <xen/byteorder.h>
 #include <xen/lib.h>
 #include <xen/libelf.h>
 #include <xen/softirq.h>
-#include <asm/byteorder.h>
+
 #include <public/elfnote.h>
 
 /* we would like to use elf->log_callback but we can't because
@@ -31,9 +32,9 @@
    printk(fmt, ## args )
 
 #define strtoull(str, end, base) simple_strtoull(str, end, base)
-#define bswap_16(x) swab16(x)
-#define bswap_32(x) swab32(x)
-#define bswap_64(x) swab64(x)
+#define bswap_16(x) bswap16(x)
+#define bswap_32(x) bswap32(x)
+#define bswap_64(x) bswap64(x)
 
 #else /* !__XEN__ */
 
@@ -83,7 +84,9 @@
 #define elf_err(elf, fmt, args ... )                    \
     elf_call_log_callback(elf, 1, fmt , ## args );
 
-void elf_call_log_callback(struct elf_binary*, bool iserr, const char *fmt,...);
+void
+__attribute__ ((format (printf, 3, 4)))
+elf_call_log_callback(struct elf_binary *elf, bool iserr, const char *fmt, ...);
 
 #define safe_strcpy(d,s)                        \
 do { strncpy((d),(s),sizeof((d))-1);            \

@@ -115,6 +115,20 @@
 #define  MCU_OPT_CTRL_GDS_MIT_DIS           (_AC(1, ULL) <<  4)
 #define  MCU_OPT_CTRL_GDS_MIT_LOCK          (_AC(1, ULL) <<  5)
 
+#define MSR_TEMPERATURE_TARGET              0x000001a2
+#define MSR_PACKAGE_THERM_STATUS            0x000001b1
+
+#define MSR_FRED_RSP_SL0                    0x000001cc
+#define MSR_FRED_RSP_SL1                    0x000001cd
+#define MSR_FRED_RSP_SL2                    0x000001ce
+#define MSR_FRED_RSP_SL3                    0x000001cf
+#define MSR_FRED_STK_LVLS                   0x000001d0
+#define MSR_FRED_SSP_SL0                    MSR_PL0_SSP
+#define MSR_FRED_SSP_SL1                    0x000001d1
+#define MSR_FRED_SSP_SL2                    0x000001d2
+#define MSR_FRED_SSP_SL3                    0x000001d3
+#define MSR_FRED_CONFIG                     0x000001d4
+
 #define MSR_RTIT_OUTPUT_BASE                0x00000560
 #define MSR_RTIT_OUTPUT_MASK                0x00000561
 #define MSR_RTIT_CTL                        0x00000570
@@ -157,7 +171,7 @@
 #define MSR_PL1_SSP                         0x000006a5
 #define MSR_PL2_SSP                         0x000006a6
 #define MSR_PL3_SSP                         0x000006a7
-#define MSR_INTERRUPT_SSP_TABLE             0x000006a8
+#define MSR_ISST                            0x000006a8
 
 #define MSR_PKRS                            0x000006e1
 
@@ -240,6 +254,12 @@
 #define MSR_VIRT_SPEC_CTRL                  _AC(0xc001011f, U) /* Layout matches MSR_SPEC_CTRL */
 
 #define MSR_AMD_CSTATE_CFG                  0xc0010296U
+
+#define MSR_AMD_CPPC_CAP1                   0xc00102b0U
+#define MSR_AMD_CPPC_ENABLE                 0xc00102b1U
+#define  AMD_CPPC_ENABLE                    (_AC(1, ULL) << 0)
+#define MSR_AMD_CPPC_REQ                    0xc00102b3U
+#define  AMD_CPPC_EPP_MASK                  (_AC(0xff, ULL) << 24)
 
 /*
  * Legacy MSR constants in need of cleanup.  No new MSRs below this comment.
@@ -494,6 +514,7 @@
 #define MSR_IA32_THERM_INTERRUPT	0x0000019b
 #define MSR_IA32_THERM_STATUS		0x0000019c
 #define MSR_IA32_MISC_ENABLE		0x000001a0
+#define MSR_IA32_MISC_ENABLE_FAST_STRING  (1<<0)
 #define MSR_IA32_MISC_ENABLE_PERF_AVAIL   (1<<7)
 #define MSR_IA32_MISC_ENABLE_BTS_UNAVAIL  (1<<11)
 #define MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL (1<<12)

@@ -8,6 +8,8 @@
 # define DECL_SECTION_WITH_LADDR
 #endif
 #include <xen/xen.lds.h>
+
+#include <asm/gen-idt.lds.h>
 #include <asm/page.h>
 #include <asm/trampoline.h>
 
@@ -31,10 +33,6 @@ ENTRY(start_pa)
 # define SECTION_ALIGN MB(2)
 #else
 # define SECTION_ALIGN PAGE_SIZE
-#endif
-
-#ifndef HAVE_LD_SORT_BY_INIT_PRIORITY
-# define SORT_BY_INIT_PRIORITY SORT
 #endif
 
 OUTPUT_FORMAT(FORMAT, FORMAT, FORMAT)
@@ -115,16 +113,7 @@ SECTIONS
        __ro_after_init_start = .;
        *(.data.ro_after_init)
 
-       . = ALIGN(8);
-       /* Exception table */
-       __start___ex_table = .;
-       *(.ex_table)
-       __stop___ex_table = .;
-
-       /* Pre-exception table */
-       __start___pre_ex_table = .;
-       *(.ex_table.pre)
-       __stop___pre_ex_table = .;
+       EX_TABLE
 
        . = ALIGN(PAGE_SIZE);
        __ro_after_init_end = .;
@@ -133,6 +122,7 @@ SECTIONS
 
        *(.rodata)
        *(.rodata.*)
+       VPCI_ARRAY
        *(.data.rel.ro)
        *(.data.rel.ro.*)
 
@@ -146,7 +136,6 @@ SECTIONS
        *(.note.gnu.build-id)
        __note_gnu_build_id_end = .;
 #endif
-       VPCI_ARRAY
   } PHDR(text)
 
 #if defined(CONFIG_PVH_GUEST) && !defined(EFI)
@@ -190,6 +179,8 @@ SECTIONS
   } PHDR(note) PHDR(text)
 #endif
 
+  LLVM_COV_RO_DATA
+
   _erodata = .;
 
   . = ALIGN(SECTION_ALIGN);
@@ -221,6 +212,7 @@ SECTIONS
   DECL_SECTION(.init.data) {
 #endif
        *(.init.bss.stack_aligned)
+       *(.init.data.page_aligned)
 
        . = ALIGN(POINTER_ALIGN);
        __initdata_cf_clobber_start = .;
@@ -261,6 +253,10 @@ SECTIONS
         __alt_instructions = .;
         *(.altinstructions)
         __alt_instructions_end = .;
+        . = ALIGN(4);
+        __alt_call_sites_start = .;
+        *(.alt_call_sites)
+        __alt_call_sites_end = .;
 
        LOCK_PROFILE_DATA
 
@@ -309,11 +305,8 @@ SECTIONS
   . = ALIGN(SMP_CACHE_BYTES);
   DECL_SECTION(.data.read_mostly) {
        *(.data.read_mostly)
-       . = ALIGN(8);
-       __start_schedulers_array = .;
-       *(.data.schedulers)
-       __end_schedulers_array = .;
 
+       SCHEDULER_ARRAY
        HYPFS_PARAM
   } PHDR(text)
 
@@ -321,6 +314,8 @@ SECTIONS
        *(.data.page_aligned)
        *(.data .data.*)
   } PHDR(text)
+
+  LLVM_COV_RW_DATA
 
   DECL_SECTION(.bss) {
        __bss_start = .;
@@ -374,6 +369,8 @@ SECTIONS
 #endif
 
   DWARF2_DEBUG_SECTIONS
+
+  LLVM_COV_DEBUG
 
 #ifdef CONFIG_HYPERV_GUEST
   hv_hcall_page = ABSOLUTE(HV_HCALL_PAGE - XEN_VIRT_START + __XEN_VIRT_START);

@@ -54,7 +54,7 @@
 
 #define ARM_SMCCC_FUNC_MASK             _AC(0xFFFF,U)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 extern uint32_t smccc_ver;
 
@@ -99,87 +99,52 @@ struct arm_smccc_res {
 #define __count_args(...)                               \
     ___count_args(__VA_ARGS__, 7, 6, 5, 4, 3, 2, 1, 0)
 
-#define __constraint_write_0                        \
-    "+r" (r0), "=&r" (r1), "=&r" (r2), "=&r" (r3)
-#define __constraint_write_1                        \
-    "+r" (r0), "+r" (r1), "=&r" (r2), "=&r" (r3)
-#define __constraint_write_2                        \
-    "+r" (r0), "+r" (r1), "+r" (r2), "=&r" (r3)
-#define __constraint_write_3                        \
-    "+r" (r0), "+r" (r1), "+r" (r2), "+r" (r3)
-#define __constraint_write_4    __constraint_write_3
-#define __constraint_write_5    __constraint_write_4
-#define __constraint_write_6    __constraint_write_5
-#define __constraint_write_7    __constraint_write_6
-
-#define __constraint_read_0
-#define __constraint_read_1
-#define __constraint_read_2
-#define __constraint_read_3
-#define __constraint_read_4 "r" (r4)
-#define __constraint_read_5 __constraint_read_4, "r" (r5)
-#define __constraint_read_6 __constraint_read_5, "r" (r6)
-#define __constraint_read_7 __constraint_read_6, "r" (r7)
+#define __constraint_read_0 "r" (arg0)
+#define __constraint_read_1 __constraint_read_0, "r" (arg1)
+#define __constraint_read_2 __constraint_read_1, "r" (arg2)
+#define __constraint_read_3 __constraint_read_2, "r" (arg3)
+#define __constraint_read_4 __constraint_read_3, "r" (arg4)
+#define __constraint_read_5 __constraint_read_4, "r" (arg5)
+#define __constraint_read_6 __constraint_read_5, "r" (arg6)
+#define __constraint_read_7 __constraint_read_6, "r" (arg7)
 
 #define __declare_arg_0(a0, res)                            \
     struct arm_smccc_res    *___res = (res);                \
-    register unsigned long  r0 ASM_REG(0) = (uint32_t)(a0); \
-    register unsigned long  r1 ASM_REG(1);                  \
-    register unsigned long  r2 ASM_REG(2);                  \
-    register unsigned long  r3 ASM_REG(3)
+    register unsigned long  arg0 ASM_REG(0) = (uint32_t)(a0)
 
 #define __declare_arg_1(a0, a1, res)                        \
-    typeof(a1) __a1 = (a1);                                 \
-    struct arm_smccc_res    *___res = (res);                \
-    register unsigned long  r0 ASM_REG(0) = (uint32_t)(a0); \
-    register unsigned long  r1 ASM_REG(1) = __a1;           \
-    register unsigned long  r2 ASM_REG(2);                  \
-    register unsigned long  r3 ASM_REG(3)
+    __declare_arg_0(a0, res);                               \
+    register auto           arg1 ASM_REG(1) = (a1)
 
 #define __declare_arg_2(a0, a1, a2, res)                    \
-    typeof(a1) __a1 = (a1);                                 \
-    typeof(a2) __a2 = (a2);                                 \
-    struct arm_smccc_res    *___res = (res);                \
-    register unsigned long  r0 ASM_REG(0) = (uint32_t)(a0); \
-    register unsigned long  r1 ASM_REG(1) = __a1;           \
-    register unsigned long  r2 ASM_REG(2) = __a2;           \
-    register unsigned long  r3 ASM_REG(3)
+    __declare_arg_1(a0, a1, res);                           \
+    register auto           arg2 ASM_REG(2) = (a2)
 
 #define __declare_arg_3(a0, a1, a2, a3, res)                \
-    typeof(a1) __a1 = (a1);                                 \
-    typeof(a2) __a2 = (a2);                                 \
-    typeof(a3) __a3 = (a3);                                 \
-    struct arm_smccc_res    *___res = (res);                \
-    register unsigned long  r0 ASM_REG(0) = (uint32_t)(a0); \
-    register unsigned long  r1 ASM_REG(1) = __a1;           \
-    register unsigned long  r2 ASM_REG(2) = __a2;           \
-    register unsigned long  r3 ASM_REG(3) = __a3
+    __declare_arg_2(a0, a1, a2, res);                       \
+    register auto           arg3 ASM_REG(3) = (a3)
 
 #define __declare_arg_4(a0, a1, a2, a3, a4, res)        \
-    typeof(a4) __a4 = (a4);                             \
     __declare_arg_3(a0, a1, a2, a3, res);               \
-    register unsigned long r4 ASM_REG(4) = __a4
+    register auto           arg4 ASM_REG(4) = (a4)
 
 #define __declare_arg_5(a0, a1, a2, a3, a4, a5, res)    \
-    typeof(a5) __a5 = (a5);                             \
     __declare_arg_4(a0, a1, a2, a3, a4, res);           \
-    register typeof(a5) r5 ASM_REG(5) = __a5
+    register auto           arg5 ASM_REG(5) = (a5)
 
 #define __declare_arg_6(a0, a1, a2, a3, a4, a5, a6, res)    \
-    typeof(a6) __a6 = (a6);                                 \
     __declare_arg_5(a0, a1, a2, a3, a4, a5, res);           \
-    register typeof(a6) r6 ASM_REG(6) = __a6
+    register auto           arg6 ASM_REG(6) = (a6)
 
 #define __declare_arg_7(a0, a1, a2, a3, a4, a5, a6, a7, res)    \
-    typeof(a7) __a7 = (a7);                                     \
     __declare_arg_6(a0, a1, a2, a3, a4, a5, a6, res);           \
-    register typeof(a7) r7 ASM_REG(7) = __a7
+    register auto           arg7 ASM_REG(7) = (a7)
 
 #define ___declare_args(count, ...) __declare_arg_ ## count(__VA_ARGS__)
 #define __declare_args(count, ...)  ___declare_args(count, __VA_ARGS__)
 
 #define ___constraints(count)                       \
-    : __constraint_write_ ## count                  \
+    : "=r" (r0), "=r" (r1), "=r" (r2), "=r" (r3)     \
     : __constraint_read_ ## count                   \
     : "memory"
 #define __constraints(count)    ___constraints(count)
@@ -204,6 +169,10 @@ struct arm_smccc_res {
  */
 #define arm_smccc_1_1_smc(...)                                  \
     do {                                                        \
+        register unsigned long r0 ASM_REG(0);                   \
+        register unsigned long r1 ASM_REG(1);                   \
+        register unsigned long r2 ASM_REG(2);                   \
+        register unsigned long r3 ASM_REG(3);                   \
         __declare_args(__count_args(__VA_ARGS__), __VA_ARGS__); \
         asm volatile("smc #0\n"                                 \
                      __constraints(__count_args(__VA_ARGS__))); \
@@ -307,7 +276,7 @@ void arm_smccc_1_2_smc(const struct arm_smccc_1_2_regs *args,
                        struct arm_smccc_1_2_regs *res);
 #endif /* CONFIG_ARM_64 */
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 /*
  * Construct function identifier from call type (fast or standard),

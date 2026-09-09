@@ -26,6 +26,8 @@
 #include <xen/hypercall.h>
 #include <xen/vm_event.h>
 #include <xen/monitor.h>
+#include <xen/xvmalloc.h>
+
 #include <asm/current.h>
 #include <asm/irq.h>
 #include <asm/page.h>
@@ -49,26 +51,11 @@ static int xenctl_bitmap_to_nodemask(nodemask_t *nodemask,
                                    MAX_NUMNODES);
 }
 
-static inline int is_free_domid(domid_t dom)
-{
-    struct domain *d;
-
-    if ( dom >= DOMID_FIRST_RESERVED )
-        return 0;
-
-    if ( (d = rcu_lock_domain_by_id(dom)) == NULL )
-        return 1;
-
-    rcu_unlock_domain(d);
-    return 0;
-}
-
 void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info)
 {
     struct vcpu *v;
     u64 cpu_time = 0;
     int flags = XEN_DOMINF_blocked;
-    struct vcpu_runstate_info runstate;
 
     memset(info, 0, sizeof(*info));
 
@@ -81,8 +68,7 @@ void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info)
      */
     for_each_vcpu ( d, v )
     {
-        vcpu_runstate_get(v, &runstate);
-        cpu_time += runstate.time[RUNSTATE_running];
+        cpu_time += vcpu_runstate_get_running(v);
         info->max_vcpu_id = v->vcpu_id;
         if ( !(v->pause_flags & VPF_down) )
         {
@@ -160,7 +146,7 @@ static void vnuma_destroy(struct vnuma_info *vnuma)
     {
         xfree(vnuma->vmemrange);
         xfree(vnuma->vcpu_to_vnode);
-        xfree(vnuma->vdistance);
+        xvfree(vnuma->vdistance);
         xfree(vnuma->vnode_to_pnode);
         xfree(vnuma);
     }
@@ -210,7 +196,7 @@ static struct vnuma_info *vnuma_alloc(unsigned int nr_vnodes,
     if ( !vnuma )
         return ERR_PTR(-ENOMEM);
 
-    vnuma->vdistance = xmalloc_array(unsigned int, nr_vnodes * nr_vnodes);
+    vnuma->vdistance = xvmalloc_array(unsigned int, nr_vnodes, nr_vnodes);
     vnuma->vcpu_to_vnode = xmalloc_array(unsigned int, nr_vcpus);
     vnuma->vnode_to_pnode = xmalloc_array(nodeid_t, nr_vnodes);
     vnuma->vmemrange = xmalloc_array(xen_vmemrange_t, nr_ranges);
@@ -321,6 +307,11 @@ void iocaps_double_unlock(struct domain *d, bool write)
         read_unlock(&d->caps_lock);
 }
 
+static bool is_stable_domctl(uint32_t cmd)
+{
+    return cmd == XEN_DOMCTL_get_domain_state;
+}
+
 long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     long ret = 0;
@@ -331,7 +322,8 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     if ( copy_from_guest(op, u_domctl, 1) )
         return -EFAULT;
 
-    if ( op->interface_version != XEN_DOMCTL_INTERFACE_VERSION )
+    if ( op->interface_version !=
+         (is_stable_domctl(op->cmd) ? 0 : XEN_DOMCTL_INTERFACE_VERSION) )
         return -EACCES;
 
     switch ( op->cmd )
@@ -344,7 +336,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     case XEN_DOMCTL_deassign_device:
         if ( op->domain == DOMID_IO )
         {
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
             if ( op->u.assign_device.dev == XEN_DOMCTL_DEV_DT )
                 op->u.assign_device.u.dt.dev = NULL;
 #endif
@@ -355,7 +347,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             return -ESRCH;
         fallthrough;
     case XEN_DOMCTL_test_assign_device:
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
         if ( op->u.assign_device.dev == XEN_DOMCTL_DEV_DT )
             op->u.assign_device.u.dt.dev = NULL;
         fallthrough;
@@ -367,10 +359,17 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             break;
         }
         fallthrough;
+    case XEN_DOMCTL_get_domain_state:
+        if ( op->domain == DOMID_INVALID )
+        {
+            d = dom_xen;
+            break;
+        }
+        fallthrough;
     default:
         d = rcu_lock_domain_by_id(op->domain);
         if ( !d )
-            return -ESRCH;
+            return is_control_domain(current->domain) ? -ESRCH : -EPERM;
         break;
     }
 
@@ -387,7 +386,15 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             copyback = true;
         }
 
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
+
+    case XEN_DOMCTL_get_domain_state:
+        ret = xsm_get_domain_state(XSM_XS_PRIV, d);
+        if ( !ret )
+            ret = get_domain_state(&op->u.get_domain_state, d, &op->domain);
+        if ( !ret )
+            copyback = true;
+        goto domctl_out_unlock_rcuonly;
 
     case XEN_DOMCTL_iomem_permission:
     {
@@ -397,11 +404,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
         ret = -EINVAL;
         if ( (mfn + nr_mfns - 1) < mfn ) /* Wrap? */
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 
         ret = xsm_iomem_permission(XSM_PRIV, d, mfn, mfn + nr_mfns - 1, allow);
         if ( ret )
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 
         iocaps_double_lock(d, true);
 
@@ -414,7 +421,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             ret = iomem_deny_access(d, mfn, mfn + nr_mfns - 1);
 
         iocaps_double_unlock(d, true);
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
     }
 
     case XEN_DOMCTL_memory_mapping:
@@ -429,38 +436,29 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         if ( mfn_end < mfn || /* Wrap? */
              ((mfn | mfn_end) >> (paddr_bits - PAGE_SHIFT)) ||
              (gfn + nr_mfns - 1) < gfn ) /* Wrap? */
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 
         ret = xsm_iomem_mapping(XSM_DM_PRIV, d, mfn, mfn_end, add);
         if ( ret || !paging_mode_translate(d) )
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 
 #ifndef CONFIG_X86 /* XXX ARM!? */
         ret = -E2BIG;
         /* Must break hypercall up as this could take a while. */
         if ( nr_mfns > 64 )
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 #endif
 
+        /*
+         * NB: The double lock isn't really needed when !add, but is used anyway
+         * to keep things simple.
+         */
         iocaps_double_lock(d, false);
 
         ret = -EPERM;
-        if ( !iomem_access_permitted(current->domain, mfn, mfn_end) ||
-             !iomem_access_permitted(d, mfn, mfn_end) )
+        if ( !iomem_access_permitted(current->domain, mfn, mfn_end) )
             /* Nothing. */;
-        else if ( add )
-        {
-            printk(XENLOG_G_DEBUG
-                   "memory_map:add: %pd gfn=%lx mfn=%lx nr=%lx\n",
-                   d, gfn, mfn, nr_mfns);
-
-            ret = map_mmio_regions(d, _gfn(gfn), nr_mfns, _mfn(mfn));
-            if ( ret < 0 )
-                printk(XENLOG_G_WARNING
-                       "memory_map:fail: %pd gfn=%lx mfn=%lx nr=%lx ret:%ld\n",
-                       d, gfn, mfn, nr_mfns, ret);
-        }
-        else
+        else if ( !add )
         {
             printk(XENLOG_G_DEBUG
                    "memory_map:remove: %pd gfn=%lx mfn=%lx nr=%lx\n",
@@ -472,42 +470,22 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
                        "memory_map: error %ld removing %pd access to [%lx,%lx]\n",
                        ret, d, mfn, mfn_end);
         }
+        else if ( iomem_access_permitted(d, mfn, mfn_end) )
+        {
+            printk(XENLOG_G_DEBUG
+                   "memory_map:add: %pd gfn=%lx mfn=%lx nr=%lx\n",
+                   d, gfn, mfn, nr_mfns);
+
+            ret = map_mmio_regions(d, _gfn(gfn), nr_mfns, _mfn(mfn));
+            if ( ret < 0 )
+                printk(XENLOG_G_WARNING
+                       "memory_map:fail: %pd gfn=%lx mfn=%lx nr=%lx ret:%ld\n",
+                       d, gfn, mfn, nr_mfns, ret);
+        }
 
         iocaps_double_unlock(d, false);
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
     }
-
-#ifdef CONFIG_HAS_PIRQ
-    case XEN_DOMCTL_irq_permission:
-    {
-        unsigned int pirq = op->u.irq_permission.pirq, irq;
-        bool allow = op->u.irq_permission.allow_access;
-
-        ret = -EINVAL;
-        if ( pirq >= current->domain->nr_pirqs )
-            goto domctl_out_unlock_domonly;
-
-        irq = domain_pirq_to_irq(current->domain, pirq);
-
-        ret = -EPERM;
-        if ( irq )
-            ret = xsm_irq_permission(XSM_PRIV, d, irq, allow);
-        if ( ret )
-            goto domctl_out_unlock_domonly;
-
-        iocaps_double_lock(d, true);
-
-        if ( !irq_access_permitted(current->domain, irq) )
-            ret = -EPERM;
-        else if ( allow )
-            ret = irq_permit_access(d, irq);
-        else
-            ret = irq_deny_access(d, irq);
-
-        iocaps_double_unlock(d, true);
-        goto domctl_out_unlock_domonly;
-    }
-#endif
 
     case XEN_DOMCTL_set_target:
     {
@@ -515,7 +493,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
         ret = -ESRCH;
         if ( !e )
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
 
         if ( d == e )
             ret = -EINVAL;
@@ -530,7 +508,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
         if ( ret )
             put_domain(e);
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
     }
 
     case XEN_DOMCTL_vm_event_op:
@@ -540,36 +518,75 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             ret = vm_event_domctl(d, &op->u.vm_event_op);
             if ( !ret )
                 copyback = true;
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
         }
         if ( !d )
         {
             ret = -ESRCH;
-            goto domctl_out_unlock_domonly;
+            goto domctl_out_unlock_rcuonly;
         }
         /* Other sub-ops handled further down. */
         break;
 
     case XEN_DOMCTL_get_device_group:
         ret = iommu_do_domctl(op, d, u_domctl);
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
 
     case XEN_DOMCTL_ioport_permission:
     case XEN_DOMCTL_ioport_mapping:
+    case XEN_DOMCTL_irq_permission:
     case XEN_DOMCTL_gsi_permission:
     case XEN_DOMCTL_bind_pt_irq:
     case XEN_DOMCTL_unbind_pt_irq:
+    case XEN_DOMCTL_getpageframeinfo3:
         ret = arch_do_domctl(op, d, u_domctl);
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
 
     default:
         /* Everything else handled further down. */
         break;
     }
 
-    ret = xsm_domctl(XSM_OTHER, d, op);
+    ret = xsm_domctl(XSM_PRIV, d, op);
     if ( ret )
-        goto domctl_out_unlock_domonly;
+        goto domctl_out_unlock_rcuonly;
+
+    switch ( op->cmd )
+    {
+    case XEN_DOMCTL_getvcpuinfo:
+    {
+        const struct vcpu *v = domain_vcpu(d, op->u.getvcpuinfo.vcpu);
+
+        if ( !v )
+        {
+            ret = -ENOENT;
+            goto domctl_out_unlock_rcuonly;
+        }
+
+        op->u.getvcpuinfo.online   = !(v->pause_flags & VPF_down);
+        op->u.getvcpuinfo.blocked  = !!(v->pause_flags & VPF_blocked);
+        op->u.getvcpuinfo.running  = v->is_running;
+        op->u.getvcpuinfo.cpu_time = vcpu_runstate_get_running(v);
+        op->u.getvcpuinfo.cpu      = v->processor;
+
+        copyback = true;
+        goto domctl_out_unlock_rcuonly;
+    }
+
+    case XEN_DOMCTL_shadow_op:
+        if ( op->u.shadow_op.op == XEN_DOMCTL_SHADOW_OP_CLEAN ||
+             op->u.shadow_op.op == XEN_DOMCTL_SHADOW_OP_PEEK )
+        {
+            ret = arch_do_domctl(op, d, u_domctl);
+            goto domctl_out_unlock_rcuonly;
+        }
+        /* Other sub-ops handled by arch_do_domctl() further down. */
+        break;
+
+    default:
+        /* Everything else handled further up or further down. */
+        break;
+    }
 
     if ( !domctl_lock_acquire() )
     {
@@ -656,34 +673,15 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     case XEN_DOMCTL_createdomain:
     {
-        domid_t        dom;
-        static domid_t rover = 0;
+        domid_t domid = domid_alloc(op->domain);
 
-        dom = op->domain;
-        if ( (dom > 0) && (dom < DOMID_FIRST_RESERVED) )
+        if ( domid == DOMID_INVALID )
         {
             ret = -EEXIST;
-            if ( !is_free_domid(dom) )
-                break;
-        }
-        else
-        {
-            for ( dom = rover + 1; dom != rover; dom++ )
-            {
-                if ( dom == DOMID_FIRST_RESERVED )
-                    dom = 1;
-                if ( is_free_domid(dom) )
-                    break;
-            }
-
-            ret = -ENOMEM;
-            if ( dom == rover )
-                break;
-
-            rover = dom;
+            break;
         }
 
-        d = domain_create(dom, &op->u.createdomain, false);
+        d = domain_create(domid, &op->u.createdomain, false);
         if ( IS_ERR(d) )
         {
             ret = PTR_ERR(d);
@@ -731,6 +729,12 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     case XEN_DOMCTL_soft_reset:
     case XEN_DOMCTL_soft_reset_cont:
+        if ( !IS_ENABLED(CONFIG_HAS_SOFT_RESET) )
+        {
+            ret = -EOPNOTSUPP;
+            break;
+        }
+
         if ( d == current->domain ) /* no domain_pause() */
         {
             ret = -EINVAL;
@@ -830,31 +834,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         break;
     }
 
-    case XEN_DOMCTL_getvcpuinfo:
-    {
-        struct vcpu   *v;
-        struct vcpu_runstate_info runstate;
-
-        ret = -EINVAL;
-        if ( op->u.getvcpuinfo.vcpu >= d->max_vcpus )
-            break;
-
-        ret = -ESRCH;
-        if ( (v = d->vcpu[op->u.getvcpuinfo.vcpu]) == NULL )
-            break;
-
-        vcpu_runstate_get(v, &runstate);
-
-        op->u.getvcpuinfo.online   = !(v->pause_flags & VPF_down);
-        op->u.getvcpuinfo.blocked  = !!(v->pause_flags & VPF_blocked);
-        op->u.getvcpuinfo.running  = v->is_running;
-        op->u.getvcpuinfo.cpu_time = runstate.time[RUNSTATE_running];
-        op->u.getvcpuinfo.cpu      = v->processor;
-        ret = 0;
-        copyback = 1;
-        break;
-    }
-
     case XEN_DOMCTL_max_mem:
     {
         uint64_t new_max = op->u.max_mem.max_memkb >> (PAGE_SHIFT - 10);
@@ -900,7 +879,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             copyback = true;
         break;
 
-#ifdef CONFIG_MEM_ACCESS
+#ifdef CONFIG_VM_EVENT
     case XEN_DOMCTL_set_access_required:
         if ( unlikely(current->domain == d) ) /* no domain_pause() */
             ret = -EPERM;
@@ -975,8 +954,8 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     domctl_lock_release();
 
- domctl_out_unlock_domonly:
-    if ( d && d != dom_io )
+ domctl_out_unlock_rcuonly:
+    if ( d && !is_system_domain(d) )
         rcu_unlock_domain(d);
 
     if ( copyback && __copy_to_guest(u_domctl, op, 1) )

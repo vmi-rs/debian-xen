@@ -97,17 +97,6 @@ void msixtbl_init(struct domain *d);
 static inline void msixtbl_init(struct domain *d) {}
 #endif
 
-/* Arch-specific MSI data for vPCI. */
-struct vpci_arch_msi {
-    int pirq;
-    bool bound;
-};
-
-/* Arch-specific MSI-X entry data for vPCI. */
-struct vpci_arch_msix_entry {
-    int pirq;
-};
-
 void stdvga_init(struct domain *d);
 
 extern void hvm_dpci_msi_eoi(struct domain *d, int vector);
@@ -134,6 +123,9 @@ void destroy_vpci_mmcfg(struct domain *d);
 
 /* Remove MMCFG regions from a domain ->iomem_caps. */
 int vpci_mmcfg_deny_access(struct domain *d);
+
+/* r/o MMIO subpage access handler. */
+void register_subpage_ro_handler(struct domain *d);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

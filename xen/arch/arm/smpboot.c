@@ -35,9 +35,8 @@
 #undef virt_to_mfn
 #define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
-cpumask_t cpu_online_map;
-cpumask_t cpu_present_map;
-cpumask_t cpu_possible_map;
+cpumask_t __read_mostly cpu_online_map;
+cpumask_t __ro_after_init cpu_possible_map;
 
 struct cpuinfo_arm cpu_data[NR_CPUS];
 
@@ -108,11 +107,8 @@ static void remove_cpu_sibling_map(int cpu)
     free_cpumask_var(per_cpu(cpu_core_mask, cpu));
 }
 
-void __init
-smp_clear_cpu_maps (void)
+void __init smp_prepare_boot_cpu(void)
 {
-    cpumask_clear(&cpu_possible_map);
-    cpumask_clear(&cpu_online_map);
     cpumask_set_cpu(0, &cpu_online_map);
     cpumask_set_cpu(0, &cpu_possible_map);
     cpu_logical_map(0) = READ_SYSREG(MPIDR_EL1) & MPIDR_HWID_MASK;
@@ -242,9 +238,7 @@ static void __init dt_smp_init_cpus(void)
         if ( (rc = arch_cpu_init(i, cpu)) < 0 )
         {
             printk("cpu%d init failed (hwid %"PRIregister"): %d\n", i, hwid, rc);
-
-            if ( i != 0 )
-                cpuidx--;
+            tmp_map[i] = MPIDR_INVALID;
         }
         else
             tmp_map[i] = hwid;
@@ -257,9 +251,10 @@ static void __init dt_smp_init_cpus(void)
         return;
     }
 
-    /* Skip CPU 0 as it was already initialized in smp_prepare_boot_cpu(). */
-    for ( i = 1; i < cpuidx; i++ )
+    for ( i = 0; i < cpuidx; i++ )
     {
+        if ( tmp_map[i] == MPIDR_INVALID )
+            continue;
         cpumask_set_cpu(i, &cpu_possible_map);
         cpu_logical_map(i) = tmp_map[i];
     }
@@ -313,8 +308,6 @@ smp_prepare_cpus(void)
 {
     int rc;
 
-    cpumask_copy(&cpu_present_map, &cpu_possible_map);
-
     rc = setup_cpu_sibling_map(0);
     if ( rc )
         panic("Unable to allocate CPU sibling/core maps\n");
@@ -322,7 +315,7 @@ smp_prepare_cpus(void)
 }
 
 /* Boot the current CPU */
-void asmlinkage start_secondary(void)
+void asmlinkage noreturn start_secondary(void)
 {
     unsigned int cpuid = init_data.cpuid;
 

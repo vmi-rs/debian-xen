@@ -19,7 +19,6 @@
 #define			APIC_LVR_DIRECTED_EOI	(1 << 24)
 #define			GET_APIC_VERSION(x)	((x)&0xFF)
 #define			GET_APIC_MAXLVT(x)	(((x)>>16)&0xFF)
-#define			APIC_XAPIC(x)		((x) >= 0x14)
 #define		APIC_TASKPRI	0x80
 #define			APIC_TPRI_MASK		0xFF
 #define		APIC_ARBPRI	0x90
@@ -78,6 +77,8 @@
 #define			APIC_DM_STARTUP		0x00600
 #define			APIC_DM_EXTINT		0x00700
 #define			APIC_VECTOR_MASK	0x000FF
+#define			APIC_VECTOR_VALID(x)	\
+					(((x) & APIC_VECTOR_MASK) >= 16)
 #define		APIC_ICR2	0x310
 #define			GET_xAPIC_DEST_FIELD(x)	(((x)>>24)&0xFF)
 #define			SET_xAPIC_DEST_FIELD(x)	((x)<<24)

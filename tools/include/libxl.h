@@ -314,6 +314,11 @@
 #define LIBXL_HAVE_BUILDINFO_ARCH_NR_SPIS 1
 
 /*
+ * libxl_domain_build_info has the arch_arm.sci* fields.
+ */
+#define LIBXL_HAVE_BUILDINFO_ARCH_ARM_SCI 1
+
+/*
  * LIBXL_HAVE_SOFT_RESET indicates that libxl supports performing
  * 'soft reset' for domains and there is 'soft_reset' shutdown reason
  * in enum libxl_shutdown_reason.
@@ -550,6 +555,13 @@
 #define LIBXL_HAVE_VPMU 1
 
 /*
+ * LIBXL_HAVE_TRAP_UNMAPPED_ACCESSES indicates that libxl_domain_build_info
+ * has a trap_unmapped_accesses parameter, which allows the control of how
+ * accesses to unmapped adresses behave.
+ */
+#define LIBXL_HAVE_TRAP_UNMAPPED_ACCESSES 1
+
+/*
  * LIBXL_HAVE_PHYSINFO_CAP_GNTTAB indicates that libxl_physinfo has a
  * cap_gnttab_v1/2 fields, which indicates the available grant table ABIs.
  */
@@ -646,6 +658,12 @@
  * libxl_dt_overlay_domain.
  */
 #define LIBXL_HAVE_DT_OVERLAY_DOMAIN 1
+
+/*
+ * LIBXL_HAVE_XENSTORE_FEATURE_MASK indicates the presence of
+ * xenstore_feature_mask in struct libxl_domain_build_info.
+ */
+#define LIBXL_HAVE_XENSTORE_FEATURE_MASK 1
 
 /*
  * libxl memory management
@@ -1127,7 +1145,6 @@ typedef struct libxl__ctx libxl_ctx;
  * restoring or migrating a domain. In this case the related functions
  * should be expected to return failure. That is:
  *  - libxl_domain_suspend
- *  - libxl_domain_resume
  *  - libxl_domain_remus_start
  */
 #if defined(__arm__) || defined(__aarch64__)
@@ -1249,6 +1266,13 @@ typedef struct libxl__ctx libxl_ctx;
  * If this is defined, then libxl supports alternate p2m functionality.
  */
 #define LIBXL_HAVE_ALTP2M 1
+
+/*
+ * LIBXL_HAVE_ALTP2M_COUNT
+ * If this is defined, then libxl supports setting the maximum number of
+ * alternate p2m tables.
+ */
+#define LIBXL_HAVE_ALTP2M_COUNT 1
 
 /*
  * LIBXL_HAVE_REMUS
@@ -1503,6 +1527,28 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  */
 #define LIBXL_HAVE_CREATEINFO_XEND_SUSPEND_EVTCHN_COMPAT
 
+/*
+ * LIBXL_HAVE_XEN_PLATFORM_PCI_BAR_UC
+ *
+ * libxl_domain_build_info contains a boolean 'u.hvm.xen_platform_pci_bar_uc'
+ * field to signal whether the XenPCI device BAR should have UC cache attribute
+ * set in MTRR.
+ */
+#define LIBXL_HAVE_XEN_PLATFORM_PCI_BAR_UC
+
+/*
+ * LIBXL_HAVE_XENSTORE_QUOTA
+ *
+ * If this is defined the Xenstore quota related functions
+ * libxl_xs_quota_global_get()
+ * libxl_xs_quota_global_set()
+ * libxl_xs_quota_domain_get()
+ * libxl_xs_quota_domain_set()
+ * and the xenstore_quota member of struct domain_build_info
+ * are available.
+ */
+#define LIBXL_HAVE_XENSTORE_QUOTA
+
 typedef char **libxl_string_list;
 void libxl_string_list_dispose(libxl_string_list *sl);
 int libxl_string_list_length(const libxl_string_list *sl);
@@ -1579,6 +1625,7 @@ bool libxl_defbool_val(libxl_defbool db);
 
 const char *libxl_defbool_to_string(libxl_defbool b);
 
+#define LIBXL_NR_SPIS_DEFAULT (~(uint32_t)0)
 #define LIBXL_TIMER_MODE_DEFAULT -1
 #define LIBXL_MEMKB_DEFAULT ~0ULL
 
@@ -2975,6 +3022,14 @@ static inline int libxl_qemu_monitor_command_0x041200(libxl_ctx *ctx,
 }
 #define libxl_qemu_monitor_command libxl_qemu_monitor_command_0x041200
 #endif
+
+/* Get/set global and per-domain Xenstore quota. */
+int libxl_xs_quota_global_get(libxl_ctx *ctx, libxl_xs_quota_list *q_out);
+int libxl_xs_quota_global_set(libxl_ctx *ctx, libxl_xs_quota_list *q);
+int libxl_xs_quota_domain_get(libxl_ctx *ctx, uint32_t domid,
+                              libxl_xs_quota_list *q_out);
+int libxl_xs_quota_domain_set(libxl_ctx *ctx, uint32_t domid,
+                              libxl_xs_quota_list *q);
 
 #include <libxl_event.h>
 

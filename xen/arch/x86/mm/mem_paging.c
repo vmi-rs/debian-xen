@@ -7,10 +7,12 @@
  * Copyright (c) 2009 Citrix Systems, Inc. (Patrick Colp)
  */
 
-
-#include <asm/p2m.h>
 #include <xen/guest_access.h>
 #include <xen/vm_event.h>
+
+#include <asm/mem_paging.h>
+#include <asm/p2m.h>
+
 #include <xsm/xsm.h>
 
 #include "mm-locks.h"
@@ -156,7 +158,7 @@ void p2m_mem_paging_populate(struct domain *d, gfn_t gfn)
  *
  * If the gfn was dropped the vcpu needs to be unpaused.
  */
-void p2m_mem_paging_resume(struct domain *d, vm_event_response_t *rsp)
+void p2m_mem_paging_resume(struct domain *d, struct vm_event_st *rsp)
 {
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
     p2m_type_t p2mt;

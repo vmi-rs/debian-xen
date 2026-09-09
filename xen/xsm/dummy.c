@@ -20,7 +20,9 @@ static const struct xsm_ops __initconst_cf_clobber dummy_ops = {
     .getdomaininfo                 = xsm_getdomaininfo,
     .set_target                    = xsm_set_target,
     .domctl                        = xsm_domctl,
+#ifdef CONFIG_SYSCTL
     .sysctl                        = xsm_sysctl,
+#endif
 
     .evtchn_unbound                = xsm_evtchn_unbound,
     .evtchn_interdomain            = xsm_evtchn_interdomain,
@@ -53,8 +55,6 @@ static const struct xsm_ops __initconst_cf_clobber dummy_ops = {
     .claim_pages                   = xsm_claim_pages,
 
     .console_io                    = xsm_console_io,
-
-    .profile                       = xsm_profile,
 
     .kexec                         = xsm_kexec,
     .schedop_shutdown              = xsm_schedop_shutdown,
@@ -97,7 +97,7 @@ static const struct xsm_ops __initconst_cf_clobber dummy_ops = {
     .remove_from_physmap           = xsm_remove_from_physmap,
     .map_gmfn_foreign              = xsm_map_gmfn_foreign,
 
-#ifdef CONFIG_MEM_ACCESS
+#ifdef CONFIG_VM_EVENT
     .mem_access                    = xsm_mem_access,
 #endif
 
@@ -133,6 +133,7 @@ static const struct xsm_ops __initconst_cf_clobber dummy_ops = {
     .argo_register_any_source      = xsm_argo_register_any_source,
     .argo_send                     = xsm_argo_send,
 #endif
+    .get_domain_state              = xsm_get_domain_state,
 };
 
 void __init xsm_fixup_ops(struct xsm_ops *ops)

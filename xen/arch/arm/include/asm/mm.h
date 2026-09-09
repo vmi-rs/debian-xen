@@ -14,12 +14,6 @@
 # error "unknown ARM variant"
 #endif
 
-#if defined(CONFIG_MMU)
-# include <asm/mmu/mm.h>
-#elif !defined(CONFIG_MPU)
-# error "Unknown memory management layout"
-#endif
-
 /* Align Xen to a 2 MiB boundary. */
 #define XEN_PADDR_ALIGN (1 << 21)
 
@@ -150,6 +144,9 @@ struct page_info
 #define _PGC_colored      PG_shift(4)
 #define PGC_colored       PG_mask(1, 4)
 #endif
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(5)
+#define PGC_need_scrub    PG_mask(1, 5)
 /* ... */
 /* Page is broken? */
 #define _PGC_broken       PG_shift(7)
@@ -169,21 +166,7 @@ struct page_info
 #define PGC_count_width   PG_shift(10)
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
 
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
-
-#ifdef CONFIG_ARM_32
-#define is_xen_heap_page(page) is_xen_heap_mfn(page_to_mfn(page))
-#define is_xen_heap_mfn(mfn) ({                                 \
-    unsigned long mfn_ = mfn_x(mfn);                            \
-    (mfn_ >= mfn_x(directmap_mfn_start) &&                      \
-     mfn_ < mfn_x(directmap_mfn_end));                          \
-})
-#else
+#if defined(CONFIG_ARM_64) || defined(CONFIG_MPU)
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
 #define is_xen_heap_mfn(mfn) \
     (mfn_valid(mfn) && is_xen_heap_page(mfn_to_page(mfn)))
@@ -205,14 +188,18 @@ extern unsigned long frametable_base_pdx;
 
 /* Boot-time pagetable setup */
 extern void setup_pagetables(void);
+/* Check that the mapping flag has no W and X together */
+bool flags_has_rwx(unsigned int flags);
 /* Map FDT in boot pagetable */
 extern void *early_fdt_map(paddr_t fdt_paddr);
 /* Remove early mappings */
 extern void remove_early_mappings(void);
 /* Prepare the memory subystem to bring-up the given secondary CPU */
 extern int prepare_secondary_mm(int cpu);
-/* Map a frame table to cover physical addresses ps through pe */
-extern void setup_frametable_mappings(paddr_t ps, paddr_t pe);
+/* Map a frame table */
+void init_frametable(paddr_t ram_start);
+/* Helper function to setup memory management */
+void setup_mm_helper(void);
 /* map a physical range in virtual memory */
 void __iomem *ioremap_attr(paddr_t start, size_t len, unsigned int attributes);
 
@@ -250,7 +237,6 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 /* Convert between frame number and address formats.  */
 #define pfn_to_paddr(pfn) ((paddr_t)(pfn) << PAGE_SHIFT)
 #define paddr_to_pfn(pa)  ((unsigned long)((pa) >> PAGE_SHIFT))
-#define paddr_to_pdx(pa)    mfn_to_pdx(maddr_to_mfn(pa))
 #define gfn_to_gaddr(gfn)   pfn_to_paddr(gfn_x(gfn))
 #define gaddr_to_gfn(ga)    _gfn(paddr_to_pfn(ga))
 #define mfn_to_maddr(mfn)   pfn_to_paddr(mfn_x(mfn))
@@ -260,55 +246,6 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 
 /* Page-align address and convert to frame number format */
 #define paddr_to_pfn_aligned(paddr)    paddr_to_pfn(PAGE_ALIGN(paddr))
-
-#define virt_to_maddr(va) ({                                        \
-    vaddr_t va_ = (vaddr_t)(va);                                    \
-    (paddr_t)((va_to_par(va_) & PADDR_MASK & PAGE_MASK) | (va_ & ~PAGE_MASK)); \
-})
-
-#ifdef CONFIG_ARM_32
-/**
- * Find the virtual address corresponding to a machine address
- *
- * Only memory backing the XENHEAP has a corresponding virtual address to
- * be found. This is so we can save precious virtual space, as it's in
- * short supply on arm32. This mapping is not subject to PDX compression
- * because XENHEAP is known to be physically contiguous and can't hence
- * jump over the PDX hole. This means we can avoid the roundtrips
- * converting to/from pdx.
- *
- * @param ma Machine address
- * @return Virtual address mapped to `ma`
- */
-static inline void *maddr_to_virt(paddr_t ma)
-{
-    ASSERT(is_xen_heap_mfn(maddr_to_mfn(ma)));
-    ma -= mfn_to_maddr(directmap_mfn_start);
-    return (void *)(unsigned long) ma + XENHEAP_VIRT_START;
-}
-#else
-/**
- * Find the virtual address corresponding to a machine address
- *
- * The directmap covers all conventional memory accesible by the
- * hypervisor. This means it's subject to PDX compression.
- *
- * Note there's an extra offset applied (directmap_base_pdx) on top of the
- * regular PDX compression logic. Its purpose is to skip over the initial
- * range of non-existing memory, should there be one.
- *
- * @param ma Machine address
- * @return Virtual address mapped to `ma`
- */
-static inline void *maddr_to_virt(paddr_t ma)
-{
-    ASSERT((mfn_to_pdx(maddr_to_mfn(ma)) - directmap_base_pdx) <
-           (DIRECTMAP_SIZE >> PAGE_SHIFT));
-    return (void *)(XENHEAP_VIRT_START -
-                    (directmap_base_pdx << PAGE_SHIFT) +
-                    maddr_to_directmapoff(ma));
-}
-#endif
 
 /*
  * Translate a guest virtual address to a machine address.
@@ -340,19 +277,14 @@ static inline uint64_t gvirt_to_maddr(vaddr_t va, paddr_t *pa,
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
 
-/* Convert between Xen-heap virtual addresses and page-info structures. */
-static inline struct page_info *virt_to_page(const void *v)
-{
-    unsigned long va = (unsigned long)v;
-    unsigned long pdx;
-
-    ASSERT(va >= XENHEAP_VIRT_START);
-    ASSERT(va < directmap_virt_end);
-
-    pdx = (va - XENHEAP_VIRT_START) >> PAGE_SHIFT;
-    pdx += mfn_to_pdx(directmap_mfn_start);
-    return frame_table + pdx - frametable_base_pdx;
-}
+/* Memory management subsystem header placed here to see the above macros */
+#if defined(CONFIG_MMU)
+# include <asm/mmu/mm.h>
+#elif defined(CONFIG_MPU)
+# include <asm/mpu/mm.h>
+#else
+#error "Unknown memory management layout"
+#endif
 
 static inline void *page_to_virt(const struct page_info *pg)
 {
@@ -376,9 +308,6 @@ struct page_info *get_page_from_gva(struct vcpu *v, vaddr_t va,
 
 /* Arch-specific portion of memory_op hypercall. */
 long arch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg);
-
-#define domain_set_alloc_bitsize(d) ((void)0)
-#define domain_clamp_alloc_bitsize(d, b) (b)
 
 unsigned long domain_get_maximum_gpfn(struct domain *d);
 

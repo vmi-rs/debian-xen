@@ -17,11 +17,15 @@
 #include <asm/amd.h>
 #include <asm/debugreg.h>
 #include <asm/endbr.h>
+#include <asm/fsgsbase.h>
 #include <asm/hpet.h>
 #include <asm/mc146818rtc.h>
 #include <asm/pv/domain.h>
 #include <asm/pv/trace.h>
+#include <asm/pv/traps.h>
 #include <asm/shared.h>
+#include <asm/stubs.h>
+#include <asm/traps.h>
 
 #include <xsm/xsm.h>
 
@@ -39,10 +43,10 @@ struct priv_op_ctxt {
 };
 
 /* I/O emulation helpers.  Use non-standard calling conventions. */
-void nocall load_guest_gprs(struct cpu_user_regs *);
+void nocall load_guest_gprs(struct cpu_user_regs *regs);
 void nocall save_guest_gprs(void);
 
-typedef void io_emul_stub_t(struct cpu_user_regs *);
+typedef void io_emul_stub_t(struct cpu_user_regs *regs);
 
 static io_emul_stub_t *io_emul_stub_setup(struct priv_op_ctxt *ctxt, u8 opcode,
                                           unsigned int port, unsigned int bytes)
@@ -243,12 +247,12 @@ static bool pci_cfg_ok(struct domain *currd, unsigned int start,
     start |= CF8_ADDR_LO(currd->arch.pci_cf8);
     /* AMD extended configuration space access? */
     if ( CF8_ADDR_HI(currd->arch.pci_cf8) &&
-         boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
-         boot_cpu_data.x86 >= 0x10 && boot_cpu_data.x86 < 0x17 )
+         boot_cpu_data.vendor == X86_VENDOR_AMD &&
+         boot_cpu_data.family >= 0x10 && boot_cpu_data.family < 0x17 )
     {
         uint64_t msr_val;
 
-        if ( rdmsr_safe(MSR_AMD64_NB_CFG, msr_val) )
+        if ( rdmsr_safe(MSR_AMD64_NB_CFG, &msr_val) )
             return false;
         if ( msr_val & (1ULL << AMD64_NB_CFG_CF8_EXT_ENABLE_BIT) )
             start |= CF8_ADDR_HI(currd->arch.pci_cf8);
@@ -406,6 +410,7 @@ static void _guest_io_write(unsigned int port, unsigned int bytes,
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
 }
 
@@ -867,9 +872,22 @@ static uint64_t guest_efer(const struct domain *d)
      */
     if ( is_pv_32bit_domain(d) )
         val &= ~(EFER_LME | EFER_LMA |
-                 (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL
+                 (boot_cpu_data.vendor == X86_VENDOR_INTEL
                   ? EFER_SCE : 0));
     return val;
+}
+
+static uint64_t soft_rdtsc(const struct vcpu *v)
+{
+    s_time_t old, new, now = get_s_time();
+    struct domain *d = v->domain;
+
+    do {
+        old = d->arch.vtsc_last;
+        new = now > d->arch.vtsc_last ? now : old + 1;
+    } while ( cmpxchg(&d->arch.vtsc_last, old, new) != old );
+
+    return gtime_to_gtsc(d, new);
 }
 
 static int cf_check read_msr(
@@ -878,7 +896,7 @@ static int cf_check read_msr(
     struct vcpu *curr = current;
     const struct domain *currd = curr->domain;
     const struct cpu_policy *cp = currd->arch.cpu_policy;
-    bool vpmu_msr = false, warn = false;
+    bool warn = false;
     uint64_t tmp;
     int ret;
 
@@ -908,7 +926,8 @@ static int cf_check read_msr(
     case MSR_GS_BASE:
         if ( !cp->extd.lm )
             break;
-        *val = read_gs_base();
+        /* Under FRED, GS is automatically swapped on privilege change. */
+        *val = opt_fred ? rdmsr(MSR_SHADOW_GS_BASE) : read_gs_base();
         return X86EMUL_OKAY;
 
     case MSR_SHADOW_GS_BASE:
@@ -918,7 +937,7 @@ static int cf_check read_msr(
         return X86EMUL_OKAY;
 
     case MSR_IA32_TSC:
-        *val = currd->arch.vtsc ? pv_soft_rdtsc(curr, ctxt->regs) : rdtsc();
+        *val = currd->arch.vtsc ? soft_rdtsc(curr) : rdtsc();
         return X86EMUL_OKAY;
 
     case MSR_EFER:
@@ -942,7 +961,7 @@ static int cf_check read_msr(
     case MSR_K8_PSTATE5:
     case MSR_K8_PSTATE6:
     case MSR_K8_PSTATE7:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_AMD )
+        if ( boot_cpu_data.vendor != X86_VENDOR_AMD )
             break;
         if ( unlikely(is_cpufreq_controller(currd)) )
             goto normal;
@@ -950,8 +969,8 @@ static int cf_check read_msr(
         return X86EMUL_OKAY;
 
     case MSR_FAM10H_MMIO_CONF_BASE:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_AMD ||
-             boot_cpu_data.x86 < 0x10 || boot_cpu_data.x86 >= 0x17 )
+        if ( boot_cpu_data.vendor != X86_VENDOR_AMD ||
+             boot_cpu_data.family < 0x10 || boot_cpu_data.family >= 0x17 )
             break;
         /* fall through */
     case MSR_AMD64_NB_CFG:
@@ -961,7 +980,7 @@ static int cf_check read_msr(
         return X86EMUL_OKAY;
 
     case MSR_IA32_MISC_ENABLE:
-        if ( rdmsr_safe(reg, *val) )
+        if ( rdmsr_safe(reg, val) )
             break;
         *val = guest_misc_enable(*val);
         return X86EMUL_OKAY;
@@ -975,23 +994,23 @@ static int cf_check read_msr(
     case MSR_P6_EVNTSEL(0) ... MSR_P6_EVNTSEL(7):
     case MSR_CORE_PERF_FIXED_CTR0 ... MSR_CORE_PERF_FIXED_CTR2:
     case MSR_CORE_PERF_FIXED_CTR_CTRL ... MSR_CORE_PERF_GLOBAL_OVF_CTRL:
-        if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
-        {
-            vpmu_msr = true;
-            /* fall through */
+        if ( boot_cpu_data.vendor == X86_VENDOR_INTEL )
+            goto vpmu;
+        goto check_relaxed;
+
     case MSR_AMD_FAM15H_EVNTSEL0 ... MSR_AMD_FAM15H_PERFCTR5:
     case MSR_K7_EVNTSEL0 ... MSR_K7_PERFCTR3:
-            if ( vpmu_msr || (boot_cpu_data.x86_vendor &
-                              (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
-            {
-                if ( vpmu_do_rdmsr(reg, val) )
-                    break;
-                return X86EMUL_OKAY;
-            }
+        if ( boot_cpu_data.vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
+        {
+    vpmu:
+            if ( vpmu_do_rdmsr(reg, val) )
+                break;
+            return X86EMUL_OKAY;
         }
         /* fall through */
     default:
-        if ( currd->arch.msr_relaxed && !rdmsr_safe(reg, tmp) )
+    check_relaxed:
+        if ( currd->arch.msr_relaxed && !rdmsr_safe(reg, &tmp) )
         {
             *val = 0;
             return X86EMUL_OKAY;
@@ -1001,14 +1020,14 @@ static int cf_check read_msr(
         break;
 
     normal:
-        if ( rdmsr_safe(reg, *val) )
+        if ( rdmsr_safe(reg, val) )
             break;
         return X86EMUL_OKAY;
     }
 
  done:
     if ( ret != X86EMUL_OKAY && !curr->arch.pv.trap_ctxt[X86_EXC_GP].address &&
-         (reg >> 16) != 0x4000 && !rdmsr_safe(reg, tmp) )
+         (reg >> 16) != 0x4000 && !rdmsr_safe(reg, &tmp) )
     {
         gprintk(XENLOG_WARNING, "faking RDMSR 0x%08x\n", reg);
         *val = 0;
@@ -1022,12 +1041,13 @@ static int cf_check read_msr(
 }
 
 static int cf_check write_msr(
-    unsigned int reg, uint64_t val, struct x86_emulate_ctxt *ctxt)
+    unsigned int reg, uint64_t val, struct x86_emulate_ctxt *ctxt,
+    bool explicit)
 {
     struct vcpu *curr = current;
     const struct domain *currd = curr->domain;
     const struct cpu_policy *cp = currd->arch.cpu_policy;
-    bool vpmu_msr = false;
+    uint64_t temp = 0;
     int ret;
 
     if ( (ret = guest_wrmsr(curr, reg, val)) != X86EMUL_UNHANDLEABLE )
@@ -1040,25 +1060,29 @@ static int cf_check write_msr(
 
     switch ( reg )
     {
-        uint64_t temp;
-
     case MSR_FS_BASE:
     case MSR_GS_BASE:
     case MSR_SHADOW_GS_BASE:
         if ( !cp->extd.lm || !is_canonical_address(val) )
             break;
 
-        if ( reg == MSR_FS_BASE )
-            write_fs_base(val);
-        else if ( reg == MSR_GS_BASE )
-            write_gs_base(val);
-        else if ( reg == MSR_SHADOW_GS_BASE )
+        switch ( reg )
         {
-            write_gs_shadow(val);
+        case MSR_FS_BASE:
+            write_fs_base(val);
+            break;
+
+        case MSR_SHADOW_GS_BASE:
             curr->arch.pv.gs_base_user = val;
+            fallthrough;
+        case MSR_GS_BASE:
+            /* Under FRED, GS is automatically swapped on privilege change. */
+            if ( (reg == MSR_GS_BASE) ^ opt_fred )
+                write_gs_base(val);
+            else
+                write_gs_shadow(val);
+            break;
         }
-        else
-            ASSERT_UNREACHABLE();
         return X86EMUL_OKAY;
 
     case MSR_EFER:
@@ -1084,7 +1108,7 @@ static int cf_check write_msr(
     case MSR_K8_PSTATE6:
     case MSR_K8_PSTATE7:
     case MSR_K8_HWCR:
-        if ( !(boot_cpu_data.x86_vendor &
+        if ( !(boot_cpu_data.vendor &
                (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
             break;
         if ( likely(!is_cpufreq_controller(currd)) ||
@@ -1095,7 +1119,7 @@ static int cf_check write_msr(
     case MSR_AMD64_NB_CFG:
         if ( !is_hwdom_pinned_vcpu(curr) )
             return X86EMUL_OKAY;
-        if ( (rdmsr_safe(MSR_AMD64_NB_CFG, temp) != 0) ||
+        if ( (rdmsr_safe(MSR_AMD64_NB_CFG, &temp) != 0) ||
              ((val ^ temp) & ~(1ULL << AMD64_NB_CFG_CF8_EXT_ENABLE_BIT)) )
             goto invalid;
         if ( wrmsr_safe(MSR_AMD64_NB_CFG, val) == 0 )
@@ -1103,12 +1127,12 @@ static int cf_check write_msr(
         break;
 
     case MSR_FAM10H_MMIO_CONF_BASE:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_AMD ||
-             boot_cpu_data.x86 < 0x10 || boot_cpu_data.x86 >= 0x17 )
+        if ( boot_cpu_data.vendor != X86_VENDOR_AMD ||
+             boot_cpu_data.family < 0x10 || boot_cpu_data.family >= 0x17 )
             break;
         if ( !is_hwdom_pinned_vcpu(curr) )
             return X86EMUL_OKAY;
-        if ( rdmsr_safe(MSR_FAM10H_MMIO_CONF_BASE, temp) != 0 )
+        if ( rdmsr_safe(MSR_FAM10H_MMIO_CONF_BASE, &temp) != 0 )
             break;
         if ( (pci_probe & PCI_PROBE_MASK) == PCI_PROBE_MMCONF ?
              temp != val :
@@ -1124,7 +1148,7 @@ static int cf_check write_msr(
         break;
 
     case MSR_IA32_MISC_ENABLE:
-        if ( rdmsr_safe(reg, temp) )
+        if ( rdmsr_safe(reg, &temp) )
             break;
         if ( val != guest_misc_enable(temp) )
             goto invalid;
@@ -1132,7 +1156,7 @@ static int cf_check write_msr(
 
     case MSR_IA32_MPERF:
     case MSR_IA32_APERF:
-        if ( !(boot_cpu_data.x86_vendor &
+        if ( !(boot_cpu_data.vendor &
                (X86_VENDOR_INTEL | X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
             break;
         if ( likely(!is_cpufreq_controller(currd)) ||
@@ -1142,7 +1166,7 @@ static int cf_check write_msr(
 
     case MSR_IA32_THERM_CONTROL:
     case MSR_IA32_ENERGY_PERF_BIAS:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL )
+        if ( boot_cpu_data.vendor != X86_VENDOR_INTEL )
             break;
         if ( !is_hwdom_pinned_vcpu(curr) || wrmsr_safe(reg, val) == 0 )
             return X86EMUL_OKAY;
@@ -1152,26 +1176,27 @@ static int cf_check write_msr(
     case MSR_P6_EVNTSEL(0) ... MSR_P6_EVNTSEL(7):
     case MSR_CORE_PERF_FIXED_CTR0 ... MSR_CORE_PERF_FIXED_CTR2:
     case MSR_CORE_PERF_FIXED_CTR_CTRL ... MSR_CORE_PERF_GLOBAL_OVF_CTRL:
-        if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
-        {
-            vpmu_msr = true;
+        if ( boot_cpu_data.vendor == X86_VENDOR_INTEL )
+            goto vpmu;
+        goto check_relaxed;
+
     case MSR_AMD_FAM15H_EVNTSEL0 ... MSR_AMD_FAM15H_PERFCTR5:
     case MSR_K7_EVNTSEL0 ... MSR_K7_PERFCTR3:
-            if ( vpmu_msr || (boot_cpu_data.x86_vendor &
-                              (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
-            {
-                if ( (vpmu_mode & XENPMU_MODE_ALL) &&
-                     !is_hardware_domain(currd) )
-                    return X86EMUL_OKAY;
-
-                if ( vpmu_do_wrmsr(reg, val) )
-                    break;
+        if ( boot_cpu_data.vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
+        {
+    vpmu:
+            if ( (vpmu_mode & XENPMU_MODE_ALL) &&
+                 !is_hardware_domain(currd) )
                 return X86EMUL_OKAY;
-            }
+
+            if ( vpmu_do_wrmsr(reg, val) )
+                break;
+            return X86EMUL_OKAY;
         }
         /* fall through */
     default:
-        if ( currd->arch.msr_relaxed && !rdmsr_safe(reg, val) )
+    check_relaxed:
+        if ( currd->arch.msr_relaxed && !rdmsr_safe(reg, &val) )
             return X86EMUL_OKAY;
 
         gdprintk(XENLOG_WARNING,
@@ -1202,8 +1227,10 @@ static int cf_check cache_op(
          * Linux uses this in some start-of-day code.
          */
         ;
+    else if ( op == x86emul_wbnoinvd /* && cpu_has_wbnoinvd */ )
+        flush_all(FLUSH_CACHE_WRITEBACK);
     else
-        flush_all(FLUSH_CACHE);
+        flush_all(FLUSH_CACHE_EVICT);
 
     return X86EMUL_OKAY;
 }

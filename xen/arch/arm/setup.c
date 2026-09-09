@@ -8,8 +8,10 @@
  * Copyright (c) 2011 Citrix Systems.
  */
 
+#include <xen/bootinfo.h>
 #include <xen/compile.h>
 #include <xen/device_tree.h>
+#include <xen/dom0less-build.h>
 #include <xen/domain_page.h>
 #include <xen/grant_table.h>
 #include <xen/llc-coloring.h>
@@ -30,15 +32,15 @@
 #include <xen/virtual_region.h>
 #include <xen/version.h>
 #include <xen/vmap.h>
+#include <xen/stack-protector.h>
+#include <xen/static-evtchn.h>
 #include <xen/trace.h>
 #include <xen/libfdt/libfdt-xen.h>
 #include <xen/acpi.h>
 #include <xen/warning.h>
 #include <xen/hypercall.h>
 #include <asm/alternative.h>
-#include <asm/dom0less-build.h>
 #include <asm/page.h>
-#include <asm/static-evtchn.h>
 #include <asm/current.h>
 #include <asm/setup.h>
 #include <asm/gic.h>
@@ -62,25 +64,14 @@ bool __read_mostly acpi_disabled;
 
 domid_t __read_mostly max_init_domid;
 
-static __used void init_done(void)
+static __used void noreturn init_done(void)
 {
-    int rc;
-
     /* Must be done past setting system_state. */
     unregister_init_virtual_region();
 
-    free_init_memory();
+    modify_after_init_mappings();
 
-    /*
-     * We have finished booting. Mark the section .data.ro_after_init
-     * read-only.
-     */
-    rc = modify_xen_mappings((unsigned long)&__ro_after_init_start,
-                             (unsigned long)&__ro_after_init_end,
-                             PAGE_HYPERVISOR_RO);
-    if ( rc )
-        panic("Unable to mark the .data.ro_after_init section read-only (rc = %d)\n",
-              rc);
+    free_init_memory();
 
     startup_cpu_idle_loop();
 }
@@ -205,11 +196,11 @@ static void __init processor_id(void)
 
 void __init discard_initial_modules(void)
 {
-    struct bootmodules *mi = &bootinfo.modules;
+    struct boot_modules *mi = &bootinfo.modules;
     int i;
 
     /*
-     * When using static heap feature, don't give bootmodules memory back to
+     * When using static heap feature, don't give boot_modules memory back to
      * the heap allocator
      */
     if ( using_static_heap )
@@ -237,23 +228,28 @@ void __init discard_initial_modules(void)
 }
 
 /* Relocate the FDT in Xen heap */
-static void * __init relocate_fdt(paddr_t dtb_paddr, size_t dtb_size)
+static void __init relocate_fdt(const void **dtb_vaddr, size_t dtb_size)
 {
     void *fdt = xmalloc_bytes(dtb_size);
 
     if ( !fdt )
         panic("Unable to allocate memory for relocating the Device-Tree.\n");
 
-    copy_from_paddr(fdt, dtb_paddr, dtb_size);
+    memcpy(fdt, *dtb_vaddr, dtb_size);
+    clean_dcache_va_range(fdt, dtb_size);
 
-    return fdt;
+    *dtb_vaddr = fdt;
 }
 
 void __init init_pdx(void)
 {
     const struct membanks *mem = bootinfo_get_mem();
-    paddr_t bank_start, bank_size, bank_end;
+    paddr_t bank_start, bank_size, bank_end, ram_end = 0;
+    unsigned int bank;
 
+#ifndef CONFIG_PDX_NONE
+    for ( bank = 0 ; bank < mem->nr_banks; bank++ )
+        pfn_pdx_add_region(mem->bank[bank].start, mem->bank[bank].size);
     /*
      * Arm does not have any restrictions on the bits to compress. Pass 0 to
      * let the common code further restrict the mask.
@@ -261,49 +257,53 @@ void __init init_pdx(void)
      * If the logic changes in pfn_pdx_hole_setup we might have to
      * update this function too.
      */
-    uint64_t mask = pdx_init_mask(0x0);
-    int bank;
+    pfn_pdx_compression_setup(0);
 
     for ( bank = 0 ; bank < mem->nr_banks; bank++ )
     {
-        bank_start = mem->bank[bank].start;
-        bank_size = mem->bank[bank].size;
+        const struct membank *m = &mem->bank[bank];
 
-        mask |= bank_start | pdx_region_mask(bank_start, bank_size);
+        if ( !pdx_is_region_compressible(m->start,
+                                         PFN_UP(m->start + m->size) -
+                                         PFN_DOWN(m->start)) )
+        {
+            pfn_pdx_compression_reset();
+            printk(XENLOG_WARNING
+                   "PFN compression disabled, RAM region [%#" PRIpaddr ", %#"
+                   PRIpaddr "] not covered\n",
+                   m->start, m->start + m->size - 1);
+            break;
+        }
     }
-
-    for ( bank = 0 ; bank < mem->nr_banks; bank++ )
-    {
-        bank_start = mem->bank[bank].start;
-        bank_size = mem->bank[bank].size;
-
-        if (~mask & pdx_region_mask(bank_start, bank_size))
-            mask = 0;
-    }
-
-    pfn_pdx_hole_setup(mask >> PAGE_SHIFT);
+#endif
 
     for ( bank = 0 ; bank < mem->nr_banks; bank++ )
     {
         bank_start = mem->bank[bank].start;
         bank_size = mem->bank[bank].size;
         bank_end = bank_start + bank_size;
+        ram_end = max(ram_end, bank_end);
 
         set_pdx_range(paddr_to_pfn(bank_start),
                       paddr_to_pfn(bank_end));
     }
+
+    max_page = PFN_DOWN(ram_end);
+    max_pdx = pfn_to_pdx(max_page - 1) + 1;
 }
 
 size_t __read_mostly dcache_line_bytes;
 
 /* C entry point for boot CPU */
-void asmlinkage __init start_xen(unsigned long fdt_paddr)
+void asmlinkage __init noreturn start_xen(unsigned long fdt_paddr)
 {
     size_t fdt_size;
     const char *cmdline;
-    struct bootmodule *xen_bootmodule;
+    struct boot_module *xen_boot_module;
     struct domain *d;
     int rc, i;
+
+    boot_stack_chk_guard_setup();
 
     dcache_line_bytes = read_dcache_line_bytes();
 
@@ -313,7 +313,7 @@ void asmlinkage __init start_xen(unsigned long fdt_paddr)
     /* Initialize traps early allow us to get backtrace when an error occurred */
     init_traps();
 
-    smp_clear_cpu_maps();
+    smp_prepare_boot_cpu();
 
     device_tree_flattened = early_fdt_map(fdt_paddr);
     if ( !device_tree_flattened )
@@ -323,10 +323,10 @@ void asmlinkage __init start_xen(unsigned long fdt_paddr)
               fdt_paddr);
 
     /* Register Xen's load address as a boot module. */
-    xen_bootmodule = add_boot_module(BOOTMOD_XEN,
+    xen_boot_module = add_boot_module(BOOTMOD_XEN,
                              virt_to_maddr(_start),
                              (paddr_t)(uintptr_t)(_end - _start), false);
-    BUG_ON(!xen_bootmodule);
+    BUG_ON(!xen_boot_module);
 
     fdt_size = boot_fdt_info(device_tree_flattened, fdt_paddr);
 
@@ -362,7 +362,7 @@ void asmlinkage __init start_xen(unsigned long fdt_paddr)
     if ( acpi_disabled )
     {
         printk("Booting using Device Tree\n");
-        device_tree_flattened = relocate_fdt(fdt_paddr, fdt_size);
+        relocate_fdt(&device_tree_flattened, fdt_size);
         dt_unflatten_host_device_tree();
     }
     else
@@ -489,8 +489,6 @@ void asmlinkage __init start_xen(unsigned long fdt_paddr)
     discard_initial_modules();
 
     heap_init_late();
-
-    init_trace_bufs();
 
     init_constructors();
 

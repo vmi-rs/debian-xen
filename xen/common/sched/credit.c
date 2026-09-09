@@ -2,7 +2,6 @@
  * (C) 2005-2006 - Emmanuel Ackaouy - XenSource Inc.
  ****************************************************************************
  *
- *        File: common/csched_credit.c
  *      Author: Emmanuel Ackaouy
  *
  * Description: Credit-based SMP CPU scheduler
@@ -1256,6 +1255,7 @@ __csched_set_tslice(struct csched_private *prv, unsigned int timeslice_ms)
     prv->credit = prv->credits_per_tslice * prv->ncpus;
 }
 
+#ifdef CONFIG_SYSCTL
 static int cf_check
 csched_sys_cntl(const struct scheduler *ops,
                         struct xen_sysctl_scheduler_op *sc)
@@ -1287,7 +1287,7 @@ csched_sys_cntl(const struct scheduler *ops,
         prv->unit_migr_delay = MICROSECS(params->vcpu_migr_delay_us);
         spin_unlock_irqrestore(&prv->lock, flags);
 
-        /* FALLTHRU */
+        fallthrough;
     case XEN_SYSCTL_SCHEDOP_getinfo:
         params->tslice_ms = prv->tslice / MILLISECS(1);
         params->ratelimit_us = prv->ratelimit / MICROSECS(1);
@@ -1298,6 +1298,7 @@ csched_sys_cntl(const struct scheduler *ops,
     out:
     return rc;
 }
+#endif /* CONFIG_SYSCTL */
 
 static void *cf_check
 csched_alloc_domdata(const struct scheduler *ops, struct domain *dom)
@@ -1586,6 +1587,10 @@ static void cf_check csched_tick(void *_cpu)
     const struct sched_resource *sr = get_sched_res(cpu);
     struct csched_pcpu *spc = CSCHED_PCPU(cpu);
     struct csched_private *prv = CSCHED_PRIV(sr->scheduler);
+
+    /* Handle race of timer disabling vs. firing when switching scheduler. */
+    if ( !spc )
+        return;
 
     spc->tick++;
 
@@ -2288,7 +2293,9 @@ static const struct scheduler sched_credit_def = {
 
     .adjust         = csched_dom_cntl,
     .adjust_affinity= csched_aff_cntl,
+#ifdef CONFIG_SYSCTL
     .adjust_global  = csched_sys_cntl,
+#endif
 
     .pick_resource  = csched_res_pick,
     .do_schedule    = csched_schedule,

@@ -6,13 +6,14 @@
 
 #include <asm/amd.h>
 #include <asm/hvm/nestedhvm.h>
-#include <asm/hvm/svm/svm.h>
+#include <asm/hvm/svm.h>
 
 #include "svm.h"
+#include "vmcb.h"
 
 void svm_asid_init(const struct cpuinfo_x86 *c)
 {
-    int nasids = 0;
+    unsigned int nasids = 0;
 
     /* Check for erratum #170, and leave ASIDs disabled if it's present. */
     if ( !cpu_has_amd_erratum(c, AMD_ERRATUM_170) )
@@ -37,7 +38,7 @@ void svm_asid_handle_vmrun(void)
     /* ASID 0 indicates that ASIDs are disabled. */
     if ( p_asid->asid == 0 )
     {
-        vmcb_set_asid(vmcb, true);
+        vmcb_set_asid(vmcb, 1);
         vmcb->tlb_control =
             cpu_has_svm_flushbyasid ? TLB_CTRL_FLUSH_ASID : TLB_CTRL_FLUSH_ALL;
         return;

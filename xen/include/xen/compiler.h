@@ -1,24 +1,24 @@
 #ifndef __LINUX_COMPILER_H
 #define __LINUX_COMPILER_H
 
-#if !defined(__GNUC__) || (__GNUC__ < 4)
-#error Sorry, your compiler is too old/not recognized.
-#elif CONFIG_CC_IS_GCC
-# if defined(CONFIG_ARM_32) && CONFIG_GCC_VERSION < 40900
-#  error Sorry, your version of GCC is too old - please use 4.9 or newer.
-# elif defined(CONFIG_ARM_64) && CONFIG_GCC_VERSION < 50100
-/*
- * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=63293
- * https://lore.kernel.org/r/20210107111841.GN1551@shell.armlinux.org.uk
- */
-#  error Sorry, your version of GCC is too old - please use 5.1 or newer.
-# endif
-#endif
+#if CONFIG_CC_IS_GCC
 
-#ifdef CONFIG_CC_HAS_VISIBILITY_ATTRIBUTE
+# if defined(CONFIG_RISCV) && CONFIG_GCC_VERSION < 120200
+#  error Sorry, please use GCC >= 12.2
+# elif CONFIG_GCC_VERSION < 50100
+#  error Sorry, please use GCC >= 5.1
+# endif
+
+#elif CONFIG_CC_IS_CLANG
+
+# if CONFIG_CLANG_VERSION < 110000
+#  error Sorry, please use Clang >= 11
+# endif
+
+#endif /* Compiler checks. */
+
 /* Results in more efficient PIC code (no indirections through GOT or PLT). */
 #pragma GCC visibility push(hidden)
-#endif
 
 #define barrier()     __asm__ __volatile__("": : :"memory")
 
@@ -47,10 +47,35 @@
 # define cf_check
 #endif
 
-#if (!defined(__clang__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 5))
-#define unreachable() do {} while (1)
-#else
 #define unreachable() __builtin_unreachable()
+
+/*
+ * Compilers estimate the size of an asm() block for inlining purposes.
+ *
+ * Constructs with embedded metadata (BUG_FRAME, ALTERNATIVE, EXTABLE, etc)
+ * appear large, depsite typically only being a handful of instructions.  asm
+ * inline() overrides the estimation to identify the block as being small.
+ *
+ * Note: __inline is needed to avoid getting caught up in INIT_SECTIONS_ONLY.
+ */
+#if CONFIG_CC_HAS_ASM_INLINE
+# define asm_inline asm __inline
+#else
+# define asm_inline asm
+#endif
+
+/*
+ * In C23, the auto keyword has been repurposed to perform type inference.
+ *
+ * This behaviour is available via the __auto_type extension in supported
+ * toolchains.
+ *
+ * https://www.gnu.org/software/c-intro-and-ref/manual/html_node/Auto-Type.html
+ * https://clang.llvm.org/docs/LanguageExtensions.html#auto-type
+ */
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
+/* SAF-3-safe MISRA C Rule 20.4: Giving the keyword it's C23 meaning. */
+#define auto __auto_type
 #endif
 
 /*

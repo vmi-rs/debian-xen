@@ -12,6 +12,11 @@
 #include <xen/grant_table.h>
 #include <xen/guest_access.h>
 #include <xen/mm.h>
+#include <xen/static-memory.h>
+#include <xen/static-shmem.h>
+#include <xen/vmap.h>
+
+#include <asm/setup.h>
 
 #include <xsm/xsm.h>
 
@@ -22,6 +27,59 @@
 #define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 unsigned long frametable_base_pdx __read_mostly;
+
+#if defined(CONFIG_ARM_64) || defined(CONFIG_MPU)
+void __init setup_mm(void)
+{
+    const struct membanks *banks = bootinfo_get_mem();
+    paddr_t ram_start = INVALID_PADDR;
+    paddr_t ram_size = 0;
+    unsigned int i;
+
+    init_pdx();
+
+    for ( i = 0; i < banks->nr_banks; i++ )
+    {
+        const struct membank *bank = &banks->bank[i];
+
+        ram_size = ram_size + bank->size;
+        ram_start = min(ram_start, bank->start);
+    }
+
+    total_pages = ram_size >> PAGE_SHIFT;
+
+    /*
+     * On MMU systems we need some memory to allocate the page-tables used for
+     * the direct mapmappings. But some regions may contain memory already
+     * allocated for other uses (e.g. modules, reserved-memory...).
+     *
+     * For simplicity, add all the free regions in the boot allocator.
+     */
+    populate_boot_allocator();
+
+    setup_mm_helper();
+
+    init_frametable(ram_start);
+
+    init_staticmem_pages();
+    init_sharedmem_pages();
+}
+#endif
+
+bool flags_has_rwx(unsigned int flags)
+{
+    /*
+     * The hardware was configured to forbid mapping both writable and
+     * executable.
+     * When modifying/creating mapping (i.e _PAGE_PRESENT is set),
+     * prevent any update if this happen.
+     */
+    if ( (flags & _PAGE_PRESENT) && !PAGE_RO_MASK(flags) &&
+         !PAGE_XN_MASK(flags) )
+        return true;
+    else
+        return false;
+}
 
 void flush_page_to_ram(unsigned long mfn, bool sync_icache)
 {
@@ -48,10 +106,9 @@ int steal_page(
     return -EOPNOTSUPP;
 }
 
-int page_is_ram_type(unsigned long mfn, unsigned long mem_type)
+bool page_is_offlinable(mfn_t mfn)
 {
-    ASSERT_UNREACHABLE();
-    return 0;
+    return false;
 }
 
 unsigned long domain_get_maximum_gpfn(struct domain *d)
@@ -409,6 +466,11 @@ unsigned long get_upper_mfn_bound(void)
 {
     /* No memory hotplug yet, so current memory limit is the final one. */
     return max_page - 1;
+}
+
+void *ioremap(paddr_t pa, size_t len)
+{
+    return ioremap_attr(pa, len, PAGE_HYPERVISOR_NOCACHE);
 }
 
 /*

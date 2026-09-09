@@ -8,6 +8,7 @@
 #ifndef __XEN_TIME_H__
 #define __XEN_TIME_H__
 
+#include <xen/muldiv64.h>
 #include <xen/types.h>
 #include <public/xen.h>
 
@@ -32,7 +33,6 @@ struct vcpu;
 typedef int64_t s_time_t;
 #define PRI_stime PRId64
 
-s_time_t get_s_time_fixed(u64 at_tick);
 s_time_t get_s_time(void);
 unsigned long get_localtime(struct domain *d);
 uint64_t get_localtime_us(struct domain *d);
@@ -53,7 +53,7 @@ struct tm gmtime(unsigned long t);
 struct tm wallclock_time(uint64_t *ns);
 
 #define SYSTEM_TIME_HZ  1000000000ULL
-#define NOW()           ((s_time_t)get_s_time())
+#define NOW()           get_s_time()
 #define DAYS(_d)        SECONDS((_d) * 86400ULL)
 #define SECONDS(_s)     ((s_time_t)((_s)  * 1000000000ULL))
 #define MILLISECS(_ms)  ((s_time_t)((_ms) * 1000000ULL))
@@ -74,6 +74,16 @@ extern void do_settime(
 extern void send_timer_event(struct vcpu *v);
 
 void domain_set_time_offset(struct domain *d, int64_t time_offset_seconds);
+
+static inline s_time_t ticks_to_ns(uint64_t ticks)
+{
+    return muldiv64(ticks, MILLISECS(1), cpu_khz);
+}
+
+static inline uint64_t ns_to_ticks(s_time_t ns)
+{
+    return muldiv64(ns, cpu_khz, MILLISECS(1));
+}
 
 #include <asm/time.h>
 

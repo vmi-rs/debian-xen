@@ -1,15 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Device Tree
  *
  * Copyright (C) 2012 Citrix Systems, Inc.
  * Copyright 2009 Benjamin Herrenschmidt, IBM Corp
  * benh@kernel.crashing.org
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
+#include <xen/bitops.h>
+#include <xen/bootfdt.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/guest_access.h>
@@ -24,6 +23,7 @@
 #include <xen/ctype.h>
 #include <asm/setup.h>
 #include <xen/err.h>
+#include <xen/resource.h>
 
 const void *device_tree_flattened;
 dt_irq_xlate_func dt_irq_xlate;
@@ -172,7 +172,7 @@ bool dt_property_read_u32(const struct dt_device_node *np,
     if ( !val || len < sizeof(*out_value) )
         return 0;
 
-    *out_value = be32_to_cpup(val);
+    *out_value = be32_to_cpu(*val);
 
     return 1;
 }
@@ -265,7 +265,7 @@ int dt_property_read_variable_u32_array(const struct dt_device_node *np,
 
     count = sz;
     while ( count-- )
-        *out_values++ = be32_to_cpup(val++);
+        *out_values++ = be32_to_cpu(*val++);
 
     return sz;
 }
@@ -492,7 +492,7 @@ static int __dt_n_addr_cells(const struct dt_device_node *np, bool parent)
 
         ip = dt_get_property(np, "#address-cells", NULL);
         if ( ip )
-            return be32_to_cpup(ip);
+            return be32_to_cpu(*ip);
     } while ( np->parent );
     /* No #address-cells property for the root node */
     return DT_ROOT_NODE_ADDR_CELLS_DEFAULT;
@@ -509,7 +509,7 @@ static int __dt_n_size_cells(const struct dt_device_node *np, bool parent)
 
         ip = dt_get_property(np, "#size-cells", NULL);
         if ( ip )
-            return be32_to_cpup(ip);
+            return be32_to_cpu(*ip);
     } while ( np->parent );
     /* No #address-cells property for the root node */
     return DT_ROOT_NODE_SIZE_CELLS_DEFAULT;
@@ -536,29 +536,9 @@ int dt_child_n_size_cells(const struct dt_device_node *parent)
 }
 
 /*
- * These are defined in Linux where much of this code comes from, but
- * are currently unused outside this file in the context of Xen.
- */
-#define IORESOURCE_BITS         0x000000ff      /* Bus-specific bits */
-
-#define IORESOURCE_TYPE_BITS    0x00001f00      /* Resource type */
-#define IORESOURCE_IO           0x00000100      /* PCI/ISA I/O ports */
-#define IORESOURCE_MEM          0x00000200
-#define IORESOURCE_REG          0x00000300      /* Register offsets */
-#define IORESOURCE_IRQ          0x00000400
-#define IORESOURCE_DMA          0x00000800
-#define IORESOURCE_BUS          0x00001000
-
-#define IORESOURCE_PREFETCH     0x00002000      /* No side effects */
-#define IORESOURCE_READONLY     0x00004000
-#define IORESOURCE_CACHEABLE    0x00008000
-#define IORESOURCE_RANGELENGTH  0x00010000
-#define IORESOURCE_SHADOWABLE   0x00020000
-
-/*
  * Default translator (generic bus)
  */
-static bool dt_bus_default_match(const struct dt_device_node *node)
+static bool cf_check dt_bus_default_match(const struct dt_device_node *node)
 {
     /* Root node doesn't have "ranges" property */
     if ( node->parent == NULL )
@@ -570,8 +550,8 @@ static bool dt_bus_default_match(const struct dt_device_node *node)
     return (dt_get_property(node, "ranges", NULL) != NULL);
 }
 
-static void dt_bus_default_count_cells(const struct dt_device_node *dev,
-                                int *addrc, int *sizec)
+static void cf_check dt_bus_default_count_cells(
+    const struct dt_device_node *dev, int *addrc, int *sizec)
 {
     if ( addrc )
         *addrc = dt_n_addr_cells(dev);
@@ -579,8 +559,8 @@ static void dt_bus_default_count_cells(const struct dt_device_node *dev,
         *sizec = dt_n_size_cells(dev);
 }
 
-static u64 dt_bus_default_map(__be32 *addr, const __be32 *range,
-                              int na, int ns, int pna)
+static u64 cf_check dt_bus_default_map(__be32 *addr, const __be32 *range,
+                                       int na, int ns, int pna)
 {
     u64 cp, s, da;
 
@@ -605,7 +585,7 @@ static u64 dt_bus_default_map(__be32 *addr, const __be32 *range,
     return da - cp;
 }
 
-static int dt_bus_default_translate(__be32 *addr, u64 offset, int na)
+static int cf_check dt_bus_default_translate(__be32 *addr, u64 offset, int na)
 {
     u64 a = dt_read_number(addr, na);
 
@@ -617,7 +597,7 @@ static int dt_bus_default_translate(__be32 *addr, u64 offset, int na)
 
     return 0;
 }
-static unsigned int dt_bus_default_get_flags(const __be32 *addr)
+static unsigned int cf_check dt_bus_default_get_flags(const __be32 *addr)
 {
     return IORESOURCE_MEM;
 }
@@ -636,7 +616,7 @@ static bool dt_node_is_pci(const struct dt_device_node *np)
     return is_pci;
 }
 
-static bool dt_bus_pci_match(const struct dt_device_node *np)
+static bool cf_check dt_bus_pci_match(const struct dt_device_node *np)
 {
     /*
      * "pciex" is PCI Express "vci" is for the /chaos bridge on 1st-gen PCI
@@ -650,8 +630,8 @@ static bool dt_bus_pci_match(const struct dt_device_node *np)
         dt_node_is_pci(np);
 }
 
-static void dt_bus_pci_count_cells(const struct dt_device_node *np,
-				   int *addrc, int *sizec)
+static void cf_check dt_bus_pci_count_cells(const struct dt_device_node *np,
+				                                    int *addrc, int *sizec)
 {
     if (addrc)
         *addrc = 3;
@@ -659,10 +639,10 @@ static void dt_bus_pci_count_cells(const struct dt_device_node *np,
         *sizec = 2;
 }
 
-static unsigned int dt_bus_pci_get_flags(const __be32 *addr)
+static unsigned int cf_check dt_bus_pci_get_flags(const __be32 *addr)
 {
     unsigned int flags = 0;
-    u32 w = be32_to_cpup(addr);
+    u32 w = be32_to_cpu(*addr);
 
     switch((w >> 24) & 0x03) {
     case 0x01:
@@ -678,8 +658,8 @@ static unsigned int dt_bus_pci_get_flags(const __be32 *addr)
     return flags;
 }
 
-static u64 dt_bus_pci_map(__be32 *addr, const __be32 *range, int na, int ns,
-		int pna)
+static u64 cf_check dt_bus_pci_map(__be32 *addr, const __be32 *range,
+                                   int na, int ns, int pna)
 {
     u64 cp, s, da;
     unsigned int af, rf;
@@ -705,7 +685,7 @@ static u64 dt_bus_pci_map(__be32 *addr, const __be32 *range, int na, int ns,
     return da - cp;
 }
 
-static int dt_bus_pci_translate(__be32 *addr, u64 offset, int na)
+static int cf_check dt_bus_pci_translate(__be32 *addr, u64 offset, int na)
 {
     return dt_bus_default_translate(addr + 1, offset, na - 1);
 }
@@ -1115,7 +1095,7 @@ dt_irq_find_parent(const struct dt_device_node *child)
         if ( parp == NULL )
             p = dt_get_parent(child);
         else
-            p = dt_find_node_by_phandle(be32_to_cpup(parp));
+            p = dt_find_node_by_phandle(be32_to_cpu(*parp));
         child = p;
     } while ( p && dt_get_property(p, "#interrupt-cells", NULL) == NULL );
 
@@ -1148,7 +1128,7 @@ unsigned int dt_number_of_irq(const struct dt_device_node *device)
     intlen /= sizeof(*intspec);
 
     dt_dprintk(" using 'interrupts' property\n");
-    dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpup(intspec), intlen);
+    dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpu(*intspec), intlen);
 
     /* Look for the interrupt parent. */
     p = dt_irq_find_parent(device);
@@ -1279,7 +1259,7 @@ int dt_for_each_irq_map(const struct dt_device_node *dev,
         imaplen -= addrsize + intsize;
 
         /* Get the interrupt parent */
-        ipar = dt_find_node_by_phandle(be32_to_cpup(imap));
+        ipar = dt_find_node_by_phandle(be32_to_cpu(*imap));
         imap++;
         --imaplen;
 
@@ -1396,8 +1376,8 @@ static int dt_irq_map_raw(const struct dt_device_node *parent,
     int match, i;
 
     dt_dprintk("dt_irq_map_raw: par=%s,intspec=[0x%08x 0x%08x...],ointsize=%d\n",
-               parent->full_name, be32_to_cpup(intspec),
-               be32_to_cpup(intspec + 1), ointsize);
+               parent->full_name, be32_to_cpu(*intspec),
+               be32_to_cpu(*(intspec+1)), ointsize);
 
     ipar = parent;
 
@@ -1509,7 +1489,7 @@ static int dt_irq_map_raw(const struct dt_device_node *parent,
             dt_dprintk(" -> match=%d (imaplen=%d)\n", match, imaplen);
 
             /* Get the interrupt parent */
-            newpar = dt_find_node_by_phandle(be32_to_cpup(imap));
+            newpar = dt_find_node_by_phandle(be32_to_cpu(*imap));
             imap++;
             --imaplen;
 
@@ -1603,7 +1583,7 @@ int dt_device_get_raw_irq(const struct dt_device_node *device,
     intlen /= sizeof(*intspec);
 
     dt_dprintk(" using 'interrupts' property\n");
-    dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpup(intspec), intlen);
+    dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpu(*intspec), intlen);
 
     /* Look for the interrupt parent. */
     p = dt_irq_find_parent(device);
@@ -1714,7 +1694,7 @@ static int __dt_parse_phandle_with_args(const struct dt_device_node *np,
          * If phandle is 0, then it is an empty entry with no
          * arguments.  Skip forward to the next entry.
          * */
-        phandle = be32_to_cpup(list++);
+        phandle = be32_to_cpu(*list++);
         if ( phandle )
         {
             /*
@@ -1783,7 +1763,7 @@ static int __dt_parse_phandle_with_args(const struct dt_device_node *np,
                 out_args->np = node;
                 out_args->args_count = count;
                 for ( i = 0; i < count; i++ )
-                    out_args->args[i] = be32_to_cpup(list++);
+                    out_args->args[i] = be32_to_cpu(*list++);
             }
 
             /* Found it! return success */
@@ -1864,7 +1844,7 @@ static unsigned long unflatten_dt_node(const void *fdt,
     int has_name = 0;
     int new_format = 0;
 
-    tag = be32_to_cpup((__be32 *)(*p));
+    tag = be32_to_cpu(*(__be32 *)(*p));
     if ( tag != FDT_BEGIN_NODE )
     {
         printk(XENLOG_WARNING "Weird tag at start of node: %x\n", tag);
@@ -1957,7 +1937,7 @@ static unsigned long unflatten_dt_node(const void *fdt,
         u32 sz, noff;
         const char *pname;
 
-        tag = be32_to_cpup((__be32 *)(*p));
+        tag = be32_to_cpu(*(__be32 *)(*p));
         if ( tag == FDT_NOP )
         {
             *p += 4;
@@ -1966,8 +1946,8 @@ static unsigned long unflatten_dt_node(const void *fdt,
         if ( tag != FDT_PROP )
             break;
         *p += 4;
-        sz = be32_to_cpup((__be32 *)(*p));
-        noff = be32_to_cpup((__be32 *)((*p) + 4));
+        sz = be32_to_cpu(*(__be32 *)(*p));
+        noff = be32_to_cpu(*(__be32 *)((*p) + 4));
         *p += 8;
         if ( fdt_version(fdt) < 0x10 )
             *p = ROUNDUP(*p, sz >= 8 ? 8 : 4);
@@ -1994,13 +1974,13 @@ static unsigned long unflatten_dt_node(const void *fdt,
                  (strcmp(pname, "linux,phandle") == 0) )
             {
                 if ( np->phandle == 0 )
-                    np->phandle = be32_to_cpup((__be32*)*p);
+                    np->phandle = be32_to_cpu(*(__be32*)*p);
             }
             /* And we process the "ibm,phandle" property
              * used in pSeries dynamic device tree
              * stuff */
             if ( strcmp(pname, "ibm,phandle") == 0 )
-                np->phandle = be32_to_cpup((__be32 *)*p);
+                np->phandle = be32_to_cpu(*(__be32 *)*p);
             pp->name = pname;
             pp->length = sz;
             pp->value = (void *)*p;
@@ -2050,9 +2030,11 @@ static unsigned long unflatten_dt_node(const void *fdt,
             ((char *)pp->value)[sz - 1] = 0;
             dt_dprintk("fixed up name for %s -> %s\n", pathp,
                        (char *)pp->value);
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
             /* Generic device initialization */
             np->dev.type = DEV_DT;
             np->dev.of_node = np;
+#endif /* CONFIG_HAS_DEVICE_TREE_DISCOVERY */
         }
     }
     if ( allnextpp )
@@ -2072,7 +2054,7 @@ static unsigned long unflatten_dt_node(const void *fdt,
             *p += 4;
         else
             mem = unflatten_dt_node(fdt, mem, p, np, allnextpp, fpsize);
-        tag = be32_to_cpup((__be32 *)(*p));
+        tag = be32_to_cpu(*(__be32 *)(*p));
     }
     if ( tag != FDT_END_NODE )
     {
@@ -2118,7 +2100,7 @@ int unflatten_device_tree(const void *fdt, struct dt_device_node **mynodes)
     /* Second pass, do actual unflattening */
     start = ((unsigned long)fdt) + fdt_off_dt_struct(fdt);
     unflatten_dt_node(fdt, mem, &start, NULL, &allnextp, 0);
-    if ( be32_to_cpup((__be32 *)start) != FDT_END )
+    if ( be32_to_cpu(*(__be32 *)start) != FDT_END )
     {
         printk(XENLOG_ERR "Weird tag at end of tree: %08x\n",
                   *((u32 *)start));
@@ -2241,6 +2223,96 @@ int dt_get_pci_domain_nr(struct dt_device_node *node)
         return -EINVAL;
 
     return (u16)domain;
+}
+
+int dt_map_id(const struct dt_device_node *np, uint32_t id,
+              const char *map_name, const char *map_mask_name,
+              struct dt_device_node **target, uint32_t *id_out)
+{
+    uint32_t map_mask, masked_id, map_len;
+    const __be32 *map = NULL;
+
+    if ( !np || !map_name || (!target && !id_out) )
+        return -EINVAL;
+
+    map = dt_get_property(np, map_name, &map_len);
+    if ( !map )
+    {
+        if ( target )
+            return -ENODEV;
+
+        /* Otherwise, no map implies no translation */
+        *id_out = id;
+        return 0;
+    }
+
+    if ( !map_len || (map_len % (4 * sizeof(*map))) )
+    {
+        printk(XENLOG_ERR "%s(): %s: Error: Bad %s length: %u\n", __func__,
+               np->full_name, map_name, map_len);
+        return -EINVAL;
+    }
+
+    /* The default is to select all bits. */
+    map_mask = GENMASK(31, 0);
+
+    /*
+     * Can be overridden by "{iommu,msi}-map-mask" property.
+     * If dt_property_read_u32() fails, the default is used.
+     */
+    if ( map_mask_name )
+        dt_property_read_u32(np, map_mask_name, &map_mask);
+
+    masked_id = map_mask & id;
+    for ( ; map_len > 0; map_len -= 4 * sizeof(*map), map += 4 )
+    {
+        struct dt_device_node *phandle_node;
+        uint32_t id_base = be32_to_cpu(*(map + 0));
+        uint32_t phandle = be32_to_cpu(*(map + 1));
+        uint32_t out_base = be32_to_cpu(*(map + 2));
+        uint32_t id_len = be32_to_cpu(*(map + 3));
+
+        if ( id_base & ~map_mask )
+        {
+            printk(XENLOG_ERR "%s(): %s: Invalid %s translation - %s-mask (0x%"PRIx32") ignores id-base (0x%"PRIx32")\n",
+                   __func__, np->full_name, map_name, map_name, map_mask,
+                   id_base);
+            return -EFAULT;
+        }
+
+        if ( (masked_id < id_base) || (masked_id >= (id_base + id_len)) )
+            continue;
+
+        phandle_node = dt_find_node_by_phandle(phandle);
+        if ( !phandle_node )
+            return -ENODEV;
+
+        if ( target )
+        {
+            if ( !*target )
+                *target = phandle_node;
+
+            if ( *target != phandle_node )
+                continue;
+        }
+
+        if ( id_out )
+            *id_out = masked_id - id_base + out_base;
+
+        dprintk(XENLOG_DEBUG, "%s: %s, using mask %08"PRIx32", id-base: %08"PRIx32", out-base: %08"PRIx32", length: %08"PRIx32", id: %08"PRIx32" -> %08"PRIx32"\n",
+               np->full_name, map_name, map_mask, id_base, out_base, id_len, id,
+               masked_id - id_base + out_base);
+        return 0;
+    }
+
+    dprintk(XENLOG_DEBUG, "%s: no %s translation for id 0x%"PRIx32" on %s\n",
+           np->full_name, map_name, id,
+           (target && *target) ? (*target)->full_name : NULL);
+
+    if ( id_out )
+        *id_out = id;
+
+    return 0;
 }
 
 /*

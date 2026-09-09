@@ -29,13 +29,32 @@ config LD_IS_GNU
 config LD_IS_LLVM
 	def_bool $(success,$(LD) --version | head -n 1 | grep -q "^LLD")
 
-# -fvisibility=hidden reduces -fpic cost, if it's available
-config CC_HAS_VISIBILITY_ATTRIBUTE
-	def_bool $(cc-option,-fvisibility=hidden)
+config CC_HAS_ASM_INLINE
+	# GCC >= 9, Clang >= 11
+	def_bool $(success,echo 'void foo(void) { asm inline (""); }' | $(CC) -x c - -c -o /dev/null)
 
 # Use -f{function,data}-sections compiler parameters
 config CC_SPLIT_SECTIONS
 	bool
+
+# Fixed in GCC 14, 13.3, 12.4 and 11.5
+# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113921
+config GCC_ASM_GOTO_OUTPUT_BROKEN
+	bool
+	depends on CC_IS_GCC
+	default y if GCC_VERSION < 110500
+	default y if GCC_VERSION >= 120000 && GCC_VERSION < 120400
+	default y if GCC_VERSION >= 130000 && GCC_VERSION < 130300
+
+config CC_HAS_ASM_GOTO_OUTPUT
+	def_bool y
+	depends on !GCC_ASM_GOTO_OUTPUT_BROKEN
+	depends on $(success,echo 'int foo(int x) { asm goto ("": "=r"(x) ::: bar); return x; bar: return 0; }' | $(CC) -x c - -c -o /dev/null)
+
+# Compiler supports Modified Condition/Decision Coverage (MC/DC).
+config CC_HAS_MCDC
+	# GCC >= 14, or Clang >= 18
+	def_bool $(cc-option,-fcondition-coverage) || $(cc-option,-fprofile-instr-generate -fcoverage-mapping -fcoverage-mcdc)
 
 # Set code alignment.
 #

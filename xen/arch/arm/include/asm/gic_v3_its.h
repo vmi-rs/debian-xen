@@ -110,6 +110,9 @@
 #define HOST_ITS_FLUSH_CMD_QUEUE        (1U << 0)
 #define HOST_ITS_USES_PTA               (1U << 1)
 
+#define HOST_ITS_WORKAROUND_NC_NS       (1U << 0)
+#define HOST_ITS_WORKAROUND_32BIT_ADDR  (1U << 1)
+
 /* We allocate LPIs on the hosts in chunks of 32 to reduce handling overhead. */
 #define LPI_BLOCK                       32U
 
@@ -128,6 +131,8 @@ struct host_its {
     unsigned int flags;
 };
 
+/* Map a collection for this host CPU to each host ITS. */
+int gicv3_its_setup_collection(unsigned int cpu);
 
 #ifdef CONFIG_HAS_ITS
 
@@ -156,9 +161,6 @@ int gicv3_its_init(void);
 /* Store the physical address and ID for each redistributor as read from DT. */
 void gicv3_set_redist_address(paddr_t address, unsigned int redist_id);
 uint64_t gicv3_get_redist_address(unsigned int cpu, bool use_pta);
-
-/* Map a collection for this host CPU to each host ITS. */
-int gicv3_its_setup_collection(unsigned int cpu);
 
 /* Initialize and destroy the per-domain parts of the virtual ITS support. */
 int vgic_v3_its_init_domain(struct domain *d);
@@ -196,6 +198,11 @@ struct pending_irq *gicv3_assign_guest_event(struct domain *d,
                                              uint32_t virt_lpi);
 void gicv3_lpi_update_host_entry(uint32_t host_lpi, int domain_id,
                                  uint32_t virt_lpi);
+
+/* ITS quirks handling. */
+uint64_t gicv3_its_get_cacheability(void);
+uint64_t gicv3_its_get_shareability(void);
+unsigned int gicv3_its_get_memflags(void);
 
 #else
 
@@ -246,12 +253,6 @@ static inline int gicv3_its_init(void)
 static inline void gicv3_set_redist_address(paddr_t address,
                                             unsigned int redist_id)
 {
-}
-
-static inline int gicv3_its_setup_collection(unsigned int cpu)
-{
-    /* We should never get here without an ITS. */
-    BUG();
 }
 
 static inline int vgic_v3_its_init_domain(struct domain *d)

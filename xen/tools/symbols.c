@@ -38,12 +38,15 @@
 
 struct sym_entry {
 	unsigned long long addr;
+	unsigned long size;
 	unsigned int len;
+	unsigned int orig_idx;
 	unsigned char *sym;
 	char *orig_symbol;
 	unsigned int addr_idx;
 	unsigned int stream_offset;
 	unsigned char type;
+	bool typed;
 };
 #define SYMBOL_NAME(s) ((char *)(s)->sym + 1)
 
@@ -88,6 +91,8 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 	static char *filename;
 	int rc = -1;
 
+	s->size = 0;
+
 	switch (input_format) {
 	case fmt_bsd:
 		rc = fscanf(in, "%llx %c %499s\n", &s->addr, &stype, str);
@@ -97,8 +102,12 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 			/* nothing */;
 		rc = fscanf(in, "%499[^ |] |%llx | %c |",
 			    str, &s->addr, &stype);
-		if (rc == 3 && fscanf(in, " %19[^ |] |", type) != 1)
-			*type = '\0';
+		if (rc == 3) {
+			if(fscanf(in, " %19[^ |] |", type) != 1)
+				*type = '\0';
+			else if(fscanf(in, "%lx |", &s->size) != 1)
+				s->size = 0;
+		}
 		break;
 	}
 	if (rc != 3) {
@@ -157,6 +166,10 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 	else if (str[0] == '$')
 		goto skip_tail;
 
+	/* We want fake "end" symbols only for text / code. */
+	if (toupper((uint8_t)stype) != 'T')
+		s->size = 0;
+
 	/* include the type field in the symbol name, so that it gets
 	 * compressed together */
 	s->len = strlen(str) + 1;
@@ -169,11 +182,13 @@ static int read_symbol(FILE *in, struct sym_entry *s)
 		*sym++ = '#';
 	}
 	strcpy(sym, str);
-	if (sort_by_name || map_only) {
+	if (sort_by_name || map_only)
 		s->orig_symbol = strdup(SYMBOL_NAME(s));
-		s->type = stype; /* As s->sym[0] ends mangled. */
-	}
+	s->type = stype; /* As s->sym[0] may end up mangled. */
 	s->sym[0] = stype;
+	s->typed = strcmp(type, "FUNC") == 0 ||
+	           strcmp(type, "OBJECT") == 0 ||
+	           strcmp(type, "Function") == 0;
 	rc = 0;
 
  skip_tail:
@@ -238,22 +253,34 @@ static void read_map(FILE *in)
 				exit (1);
 			}
 		}
+
+		table[table_cnt].orig_idx = table_cnt;
+
 		if (read_symbol(in, &table[table_cnt]) == 0)
 			table_cnt++;
 	}
 }
 
-static void output_label(char *label)
+static void output_label(const char *label, const char *align, bool keep)
 {
-	if (symbol_prefix_char)
-		printf(".globl %c%s\n", symbol_prefix_char, label);
-	else
-		printf(".globl %s\n", label);
-	printf("\tALGN\n");
-	if (symbol_prefix_char)
-		printf("%c%s:\n", symbol_prefix_char, label);
-	else
-		printf("%s:\n", label);
+	static bool pending;
+
+	if (pending && !keep) {
+		printf("END(CURRENT)\n");
+		printf("#undef CURRENT\n\n");
+	}
+
+	pending = label;
+	if (!label)
+		return;
+
+	if (symbol_prefix_char) {
+		printf("DATA(%c%s, %s)\n", symbol_prefix_char, label, align);
+		printf("#define CURRENT %c%s\n", symbol_prefix_char, label);
+	} else {
+		printf("DATA(%s, %s)\n", label, align);
+		printf("#define CURRENT %s\n", label);
+	}
 }
 
 /* uncompress a compressed symbol. When this function is called, the best table
@@ -298,9 +325,18 @@ static int compare_name_orig(const void *p1, const void *p2)
 	return rc;
 }
 
+/* Determine whether the symbol at address table @idx wants a fake END
+ * symbol (address only) emitted as well. */
+static bool want_symbol_end(unsigned int idx)
+{
+	return table[idx].size &&
+	       (idx + 1 == table_cnt ||
+	        table[idx].addr + table[idx].size < table[idx + 1].addr);
+}
+
 static void write_src(void)
 {
-	unsigned int i, k, off;
+	unsigned int i, k, off, ends;
 	unsigned int best_idx[256];
 	unsigned int *markers;
 	char buf[KSYM_NAME_LEN+1];
@@ -312,13 +348,13 @@ static void write_src(void)
 
 		return;
 	}
-	printf("#include <xen/config.h>\n");
+	printf("#include <xen/linkage.h>\n");
 	printf("#if BITS_PER_LONG == 64 && !defined(SYMBOLS_ORIGIN)\n");
 	printf("#define PTR .quad\n");
-	printf("#define ALGN .align 8\n");
+	printf("#define ALGN 8\n");
 	printf("#else\n");
 	printf("#define PTR .long\n");
-	printf("#define ALGN .align 4\n");
+	printf("#define ALGN 4\n");
 	printf("#endif\n");
 
 	printf("\t.file \"%s\"\n", srcname);
@@ -326,28 +362,44 @@ static void write_src(void)
 
 	printf("#ifndef SYMBOLS_ORIGIN\n");
 	printf("#define SYMBOLS_ORIGIN 0\n");
-	output_label("symbols_addresses");
+	output_label("symbols_addresses", "ALGN", false);
 	printf("#else\n");
-	output_label("symbols_offsets");
+	output_label("symbols_offsets", "ALGN", true);
 	printf("#endif\n");
-	for (i = 0; i < table_cnt; i++) {
+	for (i = 0, ends = 0; i < table_cnt; i++) {
 		printf("\tPTR\t%#llx - SYMBOLS_ORIGIN\n", table[i].addr);
-	}
-	printf("\n");
 
-	output_label("symbols_num_syms");
-	printf("\t.long\t%d\n", table_cnt);
-	printf("\n");
+		table[i].addr_idx = i + ends;
+
+		if (!want_symbol_end(i)) {
+			/* If there's another symbol at the same address,
+			 * propagate this symbol's size if the next one has
+			 * no size, or if the next one's size is larger. */
+			if (table[i].size &&
+			    i + 1 < table_cnt &&
+			    table[i + 1].addr == table[i].addr &&
+			    (!table[i + 1].size ||
+			     table[i + 1].size > table[i].size))
+				table[i + 1].size = table[i].size;
+			continue;
+		}
+
+		++ends;
+		printf("\tPTR\t%#llx - SYMBOLS_ORIGIN\n",
+		       table[i].addr + table[i].size);
+	}
+
+	output_label("symbols_num_addrs", "4", false);
+	printf("\t.long\t%d\n", table_cnt + ends);
 
 	/* table of offset markers, that give the offset in the compressed stream
 	 * every 256 symbols */
-	markers = (unsigned int *) malloc(sizeof(unsigned int) * ((table_cnt + 255) / 256));
+	markers = malloc(sizeof(*markers) * ((table_cnt + ends + 255) >> 8));
 
-	output_label("symbols_names");
-	off = 0;
-	for (i = 0; i < table_cnt; i++) {
-		if ((i & 0xFF) == 0)
-			markers[i >> 8] = off;
+	output_label("symbols_names", "1", false);
+	for (i = 0, off = 0, ends = 0; i < table_cnt; i++) {
+		if (((i + ends) & 0xFF) == 0)
+			markers[(i + ends) >> 8] = off;
 
 		printf("\t.byte 0x%02x", table[i].len);
 		for (k = 0; k < table[i].len; k++)
@@ -356,16 +408,24 @@ static void write_src(void)
 
 		table[i].stream_offset = off;
 		off += table[i].len + 1;
+
+		if (!want_symbol_end(i))
+			continue;
+
+		/* END symbols have no name or type. */
+		++ends;
+		if (((i + ends) & 0xFF) == 0)
+			markers[(i + ends) >> 8] = off;
+
+		printf("\t.byte 0\n");
+		++off;
 	}
-	printf("\n");
 
-	output_label("symbols_markers");
-	for (i = 0; i < ((table_cnt + 255) >> 8); i++)
+	output_label("symbols_markers", "4", false);
+	for (i = 0; i < ((table_cnt + ends + 255) >> 8); i++)
 		printf("\t.long\t%d\n", markers[i]);
-	printf("\n");
 
-
-	output_label("symbols_token_table");
+	output_label("symbols_token_table", "1", false);
 	off = 0;
 	for (i = 0; i < 256; i++) {
 		best_idx[i] = off;
@@ -373,30 +433,27 @@ static void write_src(void)
 		printf("\t.asciz\t\"%s\"\n", buf);
 		off += strlen(buf) + 1;
 	}
-	printf("\n");
 
-	output_label("symbols_token_index");
+	output_label("symbols_token_index", "2", false);
 	for (i = 0; i < 256; i++)
 		printf("\t.short\t%d\n", best_idx[i]);
-	printf("\n");
 
-	if (!sort_by_name) {
-		free(markers);
-		return;
+	if (sort_by_name) {
+		output_label("symbols_num_names", "4", false);
+		printf("\t.long\t%d\n", table_cnt);
+
+		/* Sorted by original symbol names and type. */
+		qsort(table, table_cnt, sizeof(*table), compare_name_orig);
+
+		/* A fixed sized array with two entries: offset in the
+		 * compressed stream (for symbol name), and offset in
+		 * symbols_addresses (or symbols_offset). */
+		output_label("symbols_sorted_offsets", "4", false);
+		for (i = 0; i < table_cnt; i++)
+			printf("\t.long %u, %u\n", table[i].stream_offset, table[i].addr_idx);
 	}
 
-	/* Sorted by original symbol names and type. */
-	qsort(table, table_cnt, sizeof(*table), compare_name_orig);
-
-	output_label("symbols_sorted_offsets");
-	/* A fixed sized array with two entries: offset in the
-	 * compressed stream (for symbol name), and offset in
-	 * symbols_addresses (or symbols_offset). */
-	for (i = 0; i < table_cnt; i++) {
-		printf("\t.long %u, %u\n", table[i].stream_offset, table[i].addr_idx);
-	}
-	printf("\n");
-
+	output_label(NULL, NULL, false);
 	free(markers);
 }
 
@@ -458,7 +515,6 @@ static void compress_symbols(unsigned char *str, int idx)
 		len = table[i].len;
 		p1 = table[i].sym;
 
-		table[i].addr_idx = i;
 		/* find the token on the symbol */
 		p2 = memmem_pvt(p1, len, str, 2);
 		if (!p2) continue;
@@ -577,12 +633,23 @@ static int compare_value(const void *p1, const void *p2)
 		return -1;
 	if (sym1->addr > sym2->addr)
 		return +1;
+
+	/* Prefer symbols which have a type. */
+	if (sym1->typed && !sym2->typed)
+		return -1;
+	if (sym2->typed && !sym1->typed)
+		return +1;
+
 	/* Prefer global symbols. */
 	if (isupper(*sym1->sym))
 		return -1;
 	if (isupper(*sym2->sym))
 		return +1;
-	return 0;
+
+	/* Explicitly request "keep original order" otherwise. */
+	if (sym1->orig_idx < sym2->orig_idx)
+		return -1;
+	return sym1->orig_idx > sym2->orig_idx;
 }
 
 static int compare_name(const void *p1, const void *p2)
@@ -620,7 +687,10 @@ int main(int argc, char **argv)
 				warn_dup = true;
 			else if (strcmp(argv[i], "--error-dup") == 0)
 				warn_dup = error_dup = true;
-			else if (strcmp(argv[i], "--xensyms") == 0)
+			else if (strcmp(argv[i], "--empty") == 0) {
+				write_src();
+				return 0;
+			} else if (strcmp(argv[i], "--xensyms") == 0)
 				map_only = true;
 			else
 				usage();

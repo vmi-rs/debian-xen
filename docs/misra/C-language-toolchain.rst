@@ -86,12 +86,16 @@ The table columns are as follows:
           see Sections "6.48 Alternate Keywords" and "6.47.2.1 Volatile" of GCC_MANUAL.
        __const__:
           see Section "6.48 Alternate Keywords" of GCC_MANUAL.
+       __inline, __inline__:
+          see Section "6.48 Alternate Keywords" of GCC_MANUAL.
        typeof, __typeof__:
           see Section "6.7 Referring to a Type with typeof" of GCC_MANUAL.
        __alignof__, __alignof:
           see Sections "6.48 Alternate Keywords" and "6.44 Determining the Alignment of Functions, Types or Variables" of GCC_MANUAL.
        __attribute__:
           see Section "6.39 Attribute Syntax" of GCC_MANUAL.
+       __auto_type:
+          see Section "6.7 Referring to a Type with typeof" of GCC_MANUAL.
        __builtin_types_compatible_p:
           see Section "6.59 Other Built-in Functions Provided by GCC" of GCC_MANUAL.
        __builtin_va_arg:
@@ -211,6 +215,14 @@ The table columns are as follows:
    * - Signed >> acts on negative numbers by sign extension
      - All architectures
      - See Section "4.5 Integers" of GCC_MANUAL.
+
+   * - Taking the address of a label
+     - All architectures
+     - See Section "6.3 Labels as Values" of GCC_MANUAL.
+
+   * - Binary constants
+     - ARM64, X86_64
+     - See Section "6.65 Binary Constants using the '0b' Prefix"
 
 Translation Limits
 __________________
@@ -394,7 +406,7 @@ The table columns are as follows:
      - See Section "4.15 Architecture" of GCC_MANUAL and Section "3.1.2 Data Representation" of X86_64_ABI_MANUAL.
 
    * - Character not in the basic source character set is encountered in a source file, except in an identifier, a character constant, a string literal, a header name, a comment, or a preprocessing token that is never converted to a token
-     - ARM64
+     - ARM64, X86_64
      - UTF-8
      - See Section "1.1 Character sets" of CPP_MANUAL.
        We assume the locale is not restricting any UTF-8 characters being part of the source character set.

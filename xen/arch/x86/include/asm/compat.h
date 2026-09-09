@@ -2,6 +2,9 @@
  * compat.h
  */
 
+#ifndef X86_COMPAT_H
+#define X86_COMPAT_H
+
 #ifdef CONFIG_COMPAT
 
 #define COMPAT_BITS_PER_LONG 32
@@ -13,8 +16,10 @@ typedef unsigned long full_ptr_t;
 
 struct domain;
 #ifdef CONFIG_PV32
-int switch_compat(struct domain *);
+int switch_compat(struct domain *d);
 #else
 #include <xen/errno.h>
 static inline int switch_compat(struct domain *d) { return -EOPNOTSUPP; }
 #endif
+
+#endif /* X86_COMPAT_H */

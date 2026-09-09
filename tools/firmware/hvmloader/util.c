@@ -206,20 +206,18 @@ strtoll(const char *s, char **end, int base)
 
     if ( *s == '\0' ) goto out;
 
-    if ( *s == '0' ) {
+    if ( (base == 0 || base == 16) && *s == '0' ) {
         s++;
         if ( *s == '\0' ) goto out;
 
-        if ( *s == 'x' ) {
-            if ( base != 0 && base != 16) goto out;
+        if ( *s == 'x' || *s == 'X' ) {
             base = 16;
             s++;
         } else {
-            if ( base != 0 && base != 8) goto out;
+            if ( base != 0 ) goto out;
             base = 8;
         }
-    } else {
-        if (base != 0 && base != 10) goto out;
+    } else if ( base == 0 ) {
         base = 10;
     }
 
@@ -827,7 +825,7 @@ static void acpi_mem_free(struct acpi_ctxt *ctxt,
 
 static uint32_t acpi_lapic_id(unsigned cpu)
 {
-    return LAPIC_ID(cpu);
+    return cpu_to_apicid[cpu];
 }
 
 void hvmloader_acpi_build_tables(struct acpi_config *config,
@@ -843,14 +841,7 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
 
     /* If the device model is specified switch to the corresponding tables */
     s = xenstore_read("platform/device-model", "");
-    if ( !strncmp(s, "qemu_xen_traditional", 21) )
-    {
-        config->dsdt_anycpu = dsdt_anycpu;
-        config->dsdt_anycpu_len = dsdt_anycpu_len;
-        config->dsdt_15cpu = dsdt_15cpu;
-        config->dsdt_15cpu_len = dsdt_15cpu_len;
-    }
-    else if ( !strncmp(s, "qemu_xen", 9) )
+    if ( !strncmp(s, "qemu_xen", 9) )
     {
         config->dsdt_anycpu = dsdt_anycpu_qemu_xen;
         config->dsdt_anycpu_len = dsdt_anycpu_qemu_xen_len;
@@ -874,7 +865,7 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
         config->table_flags |= ACPI_HAS_HPET;
 
     config->pci_start = pci_mem_start;
-    config->pci_len = pci_mem_end - pci_mem_start;
+    config->pci_len = RESERVED_MEMBASE - pci_mem_start;
     if ( pci_hi_mem_end > pci_hi_mem_start )
     {
         config->pci_hi_start = pci_hi_mem_start;

@@ -218,6 +218,9 @@ static struct arm_smmu_option_prop arm_smmu_options[] = {
 
 static struct arm_smmu_domain *to_smmu_domain(struct iommu_domain *dom)
 {
+	if ( !dom )
+		return NULL;
+
 	return container_of(dom, struct arm_smmu_domain, domain);
 }
 
@@ -315,7 +318,7 @@ static int queue_poll_cons(struct arm_smmu_queue *q, bool sync, bool wfe)
 
 	while (queue_sync_cons_in(q),
 	      (sync ? !queue_empty(&q->llq) : queue_full(&q->llq))) {
-		if ((NOW() > timeout) > 0)
+		if (NOW() > timeout)
 			return -ETIMEDOUT;
 
 		if (wfe) {
@@ -343,10 +346,14 @@ static void queue_write(__le64 *dst, u64 *src, size_t n_dwords)
 
 static int queue_insert_raw(struct arm_smmu_queue *q, u64 *ent)
 {
+	__le64 *q_addr = Q_ENT(q, q->llq.prod);
+
 	if (queue_full(&q->llq))
 		return -ENOSPC;
 
-	queue_write(Q_ENT(q, q->llq.prod), ent, q->ent_dwords);
+	queue_write(q_addr, ent, q->ent_dwords);
+	if (q->non_coherent)
+		clean_dcache_va_range(q_addr, q->ent_dwords * sizeof(*q_addr));
 	queue_inc_prod(&q->llq);
 	queue_sync_prod_out(q);
 	return 0;
@@ -362,10 +369,15 @@ static void queue_read(u64 *dst, __le64 *src, size_t n_dwords)
 
 static int queue_remove_raw(struct arm_smmu_queue *q, u64 *ent)
 {
+	__le64 *q_addr = Q_ENT(q, q->llq.cons);
+
 	if (queue_empty(&q->llq))
 		return -EAGAIN;
 
-	queue_read(ent, Q_ENT(q, q->llq.cons), q->ent_dwords);
+	if (q->non_coherent)
+		invalidate_dcache_va_range(q_addr, q->ent_dwords * sizeof(*q_addr));
+
+	queue_read(ent, q_addr, q->ent_dwords);
 	queue_inc_cons(&q->llq);
 	queue_sync_cons_out(q);
 	return 0;
@@ -460,6 +472,7 @@ static void arm_smmu_cmdq_skip_err(struct arm_smmu_device *smmu)
 	struct arm_smmu_queue *q = &smmu->cmdq.q;
 	u32 cons = readl_relaxed(q->cons_reg);
 	u32 idx = FIELD_GET(CMDQ_CONS_ERR, cons);
+	__le64 *q_addr = Q_ENT(q, cons);
 	struct arm_smmu_cmdq_ent cmd_sync = {
 		.opcode = CMDQ_OP_CMD_SYNC,
 	};
@@ -486,11 +499,14 @@ static void arm_smmu_cmdq_skip_err(struct arm_smmu_device *smmu)
 		break;
 	}
 
+	if (q->non_coherent)
+		invalidate_dcache_va_range(q_addr, q->ent_dwords * sizeof(*q_addr));
+
 	/*
 	 * We may have concurrent producers, so we need to be careful
 	 * not to touch any of the shadow cmdq state.
 	 */
-	queue_read(cmd, Q_ENT(q, cons), q->ent_dwords);
+	queue_read(cmd, q_addr, q->ent_dwords);
 	dev_err(smmu->dev, "skipping command in error state:\n");
 	for (i = 0; i < ARRAY_SIZE(cmd); ++i)
 		dev_err(smmu->dev, "\t0x%016llx\n", (unsigned long long)cmd[i]);
@@ -501,7 +517,10 @@ static void arm_smmu_cmdq_skip_err(struct arm_smmu_device *smmu)
 		return;
 	}
 
-	queue_write(Q_ENT(q, cons), cmd, q->ent_dwords);
+	queue_write(q_addr, cmd, q->ent_dwords);
+
+	if (q->non_coherent)
+		clean_dcache_va_range(q_addr, q->ent_dwords * sizeof(*q_addr));
 }
 
 static void arm_smmu_cmdq_insert_cmd(struct arm_smmu_device *smmu, u64 *cmd)
@@ -722,15 +741,17 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
 	}
 
 	if (s2_cfg) {
-		BUG_ON(ste_live);
-		dst[2] = cpu_to_le64(
+		u64 strtab =
 			 FIELD_PREP(STRTAB_STE_2_S2VMID, s2_cfg->vmid) |
 			 FIELD_PREP(STRTAB_STE_2_VTCR, s2_cfg->vtcr) |
 #ifdef __BIG_ENDIAN
 			 STRTAB_STE_2_S2ENDI |
 #endif
 			 STRTAB_STE_2_S2PTW | STRTAB_STE_2_S2AA64 |
-			 STRTAB_STE_2_S2R);
+			 STRTAB_STE_2_S2R;
+
+		BUG_ON(ste_live);
+		dst[2] = cpu_to_le64(strtab);
 
 		dst[3] = cpu_to_le64(s2_cfg->vttbr & STRTAB_STE_3_S2TTB_MASK);
 
@@ -1467,14 +1488,37 @@ static bool arm_smmu_sid_in_range(struct arm_smmu_device *smmu, u32 sid)
 }
 /* Forward declaration */
 static struct arm_smmu_device *arm_smmu_get_by_dev(const struct device *dev);
+static int arm_smmu_assign_dev(struct domain *d, u8 devfn, struct device *dev,
+			       u32 flag);
+static int arm_smmu_deassign_dev(struct domain *d, uint8_t devfn,
+				 struct device *dev);
 
 static int arm_smmu_add_device(u8 devfn, struct device *dev)
 {
 	int i, ret;
 	struct arm_smmu_device *smmu;
 	struct arm_smmu_master *master;
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	struct iommu_fwspec *fwspec;
 
+#ifdef CONFIG_HAS_PCI
+	if ( dev_is_pci(dev) )
+	{
+		struct pci_dev *pdev = dev_to_pci(dev);
+		int ret;
+				
+		/* Ignore calls for phantom functions */
+		if ( devfn != pdev->devfn )
+			return 0;
+
+		ret = iommu_add_pci_sideband_ids(pdev);
+		if ( ret < 0 ) {
+			iommu_fwspec_free(dev);
+			return ret;
+		}
+	}
+#endif
+
+	fwspec = dev_iommu_fwspec_get(dev);
 	if (!fwspec)
 		return -ENODEV;
 
@@ -1519,16 +1563,37 @@ static int arm_smmu_add_device(u8 devfn, struct device *dev)
 	 */
 	arm_smmu_enable_pasid(master);
 
-	if (dt_device_is_protected(dev_to_dt(dev))) {
-		dev_err(dev, "Already added to SMMUv3\n");
-		return -EEXIST;
-	}
+	if ( !dev_is_pci(dev) )
+	{
+		if (dt_device_is_protected(dev_to_dt(dev))) {
+			dev_err(dev, "Already added to SMMUv3\n");
+			return -EEXIST;
+		}
 
-	/* Let Xen know that the master device is protected by an IOMMU. */
-	dt_device_set_protected(dev_to_dt(dev));
+		/* Let Xen know that the master device is protected by an IOMMU. */
+		dt_device_set_protected(dev_to_dt(dev));
+	}
 
 	dev_info(dev, "Added master device (SMMUv3 %s StreamIds %u)\n",
 			dev_name(fwspec->iommu_dev), fwspec->num_ids);
+
+#ifdef CONFIG_HAS_PCI
+	if ( dev_is_pci(dev) )
+	{
+		struct pci_dev *pdev = dev_to_pci(dev);
+
+		/*
+		 * During PHYSDEVOP_pci_device_add, Xen does not assign the
+		 * device, so we must do it here.
+		 */
+		if ( pdev->domain )
+		{
+			ret = arm_smmu_assign_dev(pdev->domain, devfn, dev, 0);
+			if (ret)
+				goto err_free_master;
+		}
+	}
+#endif
 
 	return 0;
 
@@ -1585,6 +1650,9 @@ static int __init arm_smmu_init_one_queue(struct arm_smmu_device *smmu,
 	q->q_base |= FIELD_PREP(Q_BASE_LOG2SIZE, q->llq.max_n_shift);
 
 	q->llq.prod = q->llq.cons = 0;
+
+	q->non_coherent = !(smmu->features & ARM_SMMU_FEAT_COHERENCY);
+
 	return 0;
 }
 
@@ -2622,6 +2690,42 @@ static int arm_smmu_assign_dev(struct domain *d, u8 devfn,
 	struct arm_smmu_domain *smmu_domain;
 	struct arm_smmu_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
 
+#ifdef CONFIG_HAS_PCI
+	if ( dev_is_pci(dev) )
+	{
+		struct pci_dev *pdev = dev_to_pci(dev);
+
+		/* Ignore calls for phantom functions */
+		if ( devfn != pdev->devfn )
+			return 0;
+
+		ASSERT(pcidevs_locked());
+
+		write_lock(&pdev->domain->pci_lock);
+		list_del(&pdev->domain_list);
+		write_unlock(&pdev->domain->pci_lock);
+
+		pdev->domain = d;
+
+		write_lock(&d->pci_lock);
+		list_add(&pdev->domain_list, &d->pdev_list);
+		write_unlock(&d->pci_lock);
+
+		/* dom_io is used as a sentinel for quarantined devices */
+		if ( d == dom_io )
+		{
+			struct arm_smmu_master *master = dev_iommu_priv_get(dev);
+			if ( !iommu_quarantine )
+				return 0;
+
+			if ( master && master->domain )
+				ret = arm_smmu_deassign_dev(master->domain->d, devfn, dev);
+		
+			return ret;
+		}
+	}
+#endif
+
 	spin_lock(&xen_domain->lock);
 
 	/*
@@ -2655,15 +2759,30 @@ out:
 	return ret;
 }
 
-static int arm_smmu_deassign_dev(struct domain *d, struct device *dev)
+static int arm_smmu_deassign_dev(struct domain *d, uint8_t devfn, struct device *dev)
 {
 	struct iommu_domain *io_domain = arm_smmu_get_domain(d, dev);
 	struct arm_smmu_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
 	struct arm_smmu_domain *smmu_domain = to_smmu_domain(io_domain);
 	struct arm_smmu_master *master = dev_iommu_priv_get(dev);
 
+#ifdef CONFIG_HAS_PCI
+	if ( dev_is_pci(dev) )
+	{
+		struct pci_dev *pdev = dev_to_pci(dev);
+
+		/* Ignore calls for phantom functions */
+		if ( devfn != pdev->devfn )
+			return 0;
+
+		/* dom_io is used as a sentinel for quarantined devices */
+		if ( d == dom_io )
+			return 0;
+	}
+#endif
+
 	if (!smmu_domain || smmu_domain->d != d) {
-		dev_err(dev, " not attached to domain %d\n", d->domain_id);
+		dev_err(dev, " not attached to %pd\n", d);
 		return -ESRCH;
 	}
 
@@ -2685,14 +2804,16 @@ static int arm_smmu_reassign_dev(struct domain *s, struct domain *t,
 {
 	int ret = 0;
 
-	/* Don't allow remapping on other domain than hwdom */
-	if ( t && !is_hardware_domain(t) )
+	/* Don't allow remapping on other domain than hwdom
+	 * or dom_io for PCI devices
+	 */
+	if ( t && !is_hardware_domain(t) && (t != dom_io || !dev_is_pci(dev)) )
 		return -EPERM;
 
 	if (t == s)
 		return 0;
 
-	ret = arm_smmu_deassign_dev(s, dev);
+	ret = arm_smmu_deassign_dev(s, devfn, dev);
 	if (ret)
 		return ret;
 

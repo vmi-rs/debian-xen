@@ -24,17 +24,17 @@
 void send_guest_vcpu_virq(struct vcpu *v, uint32_t virq);
 
 /*
+ * send_guest_domain_virq:
+ *  @d:        Domain to which VIRQ should be sent
+ *  @virq:     Virtual IRQ number (VIRQ_*), may not be per-vCPU
+ */
+void send_guest_domain_virq(struct domain *d, uint32_t virq);
+
+/*
  * send_global_virq: Notify the domain handling a global VIRQ.
  *  @virq:     Virtual IRQ number (VIRQ_*)
  */
 void send_global_virq(uint32_t virq);
-
-/*
- * send_guest_global_virq:
- *  @d:        Domain to which VIRQ should be sent
- *  @virq:     Virtual IRQ number (VIRQ_*), must be global
- */
-void send_guest_global_virq(struct domain *d, uint32_t virq);
 
 /*
  * sent_global_virq_handler: Set a global VIRQ handler.
@@ -99,6 +99,10 @@ bool evtchn_virq_enabled(const struct vcpu *v, unsigned int virq);
 
 /* Notify remote end of a Xen-attached event channel.*/
 void notify_via_xen_event_channel(struct domain *ld, int lport);
+
+/* Lock/unlock of VIRQ_DOM_EXC associated data (read_lock(d->event_lock)). */
+struct domain *lock_dom_exc_handler(void);
+void unlock_dom_exc_handler(struct domain *d);
 
 /*
  * Internal event channel object storage.

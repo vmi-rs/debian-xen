@@ -3,8 +3,13 @@
  * is intended to be included by common/efi/boot.c _only_, and
  * therefore can define arch specific global variables.
  */
+
+#ifndef ARM_EFI_BOOT_H
+#define ARM_EFI_BOOT_H
+
 #include <xen/device_tree.h>
 #include <xen/libfdt/libfdt.h>
+#include <xen/unaligned.h>
 #include <asm/setup.h>
 #include <asm/smp.h>
 
@@ -16,7 +21,7 @@ typedef struct {
 } module_info;
 
 /*
- * Binaries will be translated into bootmodules, the maximum number for them is
+ * Binaries will be translated into boot_modules, the maximum number for them is
  * MAX_MODULES where we should remove a unit for Xen and one for Xen DTB
  */
 #define MAX_UEFI_MODULES (MAX_MODULES - 2)
@@ -43,7 +48,6 @@ void noreturn efi_xen_start(void *fdt_ptr, uint32_t fdt_size);
 void __flush_dcache_area(const void *vaddr, unsigned long size);
 
 static int get_module_file_index(const char *name, unsigned int name_len);
-static void PrintMessage(const CHAR16 *s);
 
 #define DEVICE_TREE_GUID \
 {0xb1b621d5U, 0xf19c, 0x41a5, {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}}
@@ -57,7 +61,6 @@ static int __init setup_chosen_node(void *fdt, int *addr_cells, int *size_cells)
     int node;
     const struct fdt_property *prop;
     int len;
-    uint32_t val;
 
     if ( !fdt || !addr_cells || !size_cells )
         return -1;
@@ -75,24 +78,22 @@ static int __init setup_chosen_node(void *fdt, int *addr_cells, int *size_cells)
     prop = fdt_get_property(fdt, node, "#address-cells", &len);
     if ( !prop )
     {
-        val = cpu_to_fdt32(2);
-        if ( fdt_setprop(fdt, node, "#address-cells", &val, sizeof(val)) )
+        if ( fdt_setprop_u32(fdt, node, "#address-cells", 2) )
             return -1;
         *addr_cells = 2;
     }
     else
-        *addr_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
+        *addr_cells = fdt32_to_cpu(get_unaligned_t(uint32_t, prop->data));
 
     prop = fdt_get_property(fdt, node, "#size-cells", &len);
     if ( !prop )
     {
-        val = cpu_to_fdt32(2);
-        if ( fdt_setprop(fdt, node, "#size-cells", &val, sizeof(val)) )
+        if ( fdt_setprop_u32(fdt, node, "#size-cells", 2) )
             return -1;
         *size_cells = 2;
     }
     else
-        *size_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
+        *size_cells = fdt32_to_cpu(get_unaligned_t(uint32_t, prop->data));
 
     /*
      * Make sure ranges is empty if it exists, otherwise create empty ranges
@@ -101,8 +102,7 @@ static int __init setup_chosen_node(void *fdt, int *addr_cells, int *size_cells)
     prop = fdt_get_property(fdt, node, "ranges", &len);
     if ( !prop )
     {
-        val = cpu_to_fdt32(0);
-        if ( fdt_setprop(fdt, node, "ranges", &val, 0) )
+        if ( fdt_setprop(fdt, node, "ranges", NULL, 0) )
             return -1;
     }
     else if ( fdt32_to_cpu(prop->len) )
@@ -163,6 +163,7 @@ static bool __init meminfo_add_bank(struct membanks *mem,
     struct membank *bank;
     paddr_t start = desc->PhysicalStart;
     paddr_t size = desc->NumberOfPages * EFI_PAGE_SIZE;
+    unsigned int j;
 
     if ( mem->nr_banks >= mem->max_banks )
         return false;
@@ -170,6 +171,15 @@ static bool __init meminfo_add_bank(struct membanks *mem,
     if ( check_reserved_regions_overlap(start, size, false) )
         return false;
 #endif
+
+    for ( j = 0; j < mem->nr_banks; j++ )
+    {
+        if ( (mem->bank[j].start + mem->bank[j].size) == start )
+        {
+            mem->bank[j].size += size;
+            return true;
+        }
+    }
 
     bank = &mem->bank[mem->nr_banks];
     bank->start = start;
@@ -181,15 +191,16 @@ static bool __init meminfo_add_bank(struct membanks *mem,
     return true;
 }
 
-static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *map,
+static EFI_STATUS __init efi_process_memory_map_bootinfo(void *map,
                                                 UINTN mmap_size,
                                                 UINTN desc_size)
 {
     int Index;
-    EFI_MEMORY_DESCRIPTOR *desc_ptr = map;
 
     for ( Index = 0; Index < (mmap_size / desc_size); Index++ )
     {
+        EFI_MEMORY_DESCRIPTOR *desc_ptr = map + desc_size * Index;
+
         if ( !(desc_ptr->Attribute & EFI_MEMORY_RUNTIME) &&
              (desc_ptr->Attribute & EFI_MEMORY_WB) &&
              (desc_ptr->Type == EfiConventionalMemory ||
@@ -217,7 +228,6 @@ static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *
             }
         }
 #endif
-        desc_ptr = NextMemoryDescriptor(desc_ptr, desc_size);
     }
 
     return EFI_SUCCESS;
@@ -237,17 +247,15 @@ static EFI_STATUS __init fdt_add_uefi_nodes(EFI_SYSTEM_TABLE *sys_table,
 {
     int node;
     int status;
-    u32 fdt_val32;
-    u64 fdt_val64;
     int num_rsv;
 
-   /*
-    * Delete all memory reserve map entries. When booting via UEFI,
-    * kernel will use the UEFI memory map to find reserved regions.
-    */
-   num_rsv = fdt_num_mem_rsv(fdt);
-   while ( num_rsv-- > 0 )
-       fdt_del_mem_rsv(fdt, num_rsv);
+    /*
+     * Delete all memory reserve map entries. When booting via UEFI,
+     * kernel will use the UEFI memory map to find reserved regions.
+     */
+    num_rsv = fdt_num_mem_rsv(fdt);
+    while ( num_rsv-- > 0 )
+        fdt_del_mem_rsv(fdt, num_rsv);
 
     /* Add FDT entries for EFI runtime services in chosen node. */
     node = fdt_subnode_offset(fdt, 0, "chosen");
@@ -261,33 +269,28 @@ static EFI_STATUS __init fdt_add_uefi_nodes(EFI_SYSTEM_TABLE *sys_table,
         }
     }
 
-    fdt_val64 = cpu_to_fdt64((u64)(uintptr_t)sys_table);
-    status = fdt_setprop(fdt, node, "linux,uefi-system-table",
-                         &fdt_val64, sizeof(fdt_val64));
+    status = fdt_setprop_u64(fdt, node, "linux,uefi-system-table",
+                             (uintptr_t)sys_table);
     if ( status )
         goto fdt_set_fail;
 
-    fdt_val64 = cpu_to_fdt64((u64)(uintptr_t)memory_map);
-    status = fdt_setprop(fdt, node, "linux,uefi-mmap-start",
-                         &fdt_val64,  sizeof(fdt_val64));
+    status = fdt_setprop_u64(fdt, node, "linux,uefi-mmap-start",
+                             (uintptr_t)memory_map);
     if ( status )
         goto fdt_set_fail;
 
-    fdt_val32 = cpu_to_fdt32(map_size);
-    status = fdt_setprop(fdt, node, "linux,uefi-mmap-size",
-                         &fdt_val32,  sizeof(fdt_val32));
+    status = fdt_setprop_u32(fdt, node, "linux,uefi-mmap-size",
+                             map_size);
     if ( status )
         goto fdt_set_fail;
 
-    fdt_val32 = cpu_to_fdt32(desc_size);
-    status = fdt_setprop(fdt, node, "linux,uefi-mmap-desc-size",
-                         &fdt_val32, sizeof(fdt_val32));
+    status = fdt_setprop_u32(fdt, node, "linux,uefi-mmap-desc-size",
+                             desc_size);
     if ( status )
         goto fdt_set_fail;
 
-    fdt_val32 = cpu_to_fdt32(desc_ver);
-    status = fdt_setprop(fdt, node, "linux,uefi-mmap-desc-ver",
-                         &fdt_val32, sizeof(fdt_val32));
+    status = fdt_setprop_u32(fdt, node, "linux,uefi-mmap-desc-ver",
+                             desc_ver);
     if ( status )
         goto fdt_set_fail;
 
@@ -400,7 +403,7 @@ static void __init noreturn efi_arch_post_exit_boot(void)
 }
 
 static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
-                                           EFI_FILE_HANDLE dir_handle,
+                                           EFI_FILE_HANDLE *dir_handle,
                                            const char *section)
 {
     union string name;
@@ -416,8 +419,11 @@ static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
         name.s = get_value(&cfg, section, "dtb");
         if ( name.s )
         {
+            CHAR16 *fname;
+
             split_string(name.s);
-            read_file(dir_handle, s2w(&name), &dtbfile, NULL);
+            ensure_dir_handle(image, dir_handle, &fname);
+            read_file(*dir_handle, s2w(&name), &dtbfile, NULL);
             efi_bs->FreePool(name.w);
         }
     }
@@ -427,7 +433,7 @@ static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
 }
 
 static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
-                                          EFI_FILE_HANDLE dir_handle,
+                                          EFI_FILE_HANDLE *dir_handle,
                                           const char *section)
 {
 }
@@ -475,7 +481,7 @@ static void __init efi_arch_handle_cmdline(CHAR16 *cmdline_options,
 
     if ( cfgfile_options )
     {
-        PrintMessage(L"Using bootargs from Xen configuration file.");
+        PrintStr(L"Using bootargs from Xen configuration file.\r\n");
         prop_len += snprintf(buf + prop_len,
                                EFI_PAGE_SIZE - prop_len, " %s", cfgfile_options);
         if ( prop_len >= EFI_PAGE_SIZE )
@@ -488,7 +494,7 @@ static void __init efi_arch_handle_cmdline(CHAR16 *cmdline_options,
                                                    "xen,xen-bootargs", NULL);
         if ( dt_bootargs_prop )
         {
-            PrintMessage(L"Using bootargs from device tree.");
+            PrintStr(L"Using bootargs from device tree.\r\n");
             prop_len += snprintf(buf + prop_len, EFI_PAGE_SIZE - prop_len,
                                  " %s", dt_bootargs_prop);
             if ( prop_len >= EFI_PAGE_SIZE )
@@ -588,9 +594,9 @@ static void __init efi_arch_handle_module(const struct file *file,
 
     /*
      * modules_available is decremented here because for each dom0 file added
-     * from the configuration file, there will be an additional bootmodule,
+     * from the configuration file, there will be an additional boot_module,
      * so the number of available slots will be decremented because there is a
-     * maximum amount of bootmodules that can be loaded.
+     * maximum amount of boot_modules that can be loaded.
      */
     modules_available--;
 }
@@ -619,12 +625,6 @@ static int __init get_module_file_index(const char *name,
     return ret;
 }
 
-static void __init PrintMessage(const CHAR16 *s)
-{
-    PrintStr(s);
-    PrintStr(newline);
-}
-
 /*
  * This function allocates a binary and keeps track of its name, it returns the
  * index of the file in the modules array or a negative number on error.
@@ -646,7 +646,7 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
      */
     if ( !modules_available )
     {
-        PrintMessage(L"No space left for modules");
+        PrintStr(L"No space left for modules\r\n");
         return ERROR_ALLOC_MODULE_NO_SPACE;
     }
 
@@ -659,7 +659,7 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
     if ( efi_bs->AllocatePool(EfiLoaderData, (name_len + 1) * sizeof(char),
                               (void**)&file_info->name) != EFI_SUCCESS )
     {
-        PrintMessage(L"Error allocating memory for module binary name");
+        PrintStr(L"Error allocating memory for module binary name\r\n");
         return ERROR_ALLOC_MODULE_NAME;
     }
 
@@ -668,8 +668,7 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
     file_info->name_len = name_len;
 
     /* Get the file system interface. */
-    if ( !*dir_handle )
-        *dir_handle = get_parent_handle(loaded_image, &fname);
+    ensure_dir_handle(loaded_image, dir_handle, &fname);
 
     /* Load the binary in memory */
     read_file(*dir_handle, s2w(&module_name), &module_binary, NULL);
@@ -739,14 +738,14 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
     /* Rename the module to be module@{address} */
     if ( fdt_set_name(fdt_efi, module_node_offset, mod_string) < 0 )
     {
-        PrintMessage(L"Unable to modify module node name.");
+        PrintStr(L"Unable to modify module node name.\r\n");
         return ERROR_RENAME_MODULE_NAME;
     }
 
     if ( fdt_set_reg(fdt_efi, module_node_offset, reg_addr_cells, reg_size_cells,
                      file->addr, file->size) < 0 )
     {
-        PrintMessage(L"Unable to set module reg property.");
+        PrintStr(L"Unable to set module reg property.\r\n");
         return ERROR_SET_REG_PROPERTY;
     }
 
@@ -762,7 +761,7 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
             */
             if ( kernel.addr )
             {
-                PrintMessage(L"Dom0 kernel already found in cfg file.");
+                PrintStr(L"Dom0 kernel already found in cfg file.\r\n");
                 return ERROR_DOM0_ALREADY_FOUND;
             }
             kernel.need_to_free = false; /* Freed using the module array */
@@ -773,14 +772,14 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
                   (fdt_node_check_compatible(fdt_efi, module_node_offset,
                                              "multiboot,ramdisk") == 0) )
         {
-            PrintMessage(L"Dom0 ramdisk already found in cfg file.");
+            PrintStr(L"Dom0 ramdisk already found in cfg file.\r\n");
             return ERROR_DOM0_RAMDISK_FOUND;
         }
         else if ( xsm.addr &&
                   (fdt_node_check_compatible(fdt_efi, module_node_offset,
                                              "xen,xsm-policy") == 0) )
         {
-            PrintMessage(L"XSM policy already found in cfg file.");
+            PrintStr(L"XSM policy already found in cfg file.\r\n");
             return ERROR_XSM_ALREADY_FOUND;
         }
     }
@@ -806,20 +805,20 @@ static int __init handle_dom0less_domain_node(const EFI_LOADED_IMAGE *loaded_ima
     prop = fdt_get_property(fdt_efi, domain_node, "#address-cells", &len);
     if ( !prop )
     {
-        PrintMessage(L"#address-cells not found in domain node.");
+        PrintStr(L"#address-cells not found in domain node.\r\n");
         return ERROR_MISSING_DT_PROPERTY;
     }
 
-    addr_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
+    addr_cells = fdt32_to_cpu(get_unaligned_t(uint32_t, prop->data));
 
     prop = fdt_get_property(fdt_efi, domain_node, "#size-cells", &len);
     if ( !prop )
     {
-        PrintMessage(L"#size-cells not found in domain node.");
+        PrintStr(L"#size-cells not found in domain node.\r\n");
         return ERROR_MISSING_DT_PROPERTY;
     }
 
-    size_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
+    size_cells = fdt32_to_cpu(get_unaligned_t(uint32_t, prop->data));
 
     /* Check for nodes compatible with multiboot,module inside this node */
     for ( module_node = fdt_first_subnode(fdt_efi, domain_node);
@@ -853,7 +852,7 @@ static int __init efi_check_dt_boot(const EFI_LOADED_IMAGE *loaded_image)
     chosen = setup_chosen_node(fdt_efi, &addr_len, &size_len);
     if ( chosen < 0 )
     {
-        PrintMessage(L"Unable to setup chosen node");
+        PrintStr(L"Unable to setup chosen node\r\n");
         return ERROR_DT_CHOSEN_NODE;
     }
 
@@ -920,7 +919,7 @@ static void __init efi_arch_blexit(void)
         efi_bs->FreePool(memmap);
 }
 
-static void __init efi_arch_halt(void)
+static void noreturn __init efi_arch_halt(void)
 {
     stop_cpu();
 }
@@ -992,6 +991,8 @@ static void __init efi_arch_flush_dcache_area(const void *vaddr, UINTN size)
 {
     __flush_dcache_area(vaddr, size);
 }
+
+#endif /* ARM_EFI_BOOT_H */
 
 /*
  * Local variables:

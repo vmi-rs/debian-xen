@@ -27,6 +27,9 @@
 /* Define to 1 if you have the `fdt' library (-lfdt). */
 #undef HAVE_LIBFDT
 
+/* Use library json-c */
+#undef HAVE_LIBJSONC
+
 /* Define to 1 if you have the `lzma' library (-llzma). */
 #undef HAVE_LIBLZMA
 
@@ -41,9 +44,6 @@
 
 /* pygrub enabled */
 #undef HAVE_PYGRUB
-
-/* Qemu traditional enabled */
-#undef HAVE_QEMU_TRADITIONAL
 
 /* ROMBIOS enabled */
 #undef HAVE_ROMBIOS

@@ -45,14 +45,13 @@ typedef struct {
 	u32	dk[4*(AES_MAXROUNDS + 1)];	/* decrypt key schedule */
 } rijndael_ctx;
 
-int	 rijndael_set_key(rijndael_ctx *, const unsigned char *, int);
-int	 rijndael_set_key_enc_only(rijndael_ctx *, const unsigned char *, int);
-void	 rijndael_decrypt(rijndael_ctx *, const unsigned char *, unsigned char *);
-void	 rijndael_encrypt(rijndael_ctx *, const unsigned char *, unsigned char *);
+int	rijndael_set_key(rijndael_ctx *ctx, const unsigned char *key, int bits);
+int	rijndael_set_key_enc_only(rijndael_ctx *ctx, const unsigned char *key, int bits);
+void	rijndael_decrypt(rijndael_ctx *ctx, const unsigned char *src, unsigned char *dst);
+void	rijndael_encrypt(rijndael_ctx *ctx, const unsigned char *src, unsigned char *dst);
 
-int	rijndaelKeySetupEnc(unsigned int [], const unsigned char [], int);
-int	rijndaelKeySetupDec(unsigned int [], const unsigned char [], int);
-void	rijndaelEncrypt(const unsigned int [], int, const unsigned char [16],
-	    unsigned char [16]);
+int	rijndaelKeySetupEnc(u32 rk[], const u8 cipherKey[], int keyBits);
+int	rijndaelKeySetupDec(u32 rk[], const u8 cipherKey[], int keyBits);
+void	rijndaelEncrypt(const u32 rk[], int Nr, const u8 pt[16], u8 ct[16]);
 
 #endif /* __RIJNDAEL_H */

@@ -35,7 +35,7 @@
  */
 #define NUM_FIXMAP_ACPI_PAGES  64
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/errno.h>
 #include <xen/list.h>
@@ -75,7 +75,7 @@ typedef int (*acpi_table_handler) (struct acpi_table_header *table);
 typedef int (*acpi_table_entry_handler) (struct acpi_subtable_header *header, const unsigned long end);
 
 unsigned int acpi_get_processor_id (unsigned int cpu);
-char * __acpi_map_table (paddr_t phys_addr, unsigned long size);
+char * __acpi_map_table (paddr_t phys, unsigned long size);
 bool __acpi_unmap_table(const void *ptr, unsigned long size);
 int acpi_boot_init (void);
 int acpi_boot_table_init (void);
@@ -190,7 +190,7 @@ static inline void acpi_set_csubstate_limit(unsigned int new_limit) { return; }
 #endif
 
 #ifdef XEN_GUEST_HANDLE
-int acpi_set_pdc_bits(uint32_t acpi_id, XEN_GUEST_HANDLE(uint32));
+int acpi_set_pdc_bits(unsigned int acpi_id, XEN_GUEST_HANDLE(uint32));
 #endif
 int arch_acpi_set_pdc_bits(u32 acpi_id, u32 *, u32 mask);
 
@@ -206,6 +206,6 @@ static inline void acpi_dmar_zap(void) {}
 static inline void acpi_dmar_reinstate(void) {}
 #endif
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /*_LINUX_ACPI_H*/

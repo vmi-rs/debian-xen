@@ -12,6 +12,7 @@
 #include <public/arch-arm/smccc.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
+#include <asm/firmware/sci.h>
 #include <asm/monitor.h>
 #include <asm/regs.h>
 #include <asm/smccc.h>
@@ -20,7 +21,6 @@
 #include <asm/traps.h>
 #include <asm/vpsci.h>
 #include <asm/platform.h>
-#include <asm/firmware/scmi-smc.h>
 
 /* Number of functions currently supported by Hypervisor Service. */
 #define XEN_SMCCC_FUNCTION_COUNT 3
@@ -232,7 +232,7 @@ static bool handle_sip(struct cpu_user_regs *regs)
     if ( platform_smc(regs) )
         return true;
 
-    return scmi_handle_smc(regs);
+    return sci_handle_call(regs);
 }
 
 /*
@@ -330,7 +330,8 @@ void do_trap_smc(struct cpu_user_regs *regs, const union hsr hsr)
     }
 
     /* If monitor is enabled, let it handle the call. */
-    if ( current->domain->arch.monitor.privileged_call_enabled )
+    if ( IS_ENABLED(CONFIG_VM_EVENT) &&
+         current->domain->arch.monitor.privileged_call_enabled )
         rc = monitor_smc();
 
     if ( rc == 1 )
@@ -346,13 +347,11 @@ void do_trap_smc(struct cpu_user_regs *regs, const union hsr hsr)
     if ( vsmccc_handle_call(regs) )
         advance_pc(regs, hsr);
     else
-        inject_undef_exception(regs, hsr);
+        inject_undef_exception(regs);
 }
 
 void do_trap_hvc_smccc(struct cpu_user_regs *regs)
 {
-    const union hsr hsr = { .bits = regs->hsr };
-
     /*
      * vsmccc_handle_call() will return false if this call is not
      * SMCCC compatible (e.g. immediate value != 0). As it is not
@@ -360,7 +359,7 @@ void do_trap_hvc_smccc(struct cpu_user_regs *regs)
      * ARM_SMCCC_ERR_UNKNOWN_FUNCTION.
      */
     if ( !vsmccc_handle_call(regs) )
-        inject_undef_exception(regs, hsr);
+        inject_undef_exception(regs);
 }
 
 /*

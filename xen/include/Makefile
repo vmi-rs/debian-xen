@@ -31,7 +31,6 @@ headers-$(CONFIG_HVM)     += compat/hvm/hvm_vcpu.h
 headers-$(CONFIG_HYPFS)   += compat/hypfs.h
 headers-$(CONFIG_KEXEC)   += compat/kexec.h
 headers-$(CONFIG_TRACEBUFFER) += compat/trace.h
-headers-$(CONFIG_XENOPROF) += compat/xenoprof.h
 headers-$(CONFIG_XSM_FLASK) += compat/xsm/flask_op.h
 
 headers-n := $(sort $(filter-out $(headers-y),$(headers-n) $(headers-)))
@@ -105,9 +104,14 @@ xlat-y := $(shell sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,^[?!][[:blank:]]+
 xlat-y := $(filter $(patsubst compat/%,%,$(headers-y)),$(xlat-y))
 
 quiet_cmd_xlat_h = GEN     $@
-cmd_xlat_h = \
-	cat $(filter %.h,$^) >$@.new; \
-	mv -f $@.new $@
+define cmd_xlat_h
+    echo "#ifndef COMPAT_XLAT_H" >$@.new; \
+    echo "#define COMPAT_XLAT_H" >>$@.new; \
+    cat $(filter %.h,$^) >>$@.new; \
+    echo "" >>$@.new; \
+    echo "#endif /* COMPAT_XLAT_H */" >>$@.new; \
+    mv -f $@.new $@
+endef
 
 $(obj)/compat/xlat.h: $(addprefix $(obj)/compat/.xlat/,$(xlat-y)) FORCE
 	$(call if_changed,xlat_h)

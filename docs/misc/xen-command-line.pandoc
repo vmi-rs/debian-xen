@@ -191,7 +191,7 @@ The functionality that this option controls is only available when Xen has been
 compiled with the build setting for Argo enabled in the build configuration.
 
 Argo is a interdomain communication mechanism, where Xen acts as the central
-point of authority.  Guests may register memory rings to recieve messages,
+point of authority.  Guests may register memory rings to receive messages,
 query the status of other domains, and send messages by hypercall, all subject
 to appropriate auditing by Xen.  Argo is disabled by default.
 
@@ -509,14 +509,8 @@ character, but for xen to keep the console.
 
 > Default: `power`
 
-### cpu_type (x86)
-> `= arch_perfmon`
-
-If set, force use of the performance counters for oprofile, rather than detecting
-available support.
-
 ### cpufreq
-> `= none | {{ <boolean> | xen } { [:[powersave|performance|ondemand|userspace][,[<maxfreq>]][,[<minfreq>]]] } [,verbose]} | dom0-kernel | hwp[:[<hdc>][,verbose]]`
+> `= none | {{ <boolean> | xen } { [:[powersave|performance|ondemand|userspace][,[<maxfreq>]][,[<minfreq>]]] } [,verbose]} | dom0-kernel | hwp[:[<hdc>][,verbose]] | amd-cppc[:[active][,verbose]]`
 
 > Default: `xen`
 
@@ -527,7 +521,7 @@ choice of `dom0-kernel` is deprecated and not supported by all Dom0 kernels.
 * `<maxfreq>` and `<minfreq>` are integers which represent max and min processor frequencies
   respectively.
 * `verbose` option can be included as a string or also as `verbose=<integer>`
-  for `xen`.  It is a boolean for `hwp`.
+  for `xen`.  It is a boolean for `hwp` and `amd-cppc`.
 * `hwp` selects Hardware-Controlled Performance States (HWP) on supported Intel
   hardware.  HWP is a Skylake+ feature which provides better CPU power
   management.  The default is disabled.  If `hwp` is selected, but hardware
@@ -535,6 +529,16 @@ choice of `dom0-kernel` is deprecated and not supported by all Dom0 kernels.
 * `<hdc>` is a boolean to enable Hardware Duty Cycling (HDC).  HDC enables the
   processor to autonomously force physical package components into idle state.
   The default is enabled, but the option only applies when `hwp` is enabled.
+* `amd-cppc` selects ACPI Collaborative Performance and Power Control (CPPC)
+  on supported AMD hardware to provide finer grained frequency control
+  mechanism. The default is disabled.
+* `active` is a boolean to enable amd-cppc driver in active(autonomous) mode.
+  In this mode, users don't rely on Xen governor to do performance monitoring
+  and tuning. Hardware built-in CPPC power algorithm will calculate the runtime
+  workload and adjust cores frequency automatically according to the power
+  supply, thermal, core voltage and some other hardware conditions.
+  The default is disabled, and the option only applies when `amd-cppc` is
+  enabled.
 
 There is also support for `;`-separated fallback options:
 `cpufreq=hwp;xen,verbose`.  This first tries `hwp` and falls back to `xen` if
@@ -577,46 +581,6 @@ applicable.  They can all be ignored.
     possible malfunctions after ACPI S3 suspend/resume.  `rdrand` may be used
     in its positive form to override Xen's default behaviour on these systems,
     and make the feature fully usable.
-
-### cpuid_mask_cpu
-> `= fam_0f_rev_[cdefg] | fam_10_rev_[bc] | fam_11_rev_b`
-
-> Applicability: AMD
-
-If none of the other **cpuid_mask_\*** options are given, Xen has a set of
-pre-configured masks to make the current processor appear to be
-family/revision specified.
-
-See below for general information on masking.
-
-**Warning: This option is not fully effective on Family 15h processors or
-later.**
-
-### cpuid_mask_ecx
-### cpuid_mask_edx
-### cpuid_mask_ext_ecx
-### cpuid_mask_ext_edx
-### cpuid_mask_l7s0_eax
-### cpuid_mask_l7s0_ebx
-### cpuid_mask_thermal_ecx
-### cpuid_mask_xsave_eax
-> `= <integer>`
-
-> Applicability: x86.  Default: `~0` (all bits set)
-
-The availability of these options are model specific.  Some processors don't
-support any of them, and no processor supports all of them.  Xen will ignore
-options on processors which are lacking support.
-
-These options can be used to alter the features visible via the `CPUID`
-instruction.  Settings applied here take effect globally, including for Xen
-and all guests.
-
-Note: Since Xen 4.7, it is no longer necessary to mask a host to create
-migration safety in heterogeneous scenarios.  All necessary CPUID settings
-should be provided in the VM configuration file.  Furthermore, it is
-recommended not to use this option, as doing so causes an unnecessary
-reduction of features at Xen's disposal to manage guests.
 
 ### cpuidle (x86)
 > `= <boolean>`
@@ -886,7 +850,7 @@ Controls for how dom0 is constructed on x86 systems.
     If using this option is necessary to fix an issue, please report a bug.
 
 *   The `pf-fixup` boolean is only applicable when using a PVH dom0 and
-    defaults to false.
+    defaults to true.
 
     When running dom0 in PVH mode the dom0 kernel has no way to map MMIO
     regions into its physical memory map, such mode relies on Xen dom0 builder
@@ -894,9 +858,13 @@ Controls for how dom0 is constructed on x86 systems.
     access.  However Xen doesn't have a complete picture of the host memory
     map, due to not being able to process ACPI dynamic tables.
 
-    The `pf-fixup` option allows Xen to attempt to add missing MMIO regions
+    The `pf-fixup` option causes Xen to attempt to add missing MMIO regions
     to the dom0 physical memory map in response to page-faults generated by
     dom0 trying to access unpopulated entries in the memory map.
+
+    Users having to disable the feature to boot in PVH dom0 mode should report
+    it to the xen-devel mailing list, together with Xen and dom0 output with the
+    option enabled.
 
 Enables features on dom0 on Arm systems.
 
@@ -1032,11 +1000,15 @@ For example, with `dom0_max_vcpus=4-8`:
 >      8    |  8
 >     10    |  8
 
+The resulting number of Dom0 VCPUs is still subject to Xen's generic
+and architecture-specific domain limits.
+
 ### dom0_mem (ARM)
 > `= <size>`
 
 Set the amount of memory for the initial domain (dom0). It must be
-greater than zero. This parameter is required.
+greater than zero. This parameter is required (and only used) when the initial
+domain is not described in the Device-Tree.
 
 ### dom0_mem (x86)
 > `= List of ( min:<sz> | max:<sz> | <sz> )`
@@ -1283,6 +1255,17 @@ or trust the guest administrator who would be using passthrough, then the
 requirement can be relaxed.  This option is particularly useful for nested
 virtualization, to allow the L1 hypervisor to use EPT even if the L0 hypervisor
 does not provide `VM_ENTRY_LOAD_GUEST_PAT`.
+
+### fred (x86)
+> `= <bool>`
+
+> Default: `true` on AMD, `false` otherwise
+
+Flexible Return and Event Delivery is an overhaul of interrupt, exception and
+system call handling, fixing many corner cases in the x86 architecture, and is
+available on Intel Panther Lake and Diamond Rapids CPUs, and AMD Zen6 CPUs.
+FRED is fully supported on AMD hardware.  On Intel hardware it is still tech
+preview, and in particular not security supported.
 
 ### gnttab
 > `= List of [ max-ver:<integer>, transitive=<bool>, transfer=<bool> ]`
@@ -1671,7 +1654,7 @@ Specify the timeout of the device IOTLB invalidation in milliseconds.
 By default, the timeout is 1000 ms. When you see error 'Queue invalidate
 wait descriptor timed out', try increasing this value.
 
-### iommu_inclusive_mapping
+### iommu_inclusive_mapping (x86)
 > `= <boolean>`
 
 **WARNING: This command line option is deprecated, and superseded by
@@ -1942,6 +1925,23 @@ Print boot time MTRR state.
 Use the MWAIT idle driver (with model specific C-state knowledge) instead
 of the ACPI based one.
 
+### mwait-idle.table (x86)
+> `= <string>`
+
+ Define the C-states table from a user input string. Expected format is
+ 'name:latency:residency', where:
+ - name: The C-state name.
+ - latency: The C-state exit latency in us.
+ - residency: The C-state target residency in us.
+
+ Multiple C-states can be defined by separating them with commas:
+ 'name1:latency1:residency1,name2:latency2:residency2'
+
+ Example: mwait-idle.table=C1:1:1,C1E:5:10,C6:100:600
+
+ To leave latency or residency unchanged, use an empty field, for example:
+ 'C1:1:1,C1E::10' - leaves C1E latency unchanged.
+
 ### nmi (x86)
 > `= ignore | dom0 | fatal`
 
@@ -2035,12 +2035,21 @@ Only effective if CONFIG_PARTIAL_EMULATION is enabled.
 behavior.**
 
 ### pci
-    = List of [ serr=<bool>, perr=<bool> ]
+    = List of [ serr=<bool>, perr=<bool>, quirks=<bool> ]
+
+* `serr` and `perr`
 
     Default: Signaling left as set by firmware.
 
-Override the firmware settings, and explicitly enable or disable the
-signalling of PCI System and Parity errors.
+  Override the firmware settings, and explicitly enable or disable the
+  signalling of PCI System and Parity errors.
+
+* `quirks`
+
+    Default: `on`
+
+  In its negative form, allows to suppress certain quirk workarounds, in case
+  they cause issues.
 
 ### pci-phantom
 > `=[<seg>:]<bus>:<device>,<stride>`
@@ -2073,17 +2082,20 @@ for all of them (`true`), only for those subject to XPTI (`xpti`) or for
 those not subject to XPTI (`no-xpti`). The feature is used only in case
 INVPCID is supported and not disabled via `invpcid=false`.
 
+### pdx-compress
+> `= <boolean>`
+
+> Default: `true` if CONFIG_PDX_NONE is unset
+
+Only relevant when the hypervisor is build with PFN PDX compression. Controls
+whether Xen will engage in PFN compression.  The algorithm used for PFN
+compression is selected at build time from Kconfig.
+
 ### ple_gap
 > `= <integer>`
 
 ### ple_window (Intel)
 > `= <integer>`
-
-### preferred-cstates (x86)
-> `= ( <integer> | List of ( C1 | C1E | C2 | ... )`
-
-This is a mask of C-states which are to be used preferably.  This option is
-applicable only on hardware were certain C-states are exclusive of one another.
 
 ### probe-port-aliases (x86)
 > `= <boolean>`
@@ -2360,6 +2372,15 @@ sockets, &c.  This will reduce performance somewhat, particularly on
 systems with hyperthreading enabled, but should reduce power by
 enabling more sockets and cores to go into deeper sleep states.
 
+### scmi-smc-passthrough (ARM)
+> `= <boolean>`
+
+The option is available when `CONFIG_SCMI_SMC` is compiled in, and allows to
+enable SCMI SMC single agent interface for any, but only one guest domain,
+which serves as Driver domain. The SCMI will be disabled for Dom0/hwdom and
+SCMI nodes removed from Dom0/hwdom device tree.
+(for example, thin Dom0 with Driver domain use-case).
+
 ### scrub-domheap
 > `= <boolean>`
 
@@ -2371,7 +2392,7 @@ accidentally leaking secrets by releasing pages without proper sanitization.
 ### serial_tx_buffer
 > `= <size>`
 
-> Default: `16kB`
+> Default: `CONFIG_SERIAL_TX_BUFSIZE`
 
 Set the serial transmit buffer size.
 
@@ -2469,7 +2490,7 @@ By default SSBD will be mitigated at runtime (i.e `ssbd=runtime`).
 >              {msr-sc,rsb,verw,{ibpb,bhb}-entry}=<bool>|{pv,hvm}=<bool>,
 >              bti-thunk=retpoline|lfence|jmp,bhb-seq=short|tsx|long,
 >              {ibrs,ibpb,ssbd,psfd,
->              eager-fpu,l1d-flush,branch-harden,srb-lock,
+>              l1d-flush,branch-harden,srb-lock,
 >              unpriv-mmio,gds-mit,div-scrub,lock-harden,
 >              bhi-dis-s,bp-spec-reduce,ibpb-alt}=<bool> ]`
 
@@ -2573,11 +2594,6 @@ On hardware supporting IBPB (Indirect Branch Prediction Barrier), the `ibpb=`
 option can be used to force (the default) or prevent Xen from issuing branch
 prediction barriers on vcpu context switches.
 
-On all hardware, the `eager-fpu=` option can be used to force or prevent Xen
-from using fully eager FPU context switches.  This is currently implemented as
-a global control.  By default, Xen will choose to use fully eager context
-switches on hardware believed to speculate past #NM exceptions.
-
 On hardware supporting L1D_FLUSH, the `l1d-flush=` option can be used to force
 or prevent Xen from issuing an L1 data cache flush on each VMEntry.
 Irrespective of Xen's setting, the feature is virtualised for HVM guests to
@@ -2655,6 +2671,20 @@ Specify the per-cpu trace buffer size in pages.
 > Default: `true`
 
 Flag to enable TSC deadline as the APIC timer mode.
+
+### tee (arm)
+> `= <string>`
+
+Specify the TEE mediator to be probed and use.
+
+The default behaviour is to probe all TEEs supported by Xen and use
+the first one successfully probed. When this parameter is passed, Xen will
+probe only the TEE mediator passed as argument and boot will fail if this
+mediator is not properly probed or if the requested TEE is not supported by
+Xen.
+
+This parameter can be set to `optee` or `ffa` if the corresponding mediators
+are compiled in.
 
 ### tevt_mask
 > `= <integer>`
@@ -2740,33 +2770,50 @@ performance.
    Alternatively, selecting `tsx=1` will re-enable TSX at the users own risk.
 
 ### ucode
-> `= List of [ <integer> | scan=<bool>, nmi=<bool>, digest-check=<bool> ]`
+> `= List of [ <integer>, scan=<bool>, nmi=<bool>, digest-check=<bool> ]`
 
     Applicability: x86
-    Default: `nmi,digest-check`
+    Default: `scan` is selectable via Kconfig, `nmi,digest-check`
 
-Controls for CPU microcode loading. For early loading, this parameter can
-specify how and where to find the microcode update blob. For late loading,
-this parameter specifies if the update happens within a NMI handler.
+Controls for CPU microcode loading, available when `CONFIG_MICROCODE_LOADING`
+is enabled.
 
-'integer' specifies the CPU microcode update blob module index. When positive,
-this specifies the n-th module (in the GrUB entry, zero based) to be used
-for updating CPU micrcode. When negative, counting starts at the end of
-the modules in the GrUB entry (so with the blob commonly being last,
-one could specify `ucode=-1`). Note that the value of zero is not valid
-here (entry zero, i.e. the first module, is always the Dom0 kernel
-image). Note further that use of this option has an unspecified effect
-when used with xen.efi (there the concept of modules doesn't exist, and
-the blob gets specified via the `ucode=<filename>` config file/section
-entry; see [EFI configuration file description](efi.html)).
+In order to load microcode at boot, Xen needs to find a suitable update
+amongst the modules provided by the bootloader.  Two formats are supported:
 
-'scan' instructs the hypervisor to scan the multiboot images for an cpio
-image that contains microcode. Depending on the platform the blob with the
-microcode in the cpio name space must be:
-  - on Intel: kernel/x86/microcode/GenuineIntel.bin
-  - on AMD  : kernel/x86/microcode/AuthenticAMD.bin
-When using xen.efi, the `ucode=<filename>` config file setting takes
-precedence over `scan`.
+ 1. Raw microcode containers.  The format of the container is CPU vendor
+    specific.
+
+ 2. CPIO archive, which involves having the raw containers expressed as files
+    (e.g. `kernel/x86/microcode/{GenuineIntel,AuthenticAMD}.bin`) in a CPIO
+    archive.  Linux commonly prepends this to the initrd.
+
+The `<integer>` and `scan=<bool>` options are mutually exclusive and work as
+follows.  Further restrictions exist for booting xen.efi (see below).
+
+ *  The `<integer>` option nominates a specific multiboot module as containing
+    microcode in either format.  Valid options start from 1 (module 0 is
+    always the dom0 kernel).  A negative number may be used, and will
+    back-reference from the end of the module list.  i.e. `ucode=-1` will
+    nominate the final multiboot module.
+
+ *  The `scan=` option causes Xen to search all modules in order to find the
+    first CPIO archive containing the appropriate file (option 2 above).  The
+    default for this option can be chosen at build time via
+    `CONFIG_MICROCODE_SCAN_DEFAULT`.
+
+When booting xen.efi natively, the concept of multiboot modules doesn't exist.
+Instead:
+
+ *  In the [EFI configuration file](efi.html), `ucode=<filename>` can be used
+    to identify a file as containing microcode in either format.  Use of this
+    mechanism will disable both `<integer>` and `scan=`.
+
+ *  If `ucode=<filename>` in the EFI configuration file is not used, it is
+    still possible to use `scan=` to search all modules.  The order of module
+    is undefined, but there is only a single `ramdisk=<filename>`
+    configuration option available.  The use of `<integer>` for xen.efi is
+    always undefined.
 
 'nmi' determines late loading is performed in NMI handler or just in
 stop_machine context. In NMI handler, even NMIs are blocked, which is
@@ -2849,6 +2896,15 @@ to disable the feature.  Value is in units of crystal clock cycles.
 
 Note the hardware might add a threshold to the provided value in order to make
 it safe, and hence using 0 is fine.
+
+### vmid (RISC-V)
+> `= <boolean>`
+
+> Default: `true`
+
+Permit Xen to use Virtual Machine Identifiers. This is an optimisation which
+tags the TLB entries with an ID per vcpu. This allows for guest TLB flushes
+to be performed without the overhead of a complete TLB flush.
 
 ### vpid (Intel)
 > `= <boolean>`

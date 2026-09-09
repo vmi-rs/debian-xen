@@ -48,7 +48,7 @@ uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc)
     return now + v->arch.hvm.stime_offset;
 }
 
-void hvm_set_guest_time(struct vcpu *v, u64 guest_time)
+static void hvm_set_guest_time(struct vcpu *v, u64 guest_time)
 {
     u64 offset = guest_time - hvm_get_guest_time(v);
 
@@ -491,7 +491,7 @@ void create_periodic_time(
     uint64_t period, uint8_t irq, time_cb *cb, void *data, bool level)
 {
     if ( !pt->source ||
-         (irq >= NR_ISAIRQS && pt->source == PTSRC_isa) ||
+         (irq >= NR_ISA_IRQS && pt->source == PTSRC_isa) ||
          (level && period) ||
          (pt->source == PTSRC_ioapic ? irq >= hvm_domain_irq(v->domain)->nr_gsis
                                      : level) )

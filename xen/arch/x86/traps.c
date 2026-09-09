@@ -12,68 +12,47 @@
  * Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
-#include <xen/bug.h>
-#include <xen/init.h>
-#include <xen/sched.h>
-#include <xen/lib.h>
-#include <xen/err.h>
-#include <xen/errno.h>
-#include <xen/hypercall.h>
-#include <xen/mm.h>
-#include <xen/param.h>
-#include <xen/console.h>
-#include <xen/shutdown.h>
-#include <xen/guest_access.h>
-#include <asm/regs.h>
-#include <xen/delay.h>
-#include <xen/event.h>
-#include <xen/spinlock.h>
-#include <xen/irq.h>
-#include <xen/perfc.h>
-#include <xen/softirq.h>
-#include <xen/domain_page.h>
-#include <xen/symbols.h>
-#include <xen/iocap.h>
-#include <xen/version.h>
-#include <xen/kexec.h>
-#include <xen/trace.h>
-#include <xen/paging.h>
-#include <xen/virtual_region.h>
-#include <xen/watchdog.h>
-#include <xen/livepatch.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/atomic.h>
 #include <xen/bitops.h>
-#include <asm/desc.h>
+#include <xen/bug.h>
+#include <xen/console.h>
+#include <xen/delay.h>
+#include <xen/domain_page.h>
+#include <xen/guest_access.h>
+#include <xen/hypercall.h>
+#include <xen/init.h>
+#include <xen/mm.h>
+#include <xen/paging.h>
+#include <xen/param.h>
+#include <xen/perfc.h>
+#include <xen/sched.h>
+#include <xen/softirq.h>
+#include <xen/trace.h>
+#include <xen/version.h>
+#include <xen/watchdog.h>
+
+#include <asm/apic.h>
 #include <asm/debugreg.h>
-#include <asm/gdbsx.h>
-#include <asm/smp.h>
+#include <asm/desc.h>
 #include <asm/flushtlb.h>
-#include <asm/uaccess.h>
+#include <asm/fsgsbase.h>
+#include <asm/gdbsx.h>
 #include <asm/i387.h>
-#include <asm/xstate.h>
+#include <asm/io.h>
+#include <asm/irq-vectors.h>
 #include <asm/msr.h>
 #include <asm/nmi.h>
-#include <asm/xenoprof.h>
-#include <asm/shared.h>
-#include <asm/x86_emulate.h>
-#include <asm/traps.h>
-#include <asm/hvm/vpt.h>
-#include <asm/mce.h>
-#include <asm/apic.h>
-#include <asm/mc146818rtc.h>
-#include <asm/hpet.h>
-#include <asm/vpmu.h>
-#include <public/arch-x86/cpuid.h>
-#include <public/hvm/params.h>
-#include <asm/cpuid.h>
-#include <xsm/xsm.h>
-#include <asm/irq-vectors.h>
-#include <asm/pv/traps.h>
-#include <asm/pv/trace.h>
 #include <asm/pv/mm.h>
+#include <asm/pv/trace.h>
+#include <asm/pv/traps.h>
+#include <asm/regs.h>
+#include <asm/shared.h>
 #include <asm/shstk.h>
+#include <asm/smp.h>
+#include <asm/system.h>
+#include <asm/traps.h>
+#include <asm/uaccess.h>
+
+#include <public/callback.h>
 
 /*
  * opt_nmi: one of 'ignore', 'dom0', or 'fatal'.
@@ -98,13 +77,6 @@ DEFINE_PER_CPU_READ_MOSTLY(seg_desc_t *, compat_gdt);
 DEFINE_PER_CPU_READ_MOSTLY(l1_pgentry_t, compat_gdt_l1e);
 #endif
 
-/* Master table, used by CPU0. */
-idt_entry_t __section(".bss.page_aligned") __aligned(PAGE_SIZE)
-    idt_table[IDT_ENTRIES];
-
-/* Pointer to the IDT of every CPU. */
-idt_entry_t *idt_tables[NR_CPUS] __read_mostly;
-
 /*
  * The TSS is smaller than a page, but we give it a full page to avoid
  * adjacent per-cpu data leaking via Meltdown when XPTI is in use.
@@ -114,18 +86,300 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_page, tss_page);
 static int debug_stack_lines = 20;
 integer_param("debug_stack_lines", debug_stack_lines);
 
-static bool __initdata opt_ler;
-boolean_param("ler", opt_ler);
-
-/* LastExceptionFromIP on this hardware.  Zero if LER is not in use. */
-unsigned int __ro_after_init ler_msr;
-
 const unsigned int nmi_cpu;
 
 #define stack_words_per_line 4
 #define ESP_BEFORE_EXCEPTION(regs) ((unsigned long *)(regs)->rsp)
 
-void show_code(const struct cpu_user_regs *regs)
+/* Only valid to use when FRED is active. */
+static inline struct fred_info *cpu_regs_fred_info(struct cpu_user_regs *regs)
+{
+    ASSERT(read_cr4() & X86_CR4_FRED);
+    return &container_of(regs, struct cpu_info, guest_cpu_user_regs)->_fred;
+}
+
+struct extra_state
+{
+    unsigned long cr0, cr2, cr3, cr4;
+    unsigned long fsb, gsb, gss;
+    uint16_t ds, es, fs, gs;
+};
+
+static void print_xen_info(void)
+{
+    char taint_str[TAINT_STRING_MAX_LEN];
+
+    printk("----[ Xen-%d.%d%s  x86_64  %s  %s ]----\n",
+           xen_major_version(), xen_minor_version(), xen_extra_version(),
+           xen_build_info(), print_tainted(taint_str));
+}
+
+enum context {
+    CTXT_hypervisor,
+    CTXT_pv_guest,
+    CTXT_hvm_guest,
+};
+
+static void read_registers(struct extra_state *state)
+{
+    state->cr0 = read_cr0();
+    state->cr2 = read_cr2();
+    state->cr3 = read_cr3();
+    state->cr4 = read_cr4();
+
+    /*
+     * Help the optimiser out by opencoding read_*_base() and rearranging the
+     * expression.  -fno-strict-aliasing causes the store into state to
+     * invalidate the read_cr4() address calculation (really cpu_info->cr4
+     * under the hood), forcing the cr4 check to be re-evaluated every time.
+     */
+    if ( !(state->cr4 & X86_CR4_FRED) && (state->cr4 & X86_CR4_FSGSBASE) )
+    {
+        state->fsb = __rdfsbase();
+        state->gsb = __rdgsbase();
+        state->gss = __rdgs_shadow();
+    }
+    else
+    {
+        state->fsb = rdmsr(MSR_FS_BASE);
+        state->gsb = rdmsr(MSR_GS_BASE);
+        state->gss = rdmsr(MSR_SHADOW_GS_BASE);
+    }
+
+    asm ( "mov %%ds, %0" : "=m" (state->ds) );
+    asm ( "mov %%es, %0" : "=m" (state->es) );
+    asm ( "mov %%fs, %0" : "=m" (state->fs) );
+    asm ( "mov %%gs, %0" : "=m" (state->gs) );
+}
+
+static void get_hvm_registers(struct vcpu *v, struct cpu_user_regs *regs,
+                              struct extra_state *state)
+{
+    struct segment_register sreg;
+
+    state->cr0 = v->arch.hvm.guest_cr[0];
+    state->cr2 = v->arch.hvm.guest_cr[2];
+    state->cr3 = v->arch.hvm.guest_cr[3];
+    state->cr4 = v->arch.hvm.guest_cr[4];
+
+    hvm_get_segment_register(v, x86_seg_cs, &sreg);
+    regs->cs = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_ds, &sreg);
+    state->ds = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_es, &sreg);
+    state->es = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_fs, &sreg);
+    state->fs = sreg.sel;
+    state->fsb = sreg.base;
+
+    hvm_get_segment_register(v, x86_seg_gs, &sreg);
+    state->gs = sreg.sel;
+    state->gsb = sreg.base;
+
+    hvm_get_segment_register(v, x86_seg_ss, &sreg);
+    regs->ss = sreg.sel;
+
+    state->gss = hvm_get_reg(v, MSR_SHADOW_GS_BASE);
+}
+
+static void _show_registers(
+    const struct cpu_user_regs *regs, const struct extra_state *state,
+    enum context context, const struct vcpu *v)
+{
+    static const char *const context_names[] = {
+        [CTXT_hypervisor] = "hypervisor",
+        [CTXT_pv_guest]   = "pv guest",
+        [CTXT_hvm_guest]  = "hvm guest",
+    };
+
+    printk("RIP:    %04x:[<%016lx>]", regs->cs, regs->rip);
+    if ( context == CTXT_hypervisor )
+        printk(" %pS", _p(regs->rip));
+    printk("\nRFLAGS: %016lx   ", regs->rflags);
+    if ( (context == CTXT_pv_guest) && v && v->vcpu_info_area.map )
+        printk("EM: %d   ", !!vcpu_info(v, evtchn_upcall_mask));
+    printk("CONTEXT: %s", context_names[context]);
+    if ( v && !is_idle_vcpu(v) )
+        printk(" (%pv)", v);
+
+    printk("\nrax: %016lx   rbx: %016lx   rcx: %016lx\n",
+           regs->rax, regs->rbx, regs->rcx);
+    printk("rdx: %016lx   rsi: %016lx   rdi: %016lx\n",
+           regs->rdx, regs->rsi, regs->rdi);
+    printk("rbp: %016lx   rsp: %016lx   r8:  %016lx\n",
+           regs->rbp, regs->rsp, regs->r8);
+    printk("r9:  %016lx   r10: %016lx   r11: %016lx\n",
+           regs->r9,  regs->r10, regs->r11);
+    printk("r12: %016lx   r13: %016lx   r14: %016lx\n",
+           regs->r12, regs->r13, regs->r14);
+    printk("r15: %016lx   cr0: %016lx   cr4: %016lx\n",
+           regs->r15, state->cr0, state->cr4);
+    printk("cr3: %016lx   cr2: %016lx\n", state->cr3, state->cr2);
+    printk("fsb: %016lx   gsb: %016lx   gss: %016lx\n",
+           state->fsb, state->gsb, state->gss);
+    printk("ds: %04x   es: %04x   fs: %04x   gs: %04x   ss: %04x   cs: %04x\n",
+           state->ds, state->es, state->fs,
+           state->gs, regs->ss, regs->cs);
+}
+
+void show_registers(const struct cpu_user_regs *regs)
+{
+    struct cpu_user_regs fault_regs = *regs;
+    struct extra_state fault_state;
+    enum context context;
+    struct vcpu *v = system_state >= SYS_STATE_smp_boot ? current : NULL;
+
+    if ( guest_mode(regs) && is_hvm_vcpu(v) )
+    {
+        get_hvm_registers(v, &fault_regs, &fault_state);
+        context = CTXT_hvm_guest;
+    }
+    else
+    {
+        read_registers(&fault_state);
+
+        if ( guest_mode(regs) )
+        {
+            context = CTXT_pv_guest;
+            fault_state.cr2 = arch_get_cr2(v);
+        }
+        else
+        {
+            context = CTXT_hypervisor;
+        }
+    }
+
+    print_xen_info();
+    printk("CPU:    %d\n", smp_processor_id());
+    _show_registers(&fault_regs, &fault_state, context, v);
+
+    if ( ler_msr && !guest_mode(regs) )
+    {
+        uint64_t from, to;
+
+        rdmsrl(ler_msr, from);
+        rdmsrl(ler_msr + 1, to);
+
+        /* Upper bits may store metadata.  Re-canonicalise for printing. */
+        printk("ler: from %016"PRIx64" [%ps]\n",
+               from, _p(canonicalise_addr(from)));
+        printk("       to %016"PRIx64" [%ps]\n",
+               to, _p(canonicalise_addr(to)));
+    }
+}
+
+void vcpu_show_registers(struct vcpu *v)
+{
+    const struct cpu_user_regs *regs = &v->arch.user_regs;
+    struct cpu_user_regs aux_regs;
+    struct extra_state state;
+    enum context context;
+
+    if ( is_hvm_vcpu(v) )
+    {
+        aux_regs = *regs;
+        get_hvm_registers(v, &aux_regs, &state);
+        regs = &aux_regs;
+        context = CTXT_hvm_guest;
+    }
+    else
+    {
+        bool kernel = guest_kernel_mode(v, regs);
+        unsigned long gsb, gss;
+
+        state.cr0 = v->arch.pv.ctrlreg[0];
+        state.cr2 = arch_get_cr2(v);
+        state.cr3 = pagetable_get_paddr(kernel
+                                        ? v->arch.guest_table
+                                        : v->arch.guest_table_user);
+        state.cr4 = v->arch.pv.ctrlreg[4];
+
+        gsb = v->arch.pv.gs_base_user;
+        gss = v->arch.pv.gs_base_kernel;
+        if ( kernel )
+            SWAP(gsb, gss);
+
+        state.fsb = v->arch.pv.fs_base;
+        state.gsb = gsb;
+        state.gss = gss;
+
+        state.ds = v->arch.pv.ds;
+        state.es = v->arch.pv.es;
+        state.fs = v->arch.pv.fs;
+        state.gs = v->arch.pv.gs;
+
+        context = CTXT_pv_guest;
+    }
+
+    _show_registers(regs, &state, context, v);
+}
+
+void show_page_walk(unsigned long addr)
+{
+    unsigned long pfn, mfn = read_cr3() >> PAGE_SHIFT;
+    l4_pgentry_t l4e, *l4t;
+    l3_pgentry_t l3e, *l3t;
+    l2_pgentry_t l2e, *l2t;
+    l1_pgentry_t l1e, *l1t;
+
+    printk("Pagetable walk from %016lx:\n", addr);
+    if ( !is_canonical_address(addr) )
+        return;
+
+    l4t = map_domain_page(_mfn(mfn));
+    l4e = l4t[l4_table_offset(addr)];
+    unmap_domain_page(l4t);
+    mfn = l4e_get_pfn(l4e);
+    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+          get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
+    printk(" L4[0x%03lx] = %"PRIpte" %016lx\n",
+           l4_table_offset(addr), l4e_get_intpte(l4e), pfn);
+    if ( !(l4e_get_flags(l4e) & _PAGE_PRESENT) ||
+         !mfn_valid(_mfn(mfn)) )
+        return;
+
+    l3t = map_domain_page(_mfn(mfn));
+    l3e = l3t[l3_table_offset(addr)];
+    unmap_domain_page(l3t);
+    mfn = l3e_get_pfn(l3e);
+    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+          get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
+    printk(" L3[0x%03lx] = %"PRIpte" %016lx%s\n",
+           l3_table_offset(addr), l3e_get_intpte(l3e), pfn,
+           (l3e_get_flags(l3e) & _PAGE_PSE) ? " (PSE)" : "");
+    if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) ||
+         (l3e_get_flags(l3e) & _PAGE_PSE) ||
+         !mfn_valid(_mfn(mfn)) )
+        return;
+
+    l2t = map_domain_page(_mfn(mfn));
+    l2e = l2t[l2_table_offset(addr)];
+    unmap_domain_page(l2t);
+    mfn = l2e_get_pfn(l2e);
+    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+          get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
+    printk(" L2[0x%03lx] = %"PRIpte" %016lx%s\n",
+           l2_table_offset(addr), l2e_get_intpte(l2e), pfn,
+           (l2e_get_flags(l2e) & _PAGE_PSE) ? " (PSE)" : "");
+    if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) ||
+         (l2e_get_flags(l2e) & _PAGE_PSE) ||
+         !mfn_valid(_mfn(mfn)) )
+        return;
+
+    l1t = map_domain_page(_mfn(mfn));
+    l1e = l1t[l1_table_offset(addr)];
+    unmap_domain_page(l1t);
+    mfn = l1e_get_pfn(l1e);
+    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+          get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
+    printk(" L1[0x%03lx] = %"PRIpte" %016lx\n",
+           l1_table_offset(addr), l1e_get_intpte(l1e), pfn);
+}
+
+static void show_code(const struct cpu_user_regs *regs)
 {
     unsigned char insns_before[8] = {}, insns_after[16] = {};
     unsigned int i, tmp, missing_before, missing_after;
@@ -139,27 +393,29 @@ void show_code(const struct cpu_user_regs *regs)
      * Copy forward from regs->rip.  In the case of a fault, %ecx contains the
      * number of bytes remaining to copy.
      */
-    asm volatile ("1: rep movsb; 2:"
-                  _ASM_EXTABLE(1b, 2b)
-                  : "=&c" (missing_after),
-                    "=&D" (tmp), "=&S" (tmp)
-                  : "0" (ARRAY_SIZE(insns_after)),
-                    "1" (insns_after),
-                    "2" (regs->rip));
+    asm_inline volatile (
+        "1: rep movsb; 2:"
+        _ASM_EXTABLE(1b, 2b)
+        : "=&c" (missing_after),
+          "=&D" (tmp), "=&S" (tmp)
+        : "0" (ARRAY_SIZE(insns_after)),
+          "1" (insns_after),
+          "2" (regs->rip) );
 
     /*
      * Copy backwards from regs->rip - 1.  In the case of a fault, %ecx
      * contains the number of bytes remaining to copy.
      */
-    asm volatile ("std;"
-                  "1: rep movsb;"
-                  "2: cld;"
-                  _ASM_EXTABLE(1b, 2b)
-                  : "=&c" (missing_before),
-                    "=&D" (tmp), "=&S" (tmp)
-                  : "0" (ARRAY_SIZE(insns_before)),
-                    "1" (insns_before + ARRAY_SIZE(insns_before) - 1),
-                    "2" (regs->rip - 1));
+    asm_inline volatile (
+        "std;"
+        "1: rep movsb;"
+        "2: cld;"
+        _ASM_EXTABLE(1b, 2b)
+        : "=&c" (missing_before),
+          "=&D" (tmp), "=&S" (tmp)
+        : "0" (ARRAY_SIZE(insns_before)),
+          "1" (insns_before + ARRAY_SIZE(insns_before) - 1),
+          "2" (regs->rip - 1) );
     clac();
 
     printk("Xen code around <%p> (%ps)%s:\n",
@@ -423,7 +679,7 @@ unsigned long get_stack_trace_bottom(unsigned long sp)
     {
     case 1 ... 4:
         return ROUNDUP(sp, PAGE_SIZE) -
-            offsetof(struct cpu_user_regs, es) - sizeof(unsigned long);
+            sizeof(struct cpu_user_regs) - sizeof(unsigned long);
 
     case 6 ... 7:
         return ROUNDUP(sp, STACK_SIZE) -
@@ -537,12 +793,14 @@ static void show_trace(const struct cpu_user_regs *regs)
     printk("Xen call trace:\n");
 
     /* Guarded read of the stack top. */
-    asm ( "1: mov %[data], %[tos]; 2:\n"
-          ".pushsection .fixup,\"ax\"\n"
-          "3: movb $1, %[fault]; jmp 2b\n"
-          ".popsection\n"
-          _ASM_EXTABLE(1b, 3b)
-          : [tos] "+r" (tos), [fault] "+qm" (fault) : [data] "m" (*sp) );
+    asm_inline (
+        "1: mov %[data], %[tos]; 2:\n"
+        ".pushsection .fixup,\"ax\"\n"
+        "3: movb $1, %[fault]; jmp 2b\n"
+        ".popsection\n"
+        _ASM_EXTABLE(1b, 3b)
+        : [tos] "+r" (tos), [fault] "+qm" (fault)
+        : [data] "m" (*sp) );
 
     /*
      * If RIP looks sensible, or the top of the stack doesn't, print RIP at
@@ -605,7 +863,7 @@ static void show_stack(const struct cpu_user_regs *regs)
     show_trace(regs);
 }
 
-void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs)
+static void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs)
 {
     unsigned long esp = regs->rsp;
     unsigned long curr_stack_base = esp & ~(STACK_SIZE - 1);
@@ -743,6 +1001,69 @@ static int cf_check nmi_show_execution_state(
     return 1;
 }
 
+void show_execution_state_nmi(const cpumask_t *mask, bool show_all)
+{
+    unsigned int msecs, pending;
+
+    /*
+     * Overwrite the global variable, caller is expected to panic after having
+     * dumped the execution state.
+     */
+    if ( show_all )
+        opt_show_all = true;
+
+    watchdog_disable();
+    console_start_sync();
+
+    cpumask_copy(&show_state_mask, mask);
+    set_nmi_callback(nmi_show_execution_state);
+    send_IPI_mask(mask, APIC_DM_NMI);
+
+    /* Wait at most 10ms for some other CPU to respond. */
+    msecs = 10;
+    pending = cpumask_weight(&show_state_mask);
+    while ( pending && msecs-- )
+    {
+        unsigned int left;
+
+        mdelay(1);
+        left = cpumask_weight(&show_state_mask);
+        if ( left < pending )
+        {
+            pending = left;
+            msecs = 10;
+        }
+    }
+    if ( pending )
+        printk("Non-responding CPUs: {%*pbl}\n", CPUMASK_PR(&show_state_mask));
+}
+
+static const char *x86_et_name(unsigned int type)
+{
+    static const char *const names[] = {
+        [X86_ET_EXT_INTR]    = "EXT_INTR",
+        [X86_ET_NMI]         = "NMI",
+        [X86_ET_HW_EXC]      = "HW_EXC",
+        [X86_ET_SW_INT]      = "SW_INT",
+        [X86_ET_PRIV_SW_EXC] = "PRIV_SW_EXC",
+        [X86_ET_SW_EXC]      = "SW_EXC",
+        [X86_ET_OTHER]       = "OTHER",
+    };
+
+    return (type < ARRAY_SIZE(names) && names[type]) ? names[type] : "???";
+}
+
+static const char *x86_et_other_name(unsigned int what)
+{
+    static const char *const names[] = {
+        [0] = "MTF",
+        [1] = "SYSCALL",
+        [2] = "SYSENTER",
+    };
+
+    return (what < ARRAY_SIZE(names) && names[what]) ? names[what] : "???";
+}
+
 const char *vector_name(unsigned int vec)
 {
     static const char names[][4] = {
@@ -757,6 +1078,30 @@ const char *vector_name(unsigned int vec)
     };
 
     return (vec < ARRAY_SIZE(names) && names[vec][0]) ? names[vec] : "???";
+}
+
+void asmlinkage do_double_fault(struct cpu_user_regs *regs)
+{
+    unsigned int cpu;
+    struct extra_state state;
+
+    console_force_unlock();
+
+    asm ( "lsll %[sel], %[limit]" : [limit] "=r" (cpu)
+                                  : [sel] "r" (PER_CPU_SELECTOR) );
+
+    /* Find information saved during fault and dump it to the console. */
+    printk("*** DOUBLE FAULT ***\n");
+    print_xen_info();
+
+    read_registers(&state);
+
+    printk("CPU:    %d\n", cpu);
+    _show_registers(regs, &state, CTXT_hypervisor, NULL);
+    show_code(regs);
+    show_stack_overflow(cpu, regs);
+
+    panic("DOUBLE FAULT -- system shutdown\n");
 }
 
 /*
@@ -789,34 +1134,44 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
 
         if ( show_remote )
         {
-            unsigned int msecs, pending;
+            cpumask_t *scratch = this_cpu(scratch_cpumask);
 
-            cpumask_andnot(&show_state_mask, &cpu_online_map,
+            cpumask_andnot(scratch, &cpu_online_map,
                            cpumask_of(smp_processor_id()));
-            set_nmi_callback(nmi_show_execution_state);
-            /* Ensure new callback is set before sending out the NMI. */
-            smp_wmb();
-            smp_send_nmi_allbutself();
-
-            /* Wait at most 10ms for some other CPU to respond. */
-            msecs = 10;
-            pending = cpumask_weight(&show_state_mask);
-            while ( pending && msecs-- )
-            {
-                unsigned int left;
-
-                mdelay(1);
-                left = cpumask_weight(&show_state_mask);
-                if ( left < pending )
-                {
-                    pending = left;
-                    msecs = 10;
-                }
-            }
-            if ( pending )
-                printk("Non-responding CPUs: {%*pbl}\n",
-                       CPUMASK_PR(&show_state_mask));
+            show_execution_state_nmi(scratch, false);
         }
+    }
+
+    if ( read_cr4() & X86_CR4_FRED )
+    {
+        bool render_ec = false;
+        const char *vec_name = NULL;
+
+        switch ( regs->fred_ss.type )
+        {
+        case X86_ET_HW_EXC:
+        case X86_ET_PRIV_SW_EXC:
+        case X86_ET_SW_EXC:
+            render_ec = true;
+            vec_name = vector_name(regs->fred_ss.vector);
+            break;
+
+        case X86_ET_OTHER:
+            vec_name = x86_et_other_name(regs->fred_ss.vector);
+            break;
+        }
+
+        if ( render_ec )
+            panic("FATAL TRAP: type %u, %s, vec %u, %s[%04x]%s\n",
+                  regs->fred_ss.type, x86_et_name(regs->fred_ss.type),
+                  regs->fred_ss.vector, vec_name ?: "",
+                  regs->error_code,
+                  (regs->eflags & X86_EFLAGS_IF) ? "" : " IN INTERRUPT CONTEXT");
+        else
+            panic("FATAL TRAP: type %u, %s, vec %u, %s%s\n",
+                  regs->fred_ss.type, x86_et_name(regs->fred_ss.type),
+                  regs->fred_ss.vector, vec_name ?: "",
+                  (regs->eflags & X86_EFLAGS_IF) ? "" : " IN INTERRUPT CONTEXT");
     }
 
     panic("FATAL TRAP: vec %u, %s[%04x]%s\n",
@@ -824,7 +1179,7 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
           (regs->eflags & X86_EFLAGS_IF) ? "" : " IN INTERRUPT CONTEXT");
 }
 
-void asmlinkage do_unhandled_trap(struct cpu_user_regs *regs)
+void asmlinkage noreturn do_unhandled_trap(struct cpu_user_regs *regs)
 {
     fatal_trap(regs, false);
 }
@@ -981,215 +1336,9 @@ void asmlinkage do_trap(struct cpu_user_regs *regs)
     fatal_trap(regs, false);
 }
 
-int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val)
-{
-    const struct domain *d = v->domain;
-    /* Optionally shift out of the way of Viridian architectural MSRs. */
-    uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
-
-    switch ( idx - base )
-    {
-    case 0: /* Write hypercall page MSR.  Read as zero. */
-        *val = 0;
-        return X86EMUL_OKAY;
-    }
-
-    return X86EMUL_EXCEPTION;
-}
-
-int guest_wrmsr_xen(struct vcpu *v, uint32_t idx, uint64_t val)
-{
-    struct domain *d = v->domain;
-    /* Optionally shift out of the way of Viridian architectural MSRs. */
-    uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
-
-    switch ( idx - base )
-    {
-    case 0: /* Write hypercall page */
-    {
-        void *hypercall_page;
-        unsigned long gmfn = val >> PAGE_SHIFT;
-        unsigned int page_index = val & (PAGE_SIZE - 1);
-        struct page_info *page;
-        p2m_type_t t;
-
-        if ( page_index > 0 )
-        {
-            gdprintk(XENLOG_WARNING,
-                     "wrmsr hypercall page index %#x unsupported\n",
-                     page_index);
-            return X86EMUL_EXCEPTION;
-        }
-
-        page = get_page_from_gfn(d, gmfn, &t, P2M_ALLOC);
-
-        if ( !page || !get_page_type(page, PGT_writable_page) )
-        {
-            if ( page )
-                put_page(page);
-
-            if ( p2m_is_paging(t) )
-            {
-                p2m_mem_paging_populate(d, _gfn(gmfn));
-                return X86EMUL_RETRY;
-            }
-
-            gdprintk(XENLOG_WARNING,
-                     "Bad GMFN %lx (MFN %#"PRI_mfn") to MSR %08x\n",
-                     gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN), base);
-            return X86EMUL_EXCEPTION;
-        }
-
-        hypercall_page = __map_domain_page(page);
-        init_hypercall_page(d, hypercall_page);
-        unmap_domain_page(hypercall_page);
-
-        put_page_and_type(page);
-        return X86EMUL_OKAY;
-    }
-
-    default:
-        return X86EMUL_EXCEPTION;
-    }
-}
-
-void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
-                             uint32_t subleaf, struct cpuid_leaf *res)
-{
-    const struct domain *d = v->domain;
-    const struct cpu_policy *p = d->arch.cpu_policy;
-    uint32_t base = is_viridian_domain(d) ? 0x40000100 : 0x40000000;
-    uint32_t idx  = leaf - base;
-    unsigned int limit = is_viridian_domain(d) ? p->hv2_limit : p->hv_limit;
-
-    if ( limit == 0 )
-        /* Default number of leaves */
-        limit = XEN_CPUID_MAX_NUM_LEAVES;
-    else
-        /* Clamp toolstack value between 2 and MAX_NUM_LEAVES. */
-        limit = min(max(limit, 2u), XEN_CPUID_MAX_NUM_LEAVES + 0u);
-
-    if ( idx > limit )
-        return;
-
-    switch ( idx )
-    {
-    case 0:
-        res->a = base + limit; /* Largest leaf */
-        res->b = XEN_CPUID_SIGNATURE_EBX;
-        res->c = XEN_CPUID_SIGNATURE_ECX;
-        res->d = XEN_CPUID_SIGNATURE_EDX;
-        break;
-
-    case 1:
-        res->a = (xen_major_version() << 16) | xen_minor_version();
-        break;
-
-    case 2:
-        res->a = 1;            /* Number of hypercall-transfer pages */
-                               /* MSR base address */
-        res->b = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
-        if ( is_pv_domain(d) ) /* Features */
-            res->c |= XEN_CPUID_FEAT1_MMU_PT_UPDATE_PRESERVE_AD;
-        break;
-
-    case 3: /* Time leaf. */
-        switch ( subleaf )
-        {
-        case 0: /* features */
-            res->a = ((d->arch.vtsc << 0) |
-                      (!!host_tsc_is_safe() << 1) |
-                      (!!boot_cpu_has(X86_FEATURE_RDTSCP) << 2));
-            res->b = d->arch.tsc_mode;
-            res->c = d->arch.tsc_khz;
-            res->d = d->arch.incarnation;
-            break;
-
-        case 1: /* scale and offset */
-        {
-            uint64_t offset;
-
-            if ( !d->arch.vtsc )
-                offset = d->arch.vtsc_offset;
-            else
-                /* offset already applied to value returned by virtual rdtscp */
-                offset = 0;
-            res->a = offset;
-            res->b = offset >> 32;
-            res->c = d->arch.vtsc_to_ns.mul_frac;
-            res->d = d->arch.vtsc_to_ns.shift;
-            break;
-        }
-
-        case 2: /* physical cpu_khz */
-            res->a = cpu_khz;
-            break;
-        }
-        break;
-
-    case 4: /* HVM hypervisor leaf. */
-        if ( !is_hvm_domain(d) || subleaf != 0 )
-            break;
-
-        if ( cpu_has_vmx_apic_reg_virt )
-            res->a |= XEN_HVM_CPUID_APIC_ACCESS_VIRT;
-
-        /*
-         * We want to claim that x2APIC is virtualized if APIC MSR accesses
-         * are not intercepted. When all three of these are true both rdmsr
-         * and wrmsr in the guest will run without VMEXITs (see
-         * vmx_vlapic_msr_changed()).
-         */
-        if ( cpu_has_vmx_virtualize_x2apic_mode &&
-             cpu_has_vmx_apic_reg_virt &&
-             cpu_has_vmx_virtual_intr_delivery )
-            res->a |= XEN_HVM_CPUID_X2APIC_VIRT;
-
-        /*
-         * 1) Xen 4.10 and older was broken WRT grant maps requesting a DMA
-         * mapping, and forgot to honour the guest's request.
-         * 2) 4.11 (and presumably backports) fixed the bug, so the map
-         * hypercall actually did what the guest asked.
-         * 3) To work around the bug, guests must bounce buffer all DMA that
-         * would otherwise use a grant map, because it doesn't know whether the
-         * DMA is originating from an emulated or a real device.
-         * 4) This flag tells guests it is safe not to bounce-buffer all DMA to
-         * work around the bug.
-         */
-        res->a |= XEN_HVM_CPUID_IOMMU_MAPPINGS;
-
-        /* Indicate presence of vcpu id and set it in ebx */
-        res->a |= XEN_HVM_CPUID_VCPU_ID_PRESENT;
-        res->b = v->vcpu_id;
-
-        /* Indicate presence of domain id and set it in ecx */
-        res->a |= XEN_HVM_CPUID_DOMID_PRESENT;
-        res->c = d->domain_id;
-
-        /*
-         * Per-vCPU event channel upcalls are implemented and work
-         * correctly with PIRQs routed over event channels.
-         */
-        res->a |= XEN_HVM_CPUID_UPCALL_VECTOR;
-
-        break;
-
-    case 5: /* PV-specific parameters */
-        if ( is_hvm_domain(d) || subleaf != 0 )
-            break;
-
-        res->b = flsl(get_upper_mfn_bound()) + PAGE_SHIFT;
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        break;
-    }
-}
-
 void asmlinkage do_invalid_op(struct cpu_user_regs *regs)
 {
-    u8 bug_insn[2];
+    uint8_t bug_insn;
     const void *eip = (const void *)regs->rip;
     int id;
 
@@ -1201,8 +1350,8 @@ void asmlinkage do_invalid_op(struct cpu_user_regs *regs)
     }
 
     if ( !is_active_kernel_text(regs->rip) ||
-         copy_from_unsafe(bug_insn, eip, sizeof(bug_insn)) ||
-         memcmp(bug_insn, "\xf\xb", sizeof(bug_insn)) )
+         copy_from_unsafe(&bug_insn, eip, sizeof(bug_insn)) ||
+         bug_insn != 0xd6 /* UDB */ )
         goto die;
 
     id = do_bug_frame(regs, regs->rip);
@@ -1226,8 +1375,7 @@ void asmlinkage do_invalid_op(struct cpu_user_regs *regs)
     if ( likely(extable_fixup(regs, true)) )
         return;
 
-    show_execution_state(regs);
-    panic("FATAL TRAP: vector = %d (invalid opcode)\n", X86_EXC_UD);
+    fatal_trap(regs, false);
 }
 
 void asmlinkage do_int3(struct cpu_user_regs *regs)
@@ -1326,8 +1474,7 @@ void do_general_protection(struct cpu_user_regs *regs)
         return;
 
  hardware_gp:
-    show_execution_state(regs);
-    panic("GENERAL PROTECTION FAULT\n[error_code=%04x]\n", regs->error_code);
+    fatal_trap(regs, false);
 }
 
 #ifdef CONFIG_PV
@@ -1593,20 +1740,9 @@ static int fixup_page_fault(unsigned long addr, struct cpu_user_regs *regs)
     return 0;
 }
 
-void asmlinkage do_page_fault(struct cpu_user_regs *regs)
+static void handle_PF(struct cpu_user_regs *regs, unsigned long addr /* cr2 */)
 {
-    unsigned long addr;
     unsigned int error_code;
-
-    addr = read_cr2();
-
-    /*
-     * Don't re-enable interrupts if we were running an IRQ-off region when
-     * we hit the page fault, or we'll break that code.
-     */
-    ASSERT(!local_irq_is_enabled());
-    if ( regs->flags & X86_EFLAGS_IF )
-        local_irq_enable();
 
     /* fixup_page_fault() might change regs->error_code, so cache it here. */
     error_code = regs->error_code;
@@ -1666,6 +1802,19 @@ void asmlinkage do_page_fault(struct cpu_user_regs *regs)
     }
 
     pv_inject_page_fault(regs->error_code, addr);
+}
+
+/*
+ * When using IDT delivery, it is our responsibility to read %cr2.
+ */
+void asmlinkage handle_PF_IDT(struct cpu_user_regs *regs)
+{
+    unsigned long addr = read_cr2();
+
+    if ( regs->flags & X86_EFLAGS_IF )
+        local_irq_enable();
+
+    handle_PF(regs, addr);
 }
 
 /*
@@ -1858,9 +2007,6 @@ bool nmi_check_continuation(void)
     if ( pci_serr_nmicont() )
         ret = true;
 
-    if ( nmi_oprofile_send_virq() )
-        ret = true;
-
     return ret;
 }
 
@@ -1899,15 +2045,21 @@ void asmlinkage do_device_not_available(struct cpu_user_regs *regs)
     }
 
 #ifdef CONFIG_PV
-    vcpu_restore_fpu_lazy(curr);
-
-    if ( curr->arch.pv.ctrlreg[0] & X86_CR0_TS )
+    if ( !(curr->arch.pv.ctrlreg[0] & X86_CR0_TS) )
     {
-        pv_inject_hw_exception(X86_EXC_NM, X86_EVENT_NO_EC);
-        curr->arch.pv.ctrlreg[0] &= ~X86_CR0_TS;
+        ASSERT_UNREACHABLE();
+        domain_crash(curr->domain, "#NM but vCR0.TS clear\n");
+        return;
     }
-    else
-        TRACE_TIME(TRC_PV_MATH_STATE_RESTORE);
+
+    /*
+     * For better or worse, Xen's ABI with PV guests always clears TS on an #NM
+     * exception. Classic-xen Linux depends on this.
+     */
+    clts();
+    curr->arch.pv.ctrlreg[0] &= ~X86_CR0_TS;
+
+    pv_inject_hw_exception(X86_EXC_NM, X86_EVENT_NO_EC);
 #else
     ASSERT_UNREACHABLE();
 #endif
@@ -1915,13 +2067,10 @@ void asmlinkage do_device_not_available(struct cpu_user_regs *regs)
 
 void nocall sysenter_eflags_saved(void);
 
-void asmlinkage do_debug(struct cpu_user_regs *regs)
+/* Handle #DB.  @dbg is PENDING_DBG, a.k.a. %dr6 with positive polarity. */
+static void handle_DB(struct cpu_user_regs *regs, unsigned long dbg)
 {
-    unsigned long dr6;
     struct vcpu *v = current;
-
-    /* Stash dr6 as early as possible. */
-    dr6 = read_debugreg(6);
 
     /*
      * At the time of writing (March 2018), on the subject of %dr6:
@@ -1990,13 +2139,13 @@ void asmlinkage do_debug(struct cpu_user_regs *regs)
          * If however we do, safety measures need to be enacted.  Use a big
          * hammer and clear all debug settings.
          */
-        if ( dr6 & (DR_TRAP3 | DR_TRAP2 | DR_TRAP1 | DR_TRAP0) )
+        if ( dbg & (DR_TRAP3 | DR_TRAP2 | DR_TRAP1 | DR_TRAP0) )
         {
             unsigned int bp, dr7 = read_debugreg(7);
 
             for ( bp = 0; bp < 4; ++bp )
             {
-                if ( (dr6 & (1u << bp)) && /* Breakpoint triggered? */
+                if ( (dbg & (1u << bp)) && /* Breakpoint triggered? */
                      (dr7 & (3u << (bp * DR_ENABLE_SIZE))) && /* Enabled? */
                      ((dr7 & (3u << ((bp * DR_CONTROL_SIZE) + /* Insn? */
                                      DR_CONTROL_SHIFT))) == DR_RW_EXECUTE) )
@@ -2017,9 +2166,9 @@ void asmlinkage do_debug(struct cpu_user_regs *regs)
          * so ensure the message is ratelimited.
          */
         gprintk(XENLOG_WARNING,
-                "Hit #DB in Xen context: %04x:%p [%ps], stk %04x:%p, dr6 %lx\n",
+                "Hit #DB in Xen context: %04x:%p [%ps], stk %04x:%p, dbg %lx\n",
                 regs->cs, _p(regs->rip), _p(regs->rip),
-                regs->ss, _p(regs->rsp), dr6);
+                regs->ss, _p(regs->rsp), dbg);
 
         return;
     }
@@ -2031,7 +2180,7 @@ void asmlinkage do_debug(struct cpu_user_regs *regs)
      * by debugging actions completed behind it's back.
      */
     v->arch.dr6 = x86_merge_dr6(v->domain->arch.cpu_policy,
-                                v->arch.dr6, dr6 ^ X86_DR6_DEFAULT);
+                                v->arch.dr6, dbg);
 
     if ( guest_kernel_mode(v, regs) && v->domain->debugger_attached )
     {
@@ -2039,7 +2188,16 @@ void asmlinkage do_debug(struct cpu_user_regs *regs)
         return;
     }
 
-    pv_inject_DB(dr6 ^ X86_DR6_DEFAULT);
+    pv_inject_DB(dbg);
+}
+
+/*
+ * When using IDT delivery, it is our responsibility to read %dr6.  Convert it
+ * to positive polarity.
+ */
+void asmlinkage handle_DB_IDT(struct cpu_user_regs *regs)
+{
+    handle_DB(regs, read_debugreg(6) ^ X86_DR6_DEFAULT);
 }
 
 void asmlinkage do_entry_CP(struct cpu_user_regs *regs)
@@ -2074,192 +2232,6 @@ void asmlinkage do_entry_CP(struct cpu_user_regs *regs)
 
     show_execution_state(regs);
     panic("CONTROL-FLOW PROTECTION FAULT: #CP[%04x] %s\n", ec, err);
-}
-
-static void __init noinline __set_intr_gate(unsigned int n,
-                                            uint32_t dpl, void *addr)
-{
-    _set_gate(&idt_table[n], SYS_DESC_irq_gate, dpl, addr);
-}
-
-static void __init set_swint_gate(unsigned int n, void *addr)
-{
-    __set_intr_gate(n, 3, addr);
-}
-
-static void __init set_intr_gate(unsigned int n, void *addr)
-{
-    __set_intr_gate(n, 0, addr);
-}
-
-void percpu_traps_init(void)
-{
-    subarch_percpu_traps_init();
-
-    if ( cpu_has_xen_lbr )
-        wrmsrl(MSR_IA32_DEBUGCTLMSR, IA32_DEBUGCTLMSR_LBR);
-}
-
-/* Exception entries */
-void nocall entry_DE(void);
-void nocall entry_DB(void);
-void nocall entry_NMI(void);
-void nocall entry_BP(void);
-void nocall entry_OF(void);
-void nocall entry_BR(void);
-void nocall entry_UD(void);
-void nocall entry_NM(void);
-void nocall entry_DF(void);
-void nocall entry_TS(void);
-void nocall entry_NP(void);
-void nocall entry_SS(void);
-void nocall entry_GP(void);
-void nocall early_page_fault(void);
-void nocall entry_PF(void);
-void nocall entry_MF(void);
-void nocall entry_AC(void);
-void nocall entry_MC(void);
-void nocall entry_XM(void);
-void nocall entry_CP(void);
-
-void __init init_idt_traps(void)
-{
-    set_intr_gate (X86_EXC_DE,  entry_DE);
-    set_intr_gate (X86_EXC_DB,  entry_DB);
-    set_intr_gate (X86_EXC_NMI, entry_NMI);
-    set_swint_gate(X86_EXC_BP,  entry_BP);
-    set_swint_gate(X86_EXC_OF,  entry_OF);
-    set_intr_gate (X86_EXC_BR,  entry_BR);
-    set_intr_gate (X86_EXC_UD,  entry_UD);
-    set_intr_gate (X86_EXC_NM,  entry_NM);
-    set_intr_gate (X86_EXC_DF,  entry_DF);
-    set_intr_gate (X86_EXC_TS,  entry_TS);
-    set_intr_gate (X86_EXC_NP,  entry_NP);
-    set_intr_gate (X86_EXC_SS,  entry_SS);
-    set_intr_gate (X86_EXC_GP,  entry_GP);
-    set_intr_gate (X86_EXC_PF,  early_page_fault);
-    set_intr_gate (X86_EXC_MF,  entry_MF);
-    set_intr_gate (X86_EXC_AC,  entry_AC);
-    set_intr_gate (X86_EXC_MC,  entry_MC);
-    set_intr_gate (X86_EXC_XM,  entry_XM);
-    set_intr_gate (X86_EXC_CP,  entry_CP);
-
-    /* Specify dedicated interrupt stacks for NMI, #DF, and #MC. */
-    enable_each_ist(idt_table);
-
-    /* CPU0 uses the master IDT. */
-    idt_tables[0] = idt_table;
-
-    this_cpu(gdt) = boot_gdt;
-    if ( IS_ENABLED(CONFIG_PV32) )
-        this_cpu(compat_gdt) = boot_compat_gdt;
-}
-
-static void __init init_ler(void)
-{
-    unsigned int msr = 0;
-
-    if ( !opt_ler )
-        return;
-
-    /*
-     * Intel Pentium 4 is the only known CPU to not use the architectural MSR
-     * indicies.
-     */
-    switch ( boot_cpu_data.x86_vendor )
-    {
-    case X86_VENDOR_INTEL:
-        if ( boot_cpu_data.x86 == 0xf )
-        {
-            msr = MSR_P4_LER_FROM_LIP;
-            break;
-        }
-        fallthrough;
-    case X86_VENDOR_AMD:
-    case X86_VENDOR_HYGON:
-        msr = MSR_IA32_LASTINTFROMIP;
-        break;
-    }
-
-    if ( msr == 0 )
-    {
-        printk(XENLOG_WARNING "LER disabled: failed to identify MSRs\n");
-        return;
-    }
-
-    ler_msr = msr;
-    setup_force_cpu_cap(X86_FEATURE_XEN_LBR);
-}
-
-extern void (*const autogen_entrypoints[X86_NR_VECTORS])(void);
-void __init trap_init(void)
-{
-    unsigned int vector;
-
-    /* Replace early pagefault with real pagefault handler. */
-    set_intr_gate(X86_EXC_PF, entry_PF);
-
-    pv_trap_init();
-
-    for ( vector = 0; vector < X86_NR_VECTORS; ++vector )
-    {
-        if ( autogen_entrypoints[vector] )
-        {
-            /* Found autogen entry: check we won't clobber an existing trap. */
-            ASSERT(idt_table[vector].b == 0);
-            set_intr_gate(vector, autogen_entrypoints[vector]);
-        }
-        else
-        {
-            /* No entry point: confirm we have an existing trap in place. */
-            ASSERT(idt_table[vector].b != 0);
-        }
-    }
-
-    init_ler();
-
-    /* Cache {,compat_}gdt_l1e now that physically relocation is done. */
-    this_cpu(gdt_l1e) =
-        l1e_from_pfn(virt_to_mfn(boot_gdt), __PAGE_HYPERVISOR_RW);
-    if ( IS_ENABLED(CONFIG_PV32) )
-        this_cpu(compat_gdt_l1e) =
-            l1e_from_pfn(virt_to_mfn(boot_compat_gdt), __PAGE_HYPERVISOR_RW);
-
-    percpu_traps_init();
-
-    cpu_init();
-}
-
-void activate_debugregs(const struct vcpu *curr)
-{
-    ASSERT(curr == current);
-
-    write_debugreg(0, curr->arch.dr[0]);
-    write_debugreg(1, curr->arch.dr[1]);
-    write_debugreg(2, curr->arch.dr[2]);
-    write_debugreg(3, curr->arch.dr[3]);
-    write_debugreg(6, curr->arch.dr6);
-
-    /*
-     * Avoid writing the subsequently getting replaced value when getting
-     * called from set_debugreg() below. Eventual future callers will need
-     * to take this into account.
-     */
-    if ( curr->arch.dr7 & DR7_ACTIVE_MASK )
-        write_debugreg(7, curr->arch.dr7);
-
-    /*
-     * Both the PV and HVM paths leave stale DR_MASK values in hardware on
-     * context-switch-out.  If we're activating %dr7 for the guest, we must
-     * sync the DR_MASKs too, whether or not the guest can see them.
-     */
-    if ( boot_cpu_has(X86_FEATURE_DBEXT) )
-    {
-        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.msrs->dr_mask[0]);
-        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.msrs->dr_mask[1]);
-        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.msrs->dr_mask[2]);
-        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.msrs->dr_mask[3]);
-    }
 }
 
 void asm_domain_crash_synchronous(unsigned long addr)
@@ -2299,6 +2271,412 @@ void asmlinkage check_ist_exit(const struct cpu_user_regs *regs, bool ist_exit)
     ASSERT(is_ist == ist_exit);
 }
 #endif
+
+void asmlinkage entry_from_pv(struct cpu_user_regs *regs)
+{
+    struct fred_info *fi = cpu_regs_fred_info(regs);
+    struct vcpu *curr = current;
+    uint8_t type = regs->fred_ss.type;
+    uint8_t vec = regs->fred_ss.vector;
+
+    /* Copy fred_ss.vector into entry_vector as IDT delivery would have done. */
+    regs->entry_vector = vec;
+
+    if ( !IS_ENABLED(CONFIG_PV) )
+        goto fatal;
+
+    /*
+     * First, handle the asynchronous or fatal events.  These are either
+     * unrelated to the interrupted context, or may not have valid context
+     * recorded, and all have special rules on how/whether to re-enable IRQs.
+     */
+    if ( regs->fred_ss.nested )
+        goto fatal;
+
+    switch ( type )
+    {
+    case X86_ET_EXT_INTR:
+        return do_IRQ(regs);
+
+    case X86_ET_NMI:
+        return do_nmi(regs);
+
+    case X86_ET_HW_EXC:
+        switch ( vec )
+        {
+        case X86_EXC_DF: return do_double_fault(regs);
+        case X86_EXC_MC: return do_machine_check(regs);
+        }
+        break;
+    }
+
+    /*
+     * With the asynchronous events handled, what remains are the synchronous
+     * ones.  PV guest context always had interrupts enabled.
+     */
+    local_irq_enable();
+
+    switch ( type )
+    {
+    case X86_ET_SW_INT:
+        /*
+         * For better or worse, Xen writes IDT vectors 3 and 4 with DPL3 (so
+         * INT3/INTO work), making INT $3/4 indistinguishable, and the guest
+         * choice of DPL for these vectors is ignored.
+         *
+         * Have them fall through into X86_ET_HW_EXC, as #BP in particular
+         * needs handling by do_int3() in case an external debugger is
+         * attached.
+         *
+         * As the event type is provided, INT $N instructions don't need #GP
+         * tricks to spot, and INT $0x80 doesn't need a fastpath.  As the
+         * guest is necessary PV64, INT $0x82 has no special meaning either.
+         *
+         * When converting to a fault, hardware finally gives us enough
+         * information to account for prefixes, so provide the more correct
+         * behaviour rather than assuming the instruction was two bytes long.
+         */
+        if ( vec != X86_EXC_BP && vec != X86_EXC_OF )
+        {
+            const struct trap_info *ti = &curr->arch.pv.trap_ctxt[vec];
+
+            if ( permit_softint(TI_GET_DPL(ti), curr, regs) )
+                pv_inject_sw_interrupt(vec);
+            else
+            {
+                regs->rip -= regs->fred_ss.insnlen;
+                pv_inject_hw_exception(X86_EXC_GP, (vec << 3) | X86_XEC_IDT);
+            }
+            break;
+        }
+        fallthrough;
+    case X86_ET_HW_EXC:
+    case X86_ET_PRIV_SW_EXC:
+    case X86_ET_SW_EXC:
+        switch ( vec )
+        {
+        case X86_EXC_PF:  handle_PF(regs, fi->edata); break;
+        case X86_EXC_GP:  do_general_protection(regs); break;
+        case X86_EXC_UD:  do_invalid_op(regs); break;
+        case X86_EXC_NM:  do_device_not_available(regs); break;
+        case X86_EXC_BP:  do_int3(regs); break;
+        case X86_EXC_DB:  handle_DB(regs, fi->edata); break;
+        case X86_EXC_CP:  do_entry_CP(regs); break;
+
+        case X86_EXC_DE:
+        case X86_EXC_OF:
+        case X86_EXC_BR:
+        case X86_EXC_NP:
+        case X86_EXC_SS:
+        case X86_EXC_MF:
+        case X86_EXC_AC:
+        case X86_EXC_XM:
+            do_trap(regs);
+            break;
+
+        default:
+            goto fatal;
+        }
+        break;
+
+    case X86_ET_OTHER:
+        switch ( regs->fred_ss.vector )
+        {
+        case 1: /* SYSCALL */
+        {
+            /*
+             * FRED delivery preserves the interrupted %cs/%ss, but previously
+             * SYSCALL lost the interrupted selectors, and SYSRET forced the
+             * use of the ones in MSR_STAR.
+             *
+             * The guest isn't aware of FRED, so recreate the legacy
+             * behaviour.
+             *
+             * The non-FRED SYSCALL path sets TRAP_syscall in entry_vector to
+             * signal that SYSRET can be used, but this isn't relevant in FRED
+             * mode.
+             *
+             * When setting the selectors, clear all upper metadata again for
+             * backwards compatibility.  In particular fred_ss.swint becomes
+             * pend_DB on ERETx, and nothing else in the pv_hypercall() would
+             * clean up.
+             *
+             * When converting to a fault, hardware finally gives us enough
+             * information to account for prefixes, so provide the more
+             * correct behaviour rather than assuming the instruction was two
+             * bytes long.
+             */
+            bool l = regs->fred_ss.l;
+            unsigned int len = regs->fred_ss.insnlen;
+
+            regs->ssx = l ? FLAT_KERNEL_SS   : FLAT_USER_SS32;
+            regs->csx = l ? FLAT_KERNEL_CS64 : FLAT_USER_CS32;
+            regs->rcx = regs->rip;
+            regs->r11 = regs->rflags;
+
+            if ( guest_kernel_mode(curr, regs) )
+                pv_hypercall(regs);
+            else if ( (l ? curr->arch.pv.syscall_callback_eip
+                         : curr->arch.pv.syscall32_callback_eip) == 0 )
+            {
+                regs->rip -= len;
+                pv_inject_hw_exception(X86_EXC_UD, X86_EVENT_NO_EC);
+            }
+            else
+            {
+                /*
+                 * The PV ABI, given no virtual SYSCALL_MASK, hardcodes that
+                 * DF is cleared.  Other flags are handled in the same way as
+                 * interrupts and exceptions in create_bounce_frame().
+                 */
+                regs->eflags &= ~X86_EFLAGS_DF;
+                pv_inject_callback(l ? CALLBACKTYPE_syscall
+                                     : CALLBACKTYPE_syscall32);
+            }
+            break;
+        }
+
+        case 2: /* SYSENTER */
+        {
+            /*
+             * FRED delivery preserves the interrupted state, but previously
+             * SYSENTER discarded almost everything.
+             *
+             * The guest isn't aware of FRED, so recreate the legacy
+             * behaviour.
+             *
+             * When setting the selectors, clear all upper metadata.  In
+             * particular fred_ss.swint becomes pend_DB on ERETx.
+             *
+             * When converting to a fault, hardware finally gives us enough
+             * information to account for prefixes, so provide the more
+             * correct behaviour rather than assuming the instruction was two
+             * bytes long.
+             */
+            regs->ssx = FLAT_USER_SS;
+            regs->rsp = 0;
+            regs->eflags &= ~(X86_EFLAGS_VM | X86_EFLAGS_IF);
+            regs->csx = 3;
+            regs->rip = 0;
+
+            if ( !curr->arch.pv.sysenter_callback_eip )
+                pv_inject_hw_exception(X86_EXC_GP, 0);
+            else
+                pv_inject_callback(CALLBACKTYPE_sysenter);
+            break;
+        }
+
+        default:
+            goto fatal;
+        }
+        break;
+
+    default:
+        goto fatal;
+    }
+
+    return;
+
+ fatal:
+    fatal_trap(regs, false);
+}
+
+void nocall eretu_error_dom_crash(void);
+
+/*
+ * Classify an event at the ERETU instruction, and handle if possible.
+ * Returns @true if handled, @false if the event should continue down the
+ * normal handlers.
+ */
+static bool handle_eretu_event(struct cpu_user_regs *regs)
+{
+    unsigned long recover;
+
+    /*
+     * WARNING: The GPRs in gregs overlaps with regs.  Only gregs->error_code
+     *          and later are legitimate to access.
+     */
+    struct cpu_user_regs *gregs =
+        _p(regs->rsp - offsetof(struct cpu_user_regs, error_code));
+
+    /*
+     * The asynchronous or fatal events (INTR, NMI, #MC, #DF) have been dealt
+     * with, meaning we only have synchronous ones to consider.  Anything
+     * which isn't a hardware exception (e.g. #BP) wants handling normally.
+     */
+    if ( regs->fred_ss.type != X86_ET_HW_EXC )
+        return false;
+
+    /*
+     * Guests are permitted to write non-present GDT/LDT entries.  Therefore
+     * #NP[sel] (%cs) and #SS[sel] (%ss) must be handled as guest errors.  The
+     * only other source of #SS is for a bad %ss-relative memory access in
+     * Xen, and if the stack is that bad, we'll have escalated to #DF.
+     *
+     * #PF can happen from ERETU accessing the GDT/LDT.  Xen may translate
+     * these into #GP for the guest, so must be handled as guest errors.  In
+     * theory we can get #PF for a bad instruction fetch or bad stack access,
+     * but either of these will be fatal and not end up here.
+     */
+    switch ( regs->fred_ss.vector )
+    {
+    case X86_EXC_GP:
+        /*
+         * #GP[0] can occur because of a NULL %cs or %ss (which are a guest
+         * error), but some #GP[0]'s are errors in Xen (ERETU at SL != 0), or
+         * errors of Xen's handling of guest state (bad metadata).
+         *
+         * These magic numbers came from the FRED Spec; they check that ERETU
+         * is trying to return to Ring 3, and that reserved or inapplicable
+         * bits are 0.
+         */
+        if ( regs->error_code == 0 && (gregs->cs & ~3) && (gregs->ss & ~3) &&
+             (regs->fred_cs.sl != 0 ||
+              (gregs->csx    & 0xffffffffffff0003UL) != 3 ||
+              (gregs->rflags & 0xffffffffffc2b02aUL) != 2 ||
+              (gregs->ssx    &         0xfff80003UL) != 3) )
+        {
+            recover = (unsigned long)eretu_error_dom_crash;
+
+            if ( regs->fred_cs.sl )
+                gprintk(XENLOG_ERR, "ERETU at SL %u\n", regs->fred_cs.sl);
+            else
+                gprintk(XENLOG_ERR, "Bad return state: csx %#lx, rflags %#lx, ssx %#x\n",
+                        gregs->csx, gregs->rflags, (unsigned int)gregs->ssx);
+            break;
+        }
+        fallthrough;
+    case X86_EXC_NP:
+    case X86_EXC_SS:
+    case X86_EXC_PF:
+        recover = (unsigned long)entry_FRED_R3;
+        break;
+
+        /*
+         * Handle everything else normally.  e.g. #DB would be debugging
+         * activities in Xen.  In theory we can get #UD if CR4.FRED gets
+         * cleared, but in practice if that were the case we wouldn't be here
+         * handling the result.
+         */
+    default:
+        return false;
+    }
+
+    this_cpu(last_extable_addr) = regs->rip;
+
+    /*
+     * If an NMI was taken in guest context and the ERETU faulted, NMIs will
+     * still be blocked.  Therefore we copy the interrupted frame's NMI status
+     * into our own, and must ERETS as part of recovery.
+     */
+    regs->fred_ss.nmi = gregs->fred_ss.nmi;
+
+    /*
+     * Next, copy the exception information from the current frame back onto
+     * the interrupted frame, preserving the interrupted frame's %cs and %ss.
+     */
+    *cpu_regs_fred_info(regs) = *cpu_regs_fred_info(gregs);
+    gregs->ssx = (regs->ssx & ~0xffff) | gregs->ss;
+    gregs->csx = (regs->csx & ~0xffff) | gregs->cs;
+    gregs->error_code   = regs->error_code;
+    gregs->entry_vector = regs->entry_vector;
+
+    fixup_exception_return(regs, recover, 0);
+
+    return true;
+}
+
+void nocall eretu(void);
+
+void asmlinkage entry_from_xen(struct cpu_user_regs *regs)
+{
+    struct fred_info *fi = cpu_regs_fred_info(regs);
+    uint8_t type = regs->fred_ss.type;
+
+    /* Copy fred_ss.vector into entry_vector as IDT delivery would have done. */
+    regs->entry_vector = regs->fred_ss.vector;
+
+    /*
+     * First, handle the asynchronous or fatal events.  These are either
+     * unrelated to the interrupted context, or may not have valid context
+     * recorded, and all have special rules on how/whether to re-enable IRQs.
+     */
+    if ( regs->fred_ss.nested )
+        goto fatal;
+
+    switch ( type )
+    {
+    case X86_ET_EXT_INTR:
+        return do_IRQ(regs);
+
+    case X86_ET_NMI:
+        return do_nmi(regs);
+
+    case X86_ET_HW_EXC:
+        switch ( regs->fred_ss.vector )
+        {
+        case X86_EXC_DF: return do_double_fault(regs);
+        case X86_EXC_MC: return do_machine_check(regs);
+        }
+        break;
+    }
+
+    /*
+     * With the asynchronous events handled, what remains are the synchronous
+     * ones.  If we interrupted an IRQs-on region, we should re-enable IRQs
+     * now; for #PF and #DB, %cr2 and PENDING_DBG are on the stack in edata.
+     */
+    if ( regs->eflags & X86_EFLAGS_IF )
+        local_irq_enable();
+
+    /*
+     * An event taken at the ERETU instruction may be because of bad guest
+     * state.  If so, it will need special handling.
+     */
+    if ( unlikely(regs->rip == (unsigned long)eretu) &&
+         handle_eretu_event(regs) )
+        return;
+
+    switch ( type )
+    {
+    case X86_ET_HW_EXC:
+    case X86_ET_PRIV_SW_EXC:
+    case X86_ET_SW_EXC:
+        switch ( regs->fred_ss.vector )
+        {
+        case X86_EXC_PF:  handle_PF(regs, fi->edata); break;
+        case X86_EXC_GP:  do_general_protection(regs); break;
+        case X86_EXC_UD:  do_invalid_op(regs); break;
+        case X86_EXC_NM:  do_device_not_available(regs); break;
+        case X86_EXC_BP:  do_int3(regs); break;
+        case X86_EXC_DB:  handle_DB(regs, fi->edata); break;
+        case X86_EXC_CP:  do_entry_CP(regs); break;
+
+        case X86_EXC_DE:
+        case X86_EXC_OF:
+        case X86_EXC_BR:
+        case X86_EXC_NP:
+        case X86_EXC_SS:
+        case X86_EXC_MF:
+        case X86_EXC_AC:
+        case X86_EXC_XM:
+            do_trap(regs);
+            break;
+
+        default:
+            goto fatal;
+        }
+        break;
+
+    default:
+        goto fatal;
+    }
+
+    return;
+
+ fatal:
+    fatal_trap(regs, false);
+}
 
 /*
  * Local variables:

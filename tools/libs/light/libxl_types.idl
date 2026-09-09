@@ -7,9 +7,9 @@ namespace("libxl_")
 
 libxl_defbool = Builtin("defbool", json_parse_type="JSON_STRING", passby=PASS_BY_REFERENCE, copy_fn=None,
                         check_default_fn="libxl__defbool_is_default")
-libxl_domid = Builtin("domid", json_gen_fn = "yajl_gen_integer", json_parse_fn = "libxl__uint32_parse_json",
+libxl_domid = Builtin("domid", json_gen_fn = "yajl_gen_integer", jsonc_json_gen_fn = "libxl__uint64_gen_jso", json_parse_fn = "libxl__uint32_parse_json",
                       json_parse_type = "JSON_INTEGER", autogenerate_json = False, copy_fn=None)
-libxl_devid = Builtin("devid", json_gen_fn = "yajl_gen_integer", json_parse_fn = "libxl__int_parse_json",
+libxl_devid = Builtin("devid", json_gen_fn = "yajl_gen_integer", jsonc_json_gen_fn = "libxl__int_gen_jso", json_parse_fn = "libxl__int_parse_json",
                       json_parse_type = "JSON_INTEGER", autogenerate_json = False, signed = True, init_val="-1",
                       copy_fn=None)
 libxl_uuid = Builtin("uuid", json_parse_type="JSON_STRING", passby=PASS_BY_REFERENCE, check_default_fn="libxl_uuid_is_nil",
@@ -37,7 +37,8 @@ libxl_ms_vm_genid = Builtin("ms_vm_genid", passby=PASS_BY_REFERENCE, check_defau
 # Specific integer types
 #
 
-MemKB = UInt(64, init_val = "LIBXL_MEMKB_DEFAULT", json_gen_fn = "libxl__uint64_gen_json")
+MemKB = UInt(64, init_val = "LIBXL_MEMKB_DEFAULT",
+             json_gen_fn = "libxl__uint64_gen_json", jsonc_json_gen_fn = "libxl__uint64_gen_jso")
 
 #
 # Constants / Enumerations
@@ -104,7 +105,7 @@ libxl_channel_connection = Enumeration("channel_connection", [
 
 libxl_device_model_version = Enumeration("device_model_version", [
     (0, "UNKNOWN"),
-    (1, "QEMU_XEN_TRADITIONAL"), # Historical qemu-xen device model (qemu-dm)
+    (1, "QEMU_XEN_TRADITIONAL"), # Historical dm (qemu-dm, no longer supported)
     (2, "QEMU_XEN"),             # Upstream based qemu-xen device model
     ])
 
@@ -551,6 +552,15 @@ libxl_sve_type = Enumeration("sve_type", [
     (2048, "2048")
     ], init_val = "LIBXL_SVE_TYPE_DISABLED")
 
+libxl_arm_sci_type = Enumeration("arm_sci_type", [
+    (0, "none"),
+    (1, "scmi_smc")
+    ], init_val = "LIBXL_ARM_SCI_TYPE_NONE")
+
+libxl_arm_sci = Struct("arm_sci", [
+    ("type", libxl_arm_sci_type),
+    ])
+
 libxl_rdm_reserve = Struct("rdm_reserve", [
     ("strategy",    libxl_rdm_reserve_strategy),
     ("policy",      libxl_rdm_reserve_policy),
@@ -563,6 +573,15 @@ libxl_altp2m_mode = Enumeration("altp2m_mode", [
     (2, "external"),
     (3, "limited"),
     ], init_val = "LIBXL_ALTP2M_MODE_DISABLED")
+
+libxl_xs_quota_item = Struct("xs_quota_item", [
+    ("name", string),
+    ("val",  uint32),
+    ])
+
+libxl_xs_quota_list = Struct("xs_quota_list", [
+    ("quota", Array(libxl_xs_quota_item, "num_quota"))
+    ])
 
 libxl_domain_build_info = Struct("domain_build_info",[
     ("max_vcpus",       integer),
@@ -691,6 +710,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("vkb_device",       libxl_defbool),
                                        ("soundhw",          string),
                                        ("xen_platform_pci", libxl_defbool),
+                                       ("xen_platform_pci_bar_uc", libxl_defbool),
                                        ("usbdevice_list",   libxl_string_list),
                                        ("vendor_device",    libxl_vendor_device),
                                        # See libxl_ms_vm_genid_generate()
@@ -723,19 +743,24 @@ libxl_domain_build_info = Struct("domain_build_info",[
     ("arch_arm", Struct(None, [("gic_version", libxl_gic_version),
                                ("vuart", libxl_vuart_type),
                                ("sve_vl", libxl_sve_type),
-                               ("nr_spis", uint32),
+                               ("nr_spis", uint32, {'init_val': 'LIBXL_NR_SPIS_DEFAULT'}),
+                               ("arm_sci", libxl_arm_sci),
                               ])),
     ("arch_x86", Struct(None, [("msr_relaxed", libxl_defbool),
                               ])),
     # Alternate p2m is not bound to any architecture or guest type, as it is
     # supported by x86 HVM and ARM support is planned.
     ("altp2m", libxl_altp2m_mode),
+    ("altp2m_count", uint32, {'init_val': 'LIBXL_ALTP2M_COUNT_DEFAULT'}),
 
     # Size of preallocated vmtrace trace buffers (in KBYTES).
     # Use zero value to disable this feature.
     ("vmtrace_buf_kb", integer),
 
     ("vpmu", libxl_defbool),
+    ("trap_unmapped_accesses", libxl_defbool),
+    ("xenstore_feature_mask", uint32, {'init_val': '~0U'}),
+    ("xenstore_quota", libxl_xs_quota_list),
 
     ], dir=DIR_IN,
        copy_deprecated_fn="libxl__domain_build_info_copy_deprecated",

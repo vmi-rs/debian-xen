@@ -53,7 +53,6 @@
  * for_each_online_node(node)		for-loop node over node_online_map
  */
 
-#include <xen/kernel.h>
 #include <xen/bitmap.h>
 #include <xen/numa.h>
 
@@ -66,8 +65,6 @@ typedef struct { DECLARE_BITMAP(bits, MAX_NUMNODES); } nodemask_t;
 #define NODEMASK_PR(src) MAX_NUMNODES, nodemask_bits(src)
 
 #define nodemask_bits(src) ((src)->bits)
-
-extern nodemask_t _unused_nodemask_arg_;
 
 #define node_set(node, dst) __node_set((node), &(dst))
 static inline void __node_set(int node, volatile nodemask_t *dstp)
@@ -215,7 +212,7 @@ static inline int __last_node(const nodemask_t *srcp, int nbits)
 
 #define nodemask_of_node(node)						\
 ({									\
-	typeof(_unused_nodemask_arg_) m;				\
+	nodemask_t m;							\
 	if (sizeof(m) == sizeof(unsigned long)) {			\
 		m.bits[0] = 1UL<<(node);				\
 	} else {							\

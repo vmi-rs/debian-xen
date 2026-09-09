@@ -19,7 +19,7 @@ static inline uint32_t rdpkru(void)
 {
     uint32_t pkru;
 
-    asm volatile ( ".byte 0x0f,0x01,0xee"
+    asm volatile ( ".byte 0x0f,0x01,0xee" /* binutils >= 2.26 or Clang >= 3.8 */
                    : "=a" (pkru) : "c" (0) : "dx" );
 
     return pkru;
@@ -27,7 +27,7 @@ static inline uint32_t rdpkru(void)
 
 static inline void wrpkru(uint32_t pkru)
 {
-    asm volatile ( ".byte 0x0f,0x01,0xef"
+    asm volatile ( ".byte 0x0f,0x01,0xef" /* binutils >= 2.26 or Clang >= 3.8 */
                    :: "a" (pkru), "d" (0), "c" (0) );
 }
 
@@ -52,11 +52,7 @@ DECLARE_PER_CPU(uint32_t, pkrs);
 
 static inline uint32_t rdpkrs(void)
 {
-    uint32_t pkrs, tmp;
-
-    rdmsr(MSR_PKRS, pkrs, tmp);
-
-    return pkrs;
+    return rdmsr(MSR_PKRS);
 }
 
 static inline uint32_t rdpkrs_and_cache(void)
@@ -72,14 +68,14 @@ static inline void wrpkrs(uint32_t pkrs)
     {
         *this_pkrs = pkrs;
 
-        wrmsr_ns(MSR_PKRS, pkrs, 0);
+        wrmsrns(MSR_PKRS, pkrs);
     }
 }
 
 static inline void wrpkrs_and_cache(uint32_t pkrs)
 {
     this_cpu(pkrs) = pkrs;
-    wrmsr_ns(MSR_PKRS, pkrs, 0);
+    wrmsrns(MSR_PKRS, pkrs);
 }
 
 #endif /* ASM_PROT_KEY_H */

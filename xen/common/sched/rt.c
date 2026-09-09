@@ -26,7 +26,6 @@
 #include <xen/trace.h>
 #include <xen/cpu.h>
 #include <xen/keyhandler.h>
-#include <xen/trace.h>
 #include <xen/err.h>
 #include <xen/guest_access.h>
 
@@ -109,6 +108,12 @@
  * high overhead).
  */
 #define RTDS_MIN_BUDGET     (MICROSECS(10))
+
+/*
+ * Maximum extratime demotion level. Saturating at this value avoids
+ * unsigned wraparound back to 0 (highest scheduling priority).
+ */
+#define RTDS_MAX_PRIORITY_LEVEL (~0U)
 
 /*
  * UPDATE_LIMIT_SHIFT: a constant used in rt_update_deadline(). When finding
@@ -500,7 +505,7 @@ deadline_queue_remove(struct list_head *queue, struct list_head *elem)
 }
 
 static inline bool
-deadline_queue_insert(struct rt_unit * (*qelem)(struct list_head *),
+deadline_queue_insert(struct rt_unit * (*qelem)(struct list_head *elem),
                       struct rt_unit *svc, struct list_head *elem,
                       struct list_head *queue)
 {
@@ -743,6 +748,14 @@ rt_switch_sched(struct scheduler *new_ops, unsigned int cpu,
     {
         init_timer(&prv->repl_timer, repl_timer_handler, (void *)new_ops, cpu);
         dprintk(XENLOG_DEBUG, "RTDS: timer initialized on cpu %u\n", cpu);
+
+        /*
+         * cpupool_unassign_cpu_start() refuses to remove the last pCPU from
+         * a populated cpupool, so by the time this path runs (timer was
+         * killed because all RTDS pCPUs were removed) the pool must have
+         * been empty of domains, which implies replq is empty too.
+         */
+        ASSERT(list_empty(rt_replq(new_ops)));
     }
 
     sched_idle_unit(cpu)->priv = vdata;
@@ -976,7 +989,9 @@ burn_budget(const struct scheduler *ops, struct rt_unit *svc, s_time_t now)
     {
         if ( has_extratime(svc) )
         {
-            svc->priority_level++;
+            if ( svc->priority_level < RTDS_MAX_PRIORITY_LEVEL )
+                svc->priority_level++;
+
             svc->cur_budget = svc->budget;
         }
         else
@@ -1362,6 +1377,23 @@ out:
     unit_schedule_unlock_irq(lock, unit);
 }
 
+static int
+rt_validate_params(const struct xen_domctl_sched_rtds *rtds,
+                   s_time_t *period, s_time_t *budget)
+{
+    s_time_t p = MICROSECS(rtds->period);
+    s_time_t b = MICROSECS(rtds->budget);
+
+    if ( p < RTDS_MIN_PERIOD || p > RTDS_MAX_PERIOD ||
+         b < RTDS_MIN_BUDGET || b > p )
+        return -EINVAL;
+
+    *period = p;
+    *budget = b;
+
+    return 0;
+}
+
 /*
  * set/get each unit info of each domain
  */
@@ -1388,17 +1420,16 @@ rt_dom_cntl(
         op->u.rtds.budget = RTDS_DEFAULT_BUDGET / MICROSECS(1);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
-        if ( op->u.rtds.period == 0 || op->u.rtds.budget == 0 )
-        {
-            rc = -EINVAL;
+        rc = rt_validate_params(&op->u.rtds, &period, &budget);
+        if ( rc )
             break;
-        }
+
         spin_lock_irqsave(&prv->lock, flags);
         for_each_sched_unit ( d, unit )
         {
             svc = rt_unit(unit);
-            svc->period = MICROSECS(op->u.rtds.period); /* transfer to nanosec */
-            svc->budget = MICROSECS(op->u.rtds.budget);
+            svc->period = period;
+            svc->budget = budget;
         }
         spin_unlock_irqrestore(&prv->lock, flags);
         break;
@@ -1440,14 +1471,9 @@ rt_dom_cntl(
             }
             else
             {
-                period = MICROSECS(local_sched.u.rtds.period);
-                budget = MICROSECS(local_sched.u.rtds.budget);
-                if ( period > RTDS_MAX_PERIOD || budget < RTDS_MIN_BUDGET ||
-                     budget > period || period < RTDS_MIN_PERIOD )
-                {
-                    rc = -EINVAL;
+                rc = rt_validate_params(&local_sched.u.rtds, &period, &budget);
+                if ( rc )
                     break;
-                }
 
                 spin_lock_irqsave(&prv->lock, flags);
                 svc = rt_unit(d->vcpu[local_sched.vcpuid]->sched_unit);

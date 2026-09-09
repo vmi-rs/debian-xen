@@ -11,6 +11,7 @@
 #include <asm/alternative.h>
 #include <xen/init.h>
 #include <asm/setup.h>
+#include <asm/stubs.h>
 #include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/nmi.h>
@@ -18,8 +19,6 @@
 #include <xen/livepatch.h>
 
 #define MAX_PATCH_LEN (255-1)
-
-extern struct alt_instr __alt_instructions[], __alt_instructions_end[];
 
 #ifdef K8_NOP1
 static const unsigned char k8nops[] init_or_livepatch_const = {
@@ -90,7 +89,7 @@ static bool init_or_livepatch_read_mostly toolchain_nops_are_ideal;
 
 static void __init arch_init_ideal_nops(void)
 {
-    switch ( boot_cpu_data.x86_vendor )
+    switch ( boot_cpu_data.vendor )
     {
     case X86_VENDOR_INTEL:
         /*
@@ -98,10 +97,10 @@ static void __init arch_init_ideal_nops(void)
          * actually perform better with the "k8_nops" than with the SDM-
          * recommended NOPs.
          */
-        if ( boot_cpu_data.x86 != 6 )
+        if ( boot_cpu_data.family != 6 )
             break;
 
-        switch ( boot_cpu_data.x86_model )
+        switch ( boot_cpu_data.model )
         {
         case 0x0f ... 0x1b:
         case 0x1d ... 0x25:
@@ -112,7 +111,7 @@ static void __init arch_init_ideal_nops(void)
         break;
 
     case X86_VENDOR_AMD:
-        if ( boot_cpu_data.x86 <= 0xf )
+        if ( boot_cpu_data.family <= 0xf )
             ideal_nops = k8_nops;
         break;
     }
@@ -213,19 +212,52 @@ extern void *const __initdata_cf_clobber_start[];
 extern void *const __initdata_cf_clobber_end[];
 
 /*
+ * In CET-IBT enabled builds, clobber endbr64 instructions after altcall has
+ * finished optimising all indirect branches to direct ones.
+ */
+static void __init seal_endbr64(void)
+{
+    void *const *val;
+    unsigned int clobbered = 0;
+
+    if ( !cpu_has_xen_ibt )
+        return;
+
+    /*
+     * This is some minor structure (ab)use.  We walk the entire contents
+     * of .init.{ro,}data.cf_clobber as if it were an array of pointers.
+     *
+     * If the pointer points into .text, and at an endbr64 instruction,
+     * nop out the endbr64.  This causes the pointer to no longer be a
+     * legal indirect branch target under CET-IBT.  This is a
+     * defence-in-depth measure, to reduce the options available to an
+     * adversary who has managed to hijack a function pointer.
+     */
+    for ( val = __initdata_cf_clobber_start;
+          val < __initdata_cf_clobber_end;
+          val++ )
+    {
+        void *ptr = *val;
+
+        if ( !is_kernel_text(ptr) || !is_endbr64(ptr) )
+            continue;
+
+        place_endbr64_poison(ptr);
+        clobbered++;
+    }
+
+    printk("altcall: Optimised away %u endbr64 instructions\n", clobbered);
+}
+
+/*
  * Replace instructions with better alternatives for this CPU type.
  * This runs before SMP is initialized to avoid SMP problems with
  * self modifying code. This implies that asymmetric systems where
  * APs have less capabilities than the boot processor are not handled.
  * Tough. Make sure you disable such features by hand.
- *
- * The caller will set the "force" argument to true for the final
- * invocation, such that no CALLs/JMPs to NULL pointers will be left
- * around. See also the further comment below.
  */
 static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
-                                                 struct alt_instr *end,
-                                                 bool force)
+                                                 struct alt_instr *end)
 {
     struct alt_instr *a, *base;
 
@@ -288,10 +320,7 @@ static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
 
         /* Skip patch sites already handled during the first pass. */
         if ( a->priv )
-        {
-            ASSERT(force);
             continue;
-        }
 
         /*
          * Should a replacement be performed?  Most replacements have positive
@@ -321,76 +350,13 @@ static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
 
         /* 0xe8/0xe9 are relative branches; fix the offset. */
         if ( a->repl_len >= 5 && (*buf & 0xfe) == 0xe8 )
-        {
-            /*
-             * Detect the special case of indirect-to-direct branch patching:
-             * - replacement is a direct CALL/JMP (opcodes 0xE8/0xE9; already
-             *   checked above),
-             * - replacement's displacement is -5 (pointing back at the very
-             *   insn, which makes no sense in a real replacement insn),
-             * - original is an indirect CALL/JMP (opcodes 0xFF/2 or 0xFF/4)
-             *   using RIP-relative addressing.
-             * Some branch destinations may still be NULL when we come here
-             * the first time. Defer patching of those until the post-presmp-
-             * initcalls re-invocation (with force set to true). If at that
-             * point the branch destination is still NULL, insert "UD2; UD0"
-             * (for ease of recognition) instead of CALL/JMP.
-             */
-            if ( a->cpuid == X86_FEATURE_ALWAYS &&
-                 *(int32_t *)(buf + 1) == -5 &&
-                 a->orig_len >= 6 &&
-                 orig[0] == 0xff &&
-                 orig[1] == (*buf & 1 ? 0x25 : 0x15) )
-            {
-                long disp = *(int32_t *)(orig + 2);
-                const uint8_t *dest = *(void **)(orig + 6 + disp);
-
-                if ( dest )
-                {
-                    /*
-                     * When building for CET-IBT, all function pointer targets
-                     * should have an endbr64 instruction.
-                     *
-                     * If this is not the case, leave a warning because
-                     * something is probably wrong with the build.  A CET-IBT
-                     * enabled system might have exploded already.
-                     *
-                     * Otherwise, skip the endbr64 instruction.  This is a
-                     * marginal perf improvement which saves on instruction
-                     * decode bandwidth.
-                     */
-                    if ( IS_ENABLED(CONFIG_XEN_IBT) )
-                    {
-                        if ( is_endbr64(dest) )
-                            dest += ENDBR64_LEN;
-                        else
-                            printk(XENLOG_WARNING
-                                   "altcall %ps dest %ps has no endbr64\n",
-                                   orig, dest);
-                    }
-
-                    disp = dest - (orig + 5);
-                    ASSERT(disp == (int32_t)disp);
-                    *(int32_t *)(buf + 1) = disp;
-                }
-                else if ( force )
-                {
-                    buf[0] = 0x0f;
-                    buf[1] = 0x0b;
-                    buf[2] = 0x0f;
-                    buf[3] = 0xff;
-                    buf[4] = 0xff;
-                }
-                else
-                    continue;
-            }
-            else if ( force && system_state < SYS_STATE_active )
-                ASSERT_UNREACHABLE();
-            else
-                *(int32_t *)(buf + 1) += repl - orig;
-        }
-        else if ( force && system_state < SYS_STATE_active  )
-            ASSERT_UNREACHABLE();
+            *(int32_t *)(buf + 1) += repl - orig;
+        else if ( IS_ENABLED(CONFIG_RETURN_THUNK) &&
+                  a->repl_len > 5 && buf[a->repl_len - 5] == 0xe9 &&
+                  ((long)repl + a->repl_len +
+                   *(int32_t *)(buf + a->repl_len - 4) ==
+                   (long)__x86_return_thunk) )
+            *(int32_t *)(buf + a->repl_len - 4) += repl - orig;
 
         a->priv = 1;
 
@@ -398,39 +364,90 @@ static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
         text_poke(orig, buf, total_len);
     }
 
-    /*
-     * Clobber endbr64 instructions now that altcall has finished optimising
-     * all indirect branches to direct ones.
-     */
-    if ( force && cpu_has_xen_ibt && system_state < SYS_STATE_active )
+    return 0;
+}
+
+/*
+ * At build time, alternative calls are emitted as:
+ *   ff 15 xx xx xx xx  =>  call *disp32(%rip)
+ *
+ * During boot, we devirtualise by editing to:
+ *   2e e8 xx xx xx xx  =>  cs call disp32
+ *
+ * or, if the function pointer is still NULL, poison to:
+ *   0f 0b 0f 0b 0f 0b  =>  ud2a (x3)
+ */
+static int init_or_livepatch apply_alt_calls(
+    const struct alt_call *start, const struct alt_call *end)
+{
+    const struct alt_call *a;
+
+    for ( a = start; a < end; a++ )
     {
-        void *const *val;
-        unsigned int clobbered = 0;
+        const uint8_t *dest;
+        uint8_t buf[6], *orig = ALT_CALL_PTR(a);
+        long disp;
 
-        /*
-         * This is some minor structure (ab)use.  We walk the entire contents
-         * of .init.{ro,}data.cf_clobber as if it were an array of pointers.
-         *
-         * If the pointer points into .text, and at an endbr64 instruction,
-         * nop out the endbr64.  This causes the pointer to no longer be a
-         * legal indirect branch target under CET-IBT.  This is a
-         * defence-in-depth measure, to reduce the options available to an
-         * adversary who has managed to hijack a function pointer.
-         */
-        for ( val = __initdata_cf_clobber_start;
-              val < __initdata_cf_clobber_end;
-              val++ )
+        /* It's likely that this won't change, but check just to be safe. */
+        BUILD_BUG_ON(ALT_CALL_LEN(a) != 6);
+
+        if ( orig[0] != 0xff || orig[1] != 0x15 )
         {
-            void *ptr = *val;
-
-            if ( !is_kernel_text(ptr) || !is_endbr64(ptr) )
-                continue;
-
-            place_endbr64_poison(ptr);
-            clobbered++;
+            printk(XENLOG_ERR
+                   "Altcall for %ps [%6ph] not CALL *RIPREL\n",
+                   orig, orig);
+            return -EINVAL;
         }
 
-        printk("altcall: Optimised away %u endbr64 instructions\n", clobbered);
+        disp = *(int32_t *)(orig + 2);
+        dest = *(const void **)(orig + 6 + disp);
+
+        if ( dest )
+        {
+            /*
+             * When building for CET-IBT, all function pointer targets
+             * should have an endbr64 instruction.
+             *
+             * If this is not the case, leave a warning because
+             * something is probably wrong with the build.  A CET-IBT
+             * enabled system might have exploded already.
+             *
+             * Otherwise, skip the endbr64 instruction.  This is a
+             * marginal perf improvement which saves on instruction
+             * decode bandwidth.
+             */
+            if ( IS_ENABLED(CONFIG_XEN_IBT) )
+            {
+                if ( is_endbr64(dest) )
+                    dest += ENDBR64_LEN;
+                else
+                    printk(XENLOG_WARNING
+                           "Altcall %ps dest %ps has no endbr64\n",
+                           orig, dest);
+            }
+
+            disp = dest - (orig + 6);
+            ASSERT(disp == (int32_t)disp);
+
+            buf[0] = 0x2e;
+            buf[1] = 0xe8;
+            *(int32_t *)(buf + 2) = disp;
+        }
+        else
+        {
+            /*
+             * The function pointer is still NULL.  Seal the whole call, as
+             * it's not used.
+             */
+            buf[0] = 0x0f;
+            buf[1] = 0x0b;
+            buf[2] = 0x0f;
+            buf[3] = 0x0b;
+            buf[4] = 0x0f;
+            buf[5] = 0x0b;
+        }
+
+        text_poke(orig, buf, sizeof(buf));
     }
 
     return 0;
@@ -439,12 +456,23 @@ static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
 #ifdef CONFIG_LIVEPATCH
 int apply_alternatives(struct alt_instr *start, struct alt_instr *end)
 {
-    return _apply_alternatives(start, end, true);
+    return _apply_alternatives(start, end);
+}
+
+int livepatch_apply_alt_calls(const struct alt_call *start,
+                              const struct alt_call *end)
+{
+    return apply_alt_calls(start, end);
 }
 #endif
 
+#define ALT_INSNS (1U << 0)
+#define ALT_CALLS (1U << 1)
 static unsigned int __initdata alt_todo;
 static unsigned int __initdata alt_done;
+
+extern struct alt_instr __alt_instructions[], __alt_instructions_end[];
+extern struct alt_call __alt_call_sites_start[], __alt_call_sites_end[];
 
 /*
  * At boot time, we patch alternatives in NMI context.  This means that the
@@ -474,10 +502,22 @@ static int __init cf_check nmi_apply_alternatives(
                                  PAGE_HYPERVISOR_RWX);
         flush_local(FLUSH_TLB_GLOBAL);
 
-        rc = _apply_alternatives(__alt_instructions, __alt_instructions_end,
-                                 alt_done);
-        if ( rc )
-            panic("Unable to apply alternatives: %d\n", rc);
+        if ( alt_todo & ALT_INSNS )
+        {
+            rc = _apply_alternatives(__alt_instructions,
+                                     __alt_instructions_end);
+            if ( rc )
+                panic("Unable to apply alternatives: %d\n", rc);
+        }
+
+        if ( alt_todo & ALT_CALLS )
+        {
+            rc = apply_alt_calls(__alt_call_sites_start, __alt_call_sites_end);
+            if ( rc )
+                panic("Unable to apply alternative calls: %d\n", rc);
+
+            seal_endbr64();
+        }
 
         /*
          * Reinstate perms on .text to be RX.  This also cleans out the dirty
@@ -498,7 +538,7 @@ static int __init cf_check nmi_apply_alternatives(
  * This routine is called with local interrupt disabled and used during
  * bootup.
  */
-static void __init _alternative_instructions(bool force)
+static void __init _alternative_instructions(unsigned int what)
 {
     unsigned int i;
     nmi_callback_t *saved_nmi_callback;
@@ -516,7 +556,7 @@ static void __init _alternative_instructions(bool force)
     ASSERT(!local_irq_is_enabled());
 
     /* Set what operation to perform /before/ setting the callback. */
-    alt_todo = 1u << force;
+    alt_todo = what;
     barrier();
 
     /*
@@ -546,12 +586,12 @@ static void __init _alternative_instructions(bool force)
 void __init alternative_instructions(void)
 {
     arch_init_ideal_nops();
-    _alternative_instructions(false);
+    _alternative_instructions(ALT_INSNS);
 }
 
-void __init alternative_branches(void)
+void __init boot_apply_alt_calls(void)
 {
     local_irq_disable();
-    _alternative_instructions(true);
+    _alternative_instructions(ALT_CALLS);
     local_irq_enable();
 }

@@ -6,11 +6,13 @@
 #ifndef ASM__RISCV__CSR_H
 #define ASM__RISCV__CSR_H
 
-#include <asm/asm.h>
 #include <xen/const.h>
+
+#include <asm/asm.h>
+#include <asm/extable.h>
 #include <asm/riscv_encoding.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define csr_read(csr)                                           \
 ({                                                              \
@@ -29,6 +31,21 @@
                            : "rK" (__v)                         \
                            : "memory" );                        \
 })
+
+#ifdef CONFIG_RISCV_32
+#define csr_write64(csr, val)       \
+({                                  \
+    uint64_t v_ = (val);            \
+    csr_write(csr, v_);             \
+    csr_write(csr ## H, v_ >> 32);  \
+})
+#else
+#define csr_write64(csr, val)       \
+({                                  \
+    csr_write(csr, val);            \
+    (void)csr ## H;                 \
+})
+#endif
 
 #define csr_swap(csr, val)                                      \
 ({                                                              \
@@ -78,6 +95,37 @@
                            : "memory" );                        \
 })
 
-#endif /* __ASSEMBLY__ */
+static always_inline bool csr_read_safe(unsigned long csr,
+                                        unsigned long *val)
+{
+#ifdef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
+    asm_inline goto (
+        "1: csrr %[val], %[csr]\n"
+        ASM_EXTABLE(1b, %l[fault])
+        : [val] "=r" (*val)
+        : [csr] "i" (csr)
+        :
+        : fault );
+
+    return true;
+
+ fault:
+    return false;
+#else
+    bool allowed = false;
+
+    asm_inline volatile (
+        "1: csrr %[val], %[csr]\n"
+        "   li %[allowed], 1\n"
+        "2:\n"
+        ASM_EXTABLE(1b, 2b)
+        : [val] "=&r" (*val), [allowed] "+r" (allowed)
+        : [csr] "i" (csr) );
+
+    return allowed;
+#endif
+}
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* ASM__RISCV__CSR_H */

@@ -13,10 +13,12 @@
  */
 
 #include <xen/bitops.h>
+#include <xen/bsearch.h>
+#include <xen/byteorder.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
+
 #include <asm/new_vgic.h>
-#include <asm/byteorder.h>
 
 #include "vgic.h"
 #include "vgic-mmio.h"
@@ -69,9 +71,8 @@ void vgic_mmio_write_senable(struct vcpu *vcpu,
                              unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq = vgic_get_irq(vcpu->domain, vcpu, intid + i);
         unsigned long flags;
@@ -114,9 +115,8 @@ void vgic_mmio_write_cenable(struct vcpu *vcpu,
                              unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq;
         unsigned long flags;
@@ -182,11 +182,10 @@ void vgic_mmio_write_spending(struct vcpu *vcpu,
                               unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
     unsigned long flags;
     irq_desc_t *desc;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq = vgic_get_irq(vcpu->domain, vcpu, intid + i);
 
@@ -230,11 +229,10 @@ void vgic_mmio_write_cpending(struct vcpu *vcpu,
                               unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
     unsigned long flags;
     irq_desc_t *desc;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq = vgic_get_irq(vcpu->domain, vcpu, intid + i);
 
@@ -326,9 +324,8 @@ void vgic_mmio_write_cactive(struct vcpu *vcpu,
                              unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq = vgic_get_irq(vcpu->domain, vcpu, intid + i);
 
@@ -356,9 +353,8 @@ void vgic_mmio_write_sactive(struct vcpu *vcpu,
                              unsigned long val)
 {
     uint32_t intid = VGIC_ADDR_TO_INTID(addr, 1);
-    unsigned int i;
 
-    bitmap_for_each ( i, &val, len * 8 )
+    for_each_set_bit ( i, val )
     {
         struct vgic_irq *irq = vgic_get_irq(vcpu->domain, vcpu, intid + i);
 
@@ -589,6 +585,10 @@ static int dispatch_mmio_write(struct vcpu *vcpu, mmio_info_t *info,
     region = vgic_get_mmio_region(vcpu, iodev, addr, len);
     if ( !region )
         return 0;
+
+    /* Clamp data to the width of the access. */
+    if ( len < sizeof(data) )
+        data &= (1UL << (len * 8)) - 1;
 
     switch (iodev->iodev_type)
     {

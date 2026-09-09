@@ -13,6 +13,8 @@
                         || (id) == 0x01128086 || (id) == 0x01228086 \
                         || (id) == 0x010A8086 )
 
+struct pci_dev;
+
 struct arch_pci_dev {
     vmask_t used_vectors;
     /*
@@ -55,11 +57,23 @@ static always_inline bool is_pci_passthrough_enabled(void)
     return true;
 }
 
+/*
+ * Since PCI passthrough is always enabled on x86, physdevop handling doesn't
+ * need special arch-specific behavior. Current call sites work with either
+ * return value, but true is more consistent with passthrough being enabled.
+ */
+static inline bool arch_pci_device_physdevop(void)
+{
+    return true;
+}
+
 void arch_pci_init_pdev(struct pci_dev *pdev);
 
 bool pci_check_bar(const struct pci_dev *pdev, mfn_t start, mfn_t end);
 
 struct rangeset;
 int pci_sanitize_bar_memory(struct rangeset *r);
+
+void pci_setup(void);
 
 #endif /* __X86_PCI_H__ */

@@ -1,10 +1,13 @@
+#ifndef X86_EFI_RUNTIME_H
+#define X86_EFI_RUNTIME_H
+
 #include <xen/domain_page.h>
 #include <xen/mm.h>
 #include <asm/atomic.h>
 #include <asm/mc146818rtc.h>
 
 #ifndef COMPAT
-mfn_t __read_mostly efi_l4_mfn = INVALID_MFN_INITIALIZER;
+mfn_t __read_mostly efi_l4_mfn = INVALID_MFN;
 
 void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e)
 {
@@ -17,3 +20,5 @@ void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e)
     }
 }
 #endif
+
+#endif /* X86_EFI_RUNTIME_H */

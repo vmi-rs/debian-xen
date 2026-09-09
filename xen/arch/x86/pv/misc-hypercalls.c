@@ -10,6 +10,8 @@
 #include <xen/hypercall.h>
 
 #include <asm/debugreg.h>
+#include <asm/fsgsbase.h>
+#include <asm/traps.h>
 
 long do_set_debugreg(int reg, unsigned long value)
 {
@@ -40,8 +42,7 @@ long do_fpu_taskswitch(int set)
     else
     {
         v->arch.pv.ctrlreg[0] &= ~X86_CR0_TS;
-        if ( v->fpu_dirtied )
-            clts();
+        clts();
     }
 
     return 0;
@@ -175,27 +176,31 @@ long do_set_segment_base(unsigned int which, unsigned long base)
     switch ( which )
     {
     case SEGBASE_FS:
-        if ( is_canonical_address(base) )
-            write_fs_base(base);
-        else
-            ret = -EINVAL;
-        break;
-
     case SEGBASE_GS_USER:
-        if ( is_canonical_address(base) )
-        {
-            write_gs_shadow(base);
-            v->arch.pv.gs_base_user = base;
-        }
-        else
-            ret = -EINVAL;
-        break;
-
     case SEGBASE_GS_KERNEL:
-        if ( is_canonical_address(base) )
-            write_gs_base(base);
-        else
+        if ( !is_canonical_address(base) )
+        {
             ret = -EINVAL;
+            break;
+        }
+
+        switch ( which )
+        {
+        case SEGBASE_FS:
+            write_fs_base(base);
+            break;
+
+        case SEGBASE_GS_USER:
+            v->arch.pv.gs_base_user = base;
+            fallthrough;
+        case SEGBASE_GS_KERNEL:
+            /* Under FRED, GS is automatically swapped on privilege change. */
+            if ( (which == SEGBASE_GS_KERNEL) ^ opt_fred )
+                write_gs_base(base);
+            else
+                write_gs_shadow(base);
+            break;
+        }
         break;
 
     case SEGBASE_GS_USER_SEL:
@@ -203,10 +208,13 @@ long do_set_segment_base(unsigned int which, unsigned long base)
         unsigned int sel = (uint16_t)base;
 
         /*
-         * We wish to update the user %gs from the GDT/LDT.  Currently, the
-         * guest kernel's GS_BASE is in context.
+         * We wish to update the user %gs from the GDT/LDT.  Currently, we are
+         * in guest kernel context.
+         *
+         * Under IDT, this means updating GS_SHADOW.  Under FRED, plain GS.
          */
-        asm volatile ( "swapgs" );
+        if ( !opt_fred )
+            asm volatile ( "swapgs" );
 
         if ( sel > 3 )
             /* Fix up RPL for non-NUL selectors. */
@@ -230,20 +238,22 @@ long do_set_segment_base(unsigned int which, unsigned long base)
          * Anyone wanting to check for errors from this hypercall should
          * re-read %gs and compare against the input.
          */
-        asm volatile ( "1: mov %[sel], %%gs\n\t"
-                       ".section .fixup, \"ax\", @progbits\n\t"
-                       "2: mov %k[flat], %%gs\n\t"
-                       "   xor %[sel], %[sel]\n\t"
-                       "   jmp 1b\n\t"
-                       ".previous\n\t"
-                       _ASM_EXTABLE(1b, 2b)
-                       : [sel] "+r" (sel)
-                       : [flat] "r" (FLAT_USER_DS32) );
+        asm_inline volatile (
+            "1: mov %[sel], %%gs\n\t"
+            ".section .fixup, \"ax\", @progbits\n\t"
+            "2: mov %k[flat], %%gs\n\t"
+            "   xor %[sel], %[sel]\n\t"
+            "   jmp 1b\n\t"
+            ".previous\n\t"
+            _ASM_EXTABLE(1b, 2b)
+            : [sel] "+r" (sel)
+            : [flat] "r" (FLAT_USER_DS32) );
 
         /* Update the cache of the inactive base, as read from the GDT/LDT. */
         v->arch.pv.gs_base_user = read_gs_base();
 
-        asm volatile ( safe_swapgs );
+        if ( !opt_fred )
+            asm volatile ( safe_swapgs );
         break;
     }
 

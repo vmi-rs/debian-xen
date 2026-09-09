@@ -32,7 +32,7 @@
  */
 static inline void set_bit(int nr, volatile void *addr)
 {
-    asm volatile ( "lock; btsl %1,%0"
+    asm volatile ( "lock btsl %1,%0"
                    : "+m" (ADDR) : "Ir" (nr) : "memory");
 }
 #define set_bit(nr, addr) ({                            \
@@ -73,7 +73,7 @@ static inline void constant_set_bit(int nr, void *addr)
  */
 static inline void clear_bit(int nr, volatile void *addr)
 {
-    asm volatile ( "lock; btrl %1,%0"
+    asm volatile ( "lock btrl %1,%0"
                    : "+m" (ADDR) : "Ir" (nr) : "memory");
 }
 #define clear_bit(nr, addr) ({                          \
@@ -140,7 +140,7 @@ static inline void constant_change_bit(int nr, void *addr)
  */
 static inline void change_bit(int nr, volatile void *addr)
 {
-    asm volatile ( "lock; btcl %1,%0"
+    asm volatile ( "lock btcl %1,%0"
                     : "+m" (ADDR) : "Ir" (nr) : "memory");
 }
 #define change_bit(nr, addr) ({                         \
@@ -160,7 +160,7 @@ static inline int test_and_set_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btsl %[nr], %[addr]\n\t"
+    asm volatile ( "lock btsl %[nr], %[addr]\n\t"
                    ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
                    : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
                      [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
@@ -206,7 +206,7 @@ static inline int test_and_clear_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btrl %[nr], %[addr]\n\t"
+    asm volatile ( "lock btrl %[nr], %[addr]\n\t"
                    ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
                    : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
                      [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
@@ -266,7 +266,7 @@ static inline int test_and_change_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btcl %[nr], %[addr]\n\t"
+    asm volatile ( "lock btcl %[nr], %[addr]\n\t"
                    ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
                    : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
                      [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
@@ -343,7 +343,7 @@ static always_inline unsigned int __scanbit(unsigned long val, unsigned int max)
     if ( o__ >= s__ )                                                       \
         r__ = s__;                                                          \
     else if ( __builtin_constant_p(size) && s__ <= BITS_PER_LONG )          \
-        r__ = o__ + __scanbit(*(const unsigned long *)(a__) >> o__, s__);   \
+        r__ = o__ + __scanbit(*a__ >> o__, s__);                            \
     else if ( __builtin_constant_p(off) && !o__ )                           \
         r__ = __find_first_bit(a__, s__);                                   \
     else                                                                    \
@@ -375,7 +375,7 @@ static always_inline unsigned int __scanbit(unsigned long val, unsigned int max)
     if ( o__ >= s__ )                                                       \
         r__ = s__;                                                          \
     else if ( __builtin_constant_p(size) && s__ <= BITS_PER_LONG )          \
-        r__ = o__ + __scanbit(~*(const unsigned long *)(a__) >> o__, s__);  \
+        r__ = o__ + __scanbit(~*a__ >> o__, s__);                           \
     else if ( __builtin_constant_p(off) && !o__ )                           \
         r__ = __find_first_zero_bit(a__, s__);                              \
     else                                                                    \
@@ -399,9 +399,16 @@ static always_inline unsigned int arch_ffs(unsigned int x)
          *
          * and the optimiser really can work with the knowledge of x being
          * non-zero without knowing it's exact value, in which case we don't
-         * need to compensate for BSF's corner cases.  Otherwise...
+         * need to compensate for BSF's corner cases.
+         *
+         * That said, we intentionally use TZCNT on capable hardware when the
+         * behaviour for the 0 case doesn't matter.  On AMD CPUs prior to
+         * Zen4, TZCNT is 1-2 uops while BSF is 6-8 with a latency to match.
+         * Intel CPUs don't suffer this discrepancy.
+         *
+         * Otherwise...
          */
-        asm ( "bsf %[val], %[res]"
+        asm ( "tzcnt %[val], %[res]"
               : [res] "=r" (r)
               : [val] "rm" (x) );
     }
@@ -428,7 +435,7 @@ static always_inline unsigned int arch_ffsl(unsigned long x)
 
     /* See arch_ffs() for safety discussions. */
     if ( __builtin_constant_p(x > 0) && x > 0 )
-        asm ( "bsf %[val], %q[res]"
+        asm ( "tzcnt %[val], %q[res]"
               : [res] "=r" (r)
               : [val] "rm" (x) );
     else
@@ -488,10 +495,16 @@ static always_inline unsigned int arch_hweightl(unsigned long x)
      *
      * This limits the POPCNT instruction to using the same ABI as a function
      * call (input in %rdi, output in %eax) but that's fine.
+     *
+     * On Intel CPUs prior to Cannon Lake, the POPCNT instruction has a false
+     * input dependency on it's destination register (errata HSD146, SKL029
+     * amongst others), impacting loops such as bitmap_weight().  Insert an
+     * XOR to manually break the dependency.
      */
     alternative_io("call arch_generic_hweightl",
+                   "xor %k[res], %k[res]\n\t"
                    "popcnt %[val], %q[res]", X86_FEATURE_POPCNT,
-                   ASM_OUTPUT2([res] "=a" (r) ASM_CALL_CONSTRAINT),
+                   ASM_OUTPUT2([res] "=&a" (r) ASM_CALL_CONSTRAINT),
                    [val] "D" (x));
 
     return r;

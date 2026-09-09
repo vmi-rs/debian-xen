@@ -12,8 +12,7 @@
 #include <asm/hvm/vlapic.h>
 #include <asm/hvm/vmx/vmcs.h>
 #include <asm/hvm/vmx/vvmx.h>
-#include <asm/hvm/svm/vmcb.h>
-#include <asm/hvm/svm/nestedsvm.h>
+#include <asm/hvm/svm-types.h>
 #include <asm/mtrr.h>
 #include <public/hvm/ioreq.h>
 
@@ -131,10 +130,12 @@ struct hvm_vcpu {
     bool                flag_dr_dirty;
     bool                debug_state_latch;
     bool                single_step;
+#ifdef CONFIG_ALTP2M
     struct {
         bool     enabled;
         uint16_t p2midx;
     } fast_single_step;
+#endif
 
     /* (MFN) hypervisor page table */
     pagetable_t         monitor_table;
@@ -152,7 +153,9 @@ struct hvm_vcpu {
 
     struct nestedvcpu   nvcpu;
 
+#ifdef CONFIG_ALTP2M
     struct altp2mvcpu   avcpu;
+#endif
 
     struct mtrr_state   mtrr;
     u64                 pat_cr;
@@ -162,15 +165,14 @@ struct hvm_vcpu {
 
     u8                  evtchn_upcall_vector;
 
-    /* Which cache mode is this VCPU in (CR0:CD/NW)? */
-    u8                  cache_mode;
-
     struct hvm_vcpu_io  hvm_io;
 
     /* Pending hw/sw interrupt (.vector = -1 means nothing pending). */
     struct x86_event     inject_event;
 
+#ifdef CONFIG_VIRIDIAN
     struct viridian_vcpu *viridian;
+#endif
 };
 
 #endif /* __ASM_X86_HVM_VCPU_H__ */

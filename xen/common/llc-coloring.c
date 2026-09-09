@@ -64,14 +64,21 @@ static int __init parse_color_config(const char *buf, unsigned int colors[],
 
     while ( *s != '\0' )
     {
+        const char *endp;
         unsigned int color, start, end;
 
-        start = simple_strtoul(s, &s, 0);
+        start = simple_strtoul(s, &endp, 0);
+        if ( endp == s )
+            goto fail;
+        s = endp;
 
         if ( *s == '-' )    /* Range */
         {
             s++;
-            end = simple_strtoul(s, &s, 0);
+            end = simple_strtoul(s, &endp, 0);
+            if ( endp == s )
+                goto fail;
+            s = endp;
         }
         else                /* Single value */
             end = start;
@@ -79,7 +86,7 @@ static int __init parse_color_config(const char *buf, unsigned int colors[],
         if ( end >= NR_LLC_COLORS || start > end ||
              (end - start) >= (UINT_MAX - *num_colors) ||
              (*num_colors + (end - start)) >= max_num_colors )
-            return -EINVAL;
+            goto fail;
 
         /* Colors are range checked in check_colors() */
         for ( color = start; color <= end; color++ )
@@ -91,7 +98,14 @@ static int __init parse_color_config(const char *buf, unsigned int colors[],
             break;
     }
 
-    return *s ? -EINVAL : 0;
+    if ( *s )
+        goto fail;
+
+    return 0;
+
+ fail:
+    *num_colors = 0;
+    return -EINVAL;
 }
 
 static int __init parse_dom0_colors(const char *s)
@@ -194,8 +208,6 @@ void __init llc_coloring_init(void)
 
     if ( !xen_num_colors )
     {
-        unsigned int i;
-
         xen_num_colors = MIN(XEN_DEFAULT_NUM_COLORS, max_nr_colors);
 
         printk(XENLOG_WARNING
@@ -231,24 +243,12 @@ void domain_dump_llc_colors(const struct domain *d)
     print_colors(d->llc_colors, d->num_llc_colors);
 }
 
-static void domain_set_default_colors(struct domain *d)
-{
-    printk(XENLOG_WARNING
-           "LLC color config not found for %pd, using all colors\n", d);
-
-    d->llc_colors = default_colors;
-    d->num_llc_colors = max_nr_colors;
-}
-
 int __init dom0_set_llc_colors(struct domain *d)
 {
     typeof(*dom0_colors) *colors;
 
     if ( !dom0_num_colors )
-    {
-        domain_set_default_colors(d);
         return 0;
-    }
 
     if ( (dom0_num_colors > max_nr_colors) ||
          !check_colors(dom0_colors, dom0_num_colors) )
@@ -273,14 +273,11 @@ int domain_set_llc_colors(struct domain *d,
 {
     unsigned int *colors;
 
-    if ( d->num_llc_colors )
+    if ( d->llc_colors != default_colors )
         return -EEXIST;
 
     if ( !config->num_llc_colors )
-    {
-        domain_set_default_colors(d);
         return 0;
-    }
 
     if ( config->num_llc_colors > max_nr_colors )
         return -EINVAL;
@@ -308,13 +305,25 @@ int domain_set_llc_colors(struct domain *d,
     return 0;
 }
 
-void domain_llc_coloring_free(struct domain *d)
+void domain_llc_coloring_init(struct domain *d)
 {
-    if ( !llc_coloring_enabled || d->llc_colors == default_colors )
+    if ( !llc_coloring_enabled )
         return;
 
-    /* free pointer-to-const using __va(__pa()) */
-    xfree(__va(__pa(d->llc_colors)));
+    /*
+     * Any change to this logic needs to consider the position of our call in
+     * domain_create().
+     */
+    d->llc_colors = default_colors;
+    d->num_llc_colors = max_nr_colors;
+}
+
+void domain_llc_coloring_free(struct domain *d)
+{
+    d->num_llc_colors = 0;
+
+    if ( d->llc_colors != default_colors )
+        XFREE(d->llc_colors);
 }
 
 int __init domain_set_llc_colors_from_str(struct domain *d, const char *str)
@@ -323,10 +332,7 @@ int __init domain_set_llc_colors_from_str(struct domain *d, const char *str)
     unsigned int *colors, num_colors;
 
     if ( !str )
-    {
-        domain_set_default_colors(d);
         return 0;
-    }
 
     colors = xmalloc_array(unsigned int, max_nr_colors);
     if ( !colors )
@@ -335,7 +341,7 @@ int __init domain_set_llc_colors_from_str(struct domain *d, const char *str)
     err = parse_color_config(str, colors, max_nr_colors, &num_colors);
     if ( err )
     {
-        printk(XENLOG_ERR "Error parsing LLC color configuration");
+        printk(XENLOG_ERR "%pd: error parsing LLC color configuration\n", d);
         xfree(colors);
         return err;
     }

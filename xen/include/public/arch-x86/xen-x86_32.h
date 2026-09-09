@@ -90,7 +90,7 @@
 #define XEN_GUEST_HANDLE_64(name) __XEN_GUEST_HANDLE_64(name)
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #if defined(XEN_GENERATING_COMPAT_HEADERS)
 /* nothing */
@@ -112,6 +112,10 @@
 /* Other sources must always use the proper 32-bit name (e.g., eax). */
 #define __DECL_REG_LO8(which) uint32_t e ## which ## x
 #define __DECL_REG_LO16(name) uint32_t e ## name
+#endif
+
+#ifdef __XEN__
+#define cpu_user_regs guest_user_regs
 #endif
 
 struct cpu_user_regs {
@@ -136,8 +140,13 @@ struct cpu_user_regs {
     uint16_t fs, _pad4;
     uint16_t gs, _pad5;
 };
+
+#ifdef __XEN__
+#undef cpu_user_regs
+#else
 typedef struct cpu_user_regs cpu_user_regs_t;
 DEFINE_XEN_GUEST_HANDLE(cpu_user_regs_t);
+#endif
 
 #undef __DECL_REG_LO8
 #undef __DECL_REG_LO16
@@ -162,7 +171,7 @@ struct xen_callback {
 };
 typedef struct xen_callback xen_callback_t;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __XEN_PUBLIC_ARCH_X86_XEN_X86_32_H__ */
 

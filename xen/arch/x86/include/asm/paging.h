@@ -55,7 +55,7 @@
 #define PG_translate   0
 #define PG_external    0
 #endif
-#if defined(CONFIG_HVM) || !defined(CONFIG_PV_SHIM_EXCLUSIVE)
+#if defined(CONFIG_PAGING) && !defined(CONFIG_PV_SHIM_EXCLUSIVE)
 /* Enable log dirty mode */
 #define PG_log_dirty   (XEN_DOMCTL_SHADOW_ENABLE_LOG_DIRTY << PG_mode_shift)
 #else
@@ -90,10 +90,12 @@ struct shadow_paging_mode {
     int           (*guess_wrmap           )(struct vcpu *v, 
                                             unsigned long vaddr, mfn_t gmfn);
     void          (*pagetable_dying       )(paddr_t gpa);
+#ifdef CONFIG_TRACEBUFFER
     void          (*trace_emul_write_val  )(const void *ptr, unsigned long vaddr,
                                             const void *src, unsigned int bytes);
-#endif
-#endif
+#endif /* CONFIG_TRACEBUFFER */
+#endif /* CONFIG_HVM */
+#endif /* CONFIG_SHADOW_PAGING */
     /* For outsiders to tell what mode we're in */
     unsigned int shadow_levels;
 };
@@ -135,19 +137,14 @@ struct paging_mode {
 
 #if PG_log_dirty
 
-/* get the dirty bitmap for a specific range of pfns */
-void paging_log_dirty_range(struct domain *d,
-                            unsigned long begin_pfn,
-                            unsigned long nr,
-                            uint8_t *dirty_bitmap);
-
 /* log dirty initialization */
 void paging_log_dirty_init(struct domain *d, const struct log_dirty_ops *ops);
 
 /* mark a page as dirty */
 void paging_mark_dirty(struct domain *d, mfn_t gmfn);
-/* mark a page as dirty with taking guest pfn as parameter */
+/* mark a page as dirty/clean with taking guest pfn as parameter */
 void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn);
+void paging_mark_pfn_clean(struct domain *d, pfn_t pfn);
 
 /* is this guest page dirty? 
  * This is called from inside paging code, with the paging lock held. */
@@ -170,19 +167,6 @@ bool paging_mfn_is_dirty(const struct domain *d, mfn_t gmfn);
                               (LOGDIRTY_NODE_ENTRIES-1))
 #define L4_LOGDIRTY_IDX(pfn) ((pfn_x(pfn) >> (PAGE_SHIFT + 3 + PAGETABLE_ORDER * 2)) & \
                               (LOGDIRTY_NODE_ENTRIES-1))
-
-#ifdef CONFIG_HVM
-/* VRAM dirty tracking support */
-struct sh_dirty_vram {
-    unsigned long begin_pfn;
-    unsigned long end_pfn;
-#ifdef CONFIG_SHADOW_PAGING
-    paddr_t *sl1ma;
-    uint8_t *dirty_bitmap;
-    s_time_t last_dirty;
-#endif
-};
-#endif
 
 #else /* !PG_log_dirty */
 
@@ -225,7 +209,6 @@ int paging_enable(struct domain *d, u32 mode);
 
 #define paging_get_hostmode(v)		((v)->arch.paging.mode)
 #define paging_get_nestedmode(v)	((v)->arch.paging.nestedmode)
-const struct paging_mode *paging_get_mode(struct vcpu *v);
 void paging_update_nestedmode(struct vcpu *v);
 
 /* Page fault handler

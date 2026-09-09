@@ -1,26 +1,24 @@
-/*
- * Explicitly intended for multiple inclusion.
- */
+/* This file is intended to be included multiple times. */
 
+/* SAF-8-safe */
 #include <xen/lib/x86/cpuid-autogen.h>
 
 /* Number of capability words covered by the featureset words. */
 #define FSCAPINTS FEATURESET_NR_ENTRIES
 
 /* Synthetic words follow the featureset words. */
-#define X86_NR_SYNTH 1
 #define X86_SYNTH(x) (FSCAPINTS * 32 + (x))
 
 /* Synthetic features */
 XEN_CPUFEATURE(CONSTANT_TSC,      X86_SYNTH( 0)) /* TSC ticks at a constant rate */
 XEN_CPUFEATURE(NONSTOP_TSC,       X86_SYNTH( 1)) /* TSC does not stop in C states */
-XEN_CPUFEATURE(ARAT,              X86_SYNTH( 2)) /* Always running APIC timer */
+XEN_CPUFEATURE(XEN_ARAT,          X86_SYNTH( 2)) /* Xen may utilize always running APIC timer */
 XEN_CPUFEATURE(ARCH_PERFMON,      X86_SYNTH( 3)) /* Intel Architectural PerfMon */
 XEN_CPUFEATURE(TSC_RELIABLE,      X86_SYNTH( 4)) /* TSC is known to be reliable */
 XEN_CPUFEATURE(XTOPOLOGY,         X86_SYNTH( 5)) /* cpu topology enum extensions */
 XEN_CPUFEATURE(CPUID_FAULTING,    X86_SYNTH( 6)) /* cpuid faulting */
-/* Bit 7 unused */
-XEN_CPUFEATURE(APERFMPERF,        X86_SYNTH( 8)) /* APERFMPERF */
+XEN_CPUFEATURE(XEN_FRED,          X86_SYNTH( 7)) /* Xen uses FRED */
+/* Bit 8 unused */
 XEN_CPUFEATURE(MFENCE_RDTSC,      X86_SYNTH( 9)) /* MFENCE synchronizes RDTSC */
 XEN_CPUFEATURE(XEN_SMEP,          X86_SYNTH(10)) /* SMEP gets used by Xen itself */
 XEN_CPUFEATURE(XEN_SMAP,          X86_SYNTH(11)) /* SMAP gets used by Xen itself */
@@ -43,9 +41,13 @@ XEN_CPUFEATURE(XEN_IBT,           X86_SYNTH(27)) /* Xen uses CET Indirect Branch
 XEN_CPUFEATURE(IBPB_ENTRY_PV,     X86_SYNTH(28)) /* MSR_PRED_CMD used by Xen for PV */
 XEN_CPUFEATURE(IBPB_ENTRY_HVM,    X86_SYNTH(29)) /* MSR_PRED_CMD used by Xen for HVM */
 XEN_CPUFEATURE(USE_VMCALL,        X86_SYNTH(30)) /* Use VMCALL instead of VMMCALL */
+XEN_CPUFEATURE(PDX_COMPRESSION,   X86_SYNTH(31)) /* PDX compression */
+XEN_CPUFEATURE(XEN_REP_MOVSB,     X86_SYNTH(32)) /* REP MOVSB used for memcpy() */
+XEN_CPUFEATURE(nr,                X86_SYNTH(33)) /* Number of synthetic features */
+
+#define X86_NR_SYNTH DIV_ROUND_UP(X86_FEATURE_nr - FSCAPINTS * 32, 32)
 
 /* Bug words follow the synthetic words. */
-#define X86_NR_BUG 1
 #define X86_BUG(x) ((FSCAPINTS + X86_NR_SYNTH) * 32 + (x))
 
 #define X86_BUG_FPU_PTRS          X86_BUG( 0) /* (F)X{SAVE,RSTOR} doesn't save/restore FOP/FIP/FDP. */
@@ -62,6 +64,11 @@ XEN_CPUFEATURE(USE_VMCALL,        X86_SYNTH(30)) /* Use VMCALL instead of VMMCAL
 #define X86_SPEC_BHB_TSX          X86_BUG(19) /* Use clear_bhb_tsx for BHI mitigation. */
 #define X86_SPEC_BHB_LOOPS        X86_BUG(20) /* Use clear_bhb_loops for BHI mitigation.*/
 #define X86_SPEC_BHB_LOOPS_LONG   X86_BUG(21) /* Upgrade clear_bhb_loops to the "long" sequence. */
+
+#define X86_BUG_nr                X86_BUG(22) /* Number of bug identifiers */
+
+#define X86_NR_BUG DIV_ROUND_UP(X86_BUG_nr - (FSCAPINTS + X86_NR_SYNTH) * 32, \
+                                32)
 
 /* Total number of capability words, inc synth and bug words. */
 #define NCAPINTS (FSCAPINTS + X86_NR_SYNTH + X86_NR_BUG) /* N 32-bit words worth of info */

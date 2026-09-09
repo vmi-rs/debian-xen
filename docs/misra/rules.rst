@@ -124,6 +124,15 @@ maintainers if you want to suggest a change.
            they are used to generate definitions for asm modules
          - Declarations without initializer are safe, as they are not
            executed
+         - Functions that are no-return due to calls to the `ASSERT_UNREACHABLE()`
+           macro in debug build configurations are not considered violations::
+
+              static inline bool
+              arch_vcpu_ioreq_completion(enum vio_completion completion)
+              {
+                  ASSERT_UNREACHABLE();
+                  return false;
+              }
 
    * - `Rule 2.6 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_02_06.c>`_
      - Advisory
@@ -134,7 +143,7 @@ maintainers if you want to suggest a change.
      - Required
      - The character sequences /* and // shall not be used within a
        comment
-     - Comments containing hyperlinks inside C-style block comments are safe
+     - Comments containing URLs inside C-style block comments are safe
 
    * - `Rule 3.2 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_03_02.c>`_
      - Required
@@ -195,6 +204,23 @@ maintainers if you want to suggest a change.
 
            #define f(x, y) f(x, y)
            void f(int x, int y);
+
+       Clashes between bitops functions and macro names are allowed
+       because they are used for input validation and error handling.
+       Example::
+
+           static inline void set_bit(int nr, volatile void *addr)
+           {
+               asm volatile ( "lock btsl %1,%0"
+                              : "+m" (ADDR) : "Ir" (nr) : "memory");
+           }
+           #define set_bit(nr, addr) ({                            \
+               if ( bitop_bad_size(addr) ) __bitop_bad_size();     \
+               set_bit(nr, addr);                                  \
+           })
+
+       Clashes between grant table functions and macro names are allowed
+       because they are used for discarding unused parameters.
 
    * - `Rule 5.6 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_05_06.c>`_
      - Required
@@ -400,11 +426,17 @@ maintainers if you want to suggest a change.
 
    * - `Rule 11.1 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_11_01.c>`_
      - Required
-     - Conversions shall not be performed between a pointer to a
-       function and any other type
+     - Conversions shall not be performed between a pointer to a function
+       and any other type
      - All conversions to integer types are permitted if the destination
-       type has enough bits to hold the entire value. Conversions to
-       bool and void* are permitted.
+       type has enough bits to hold the entire value. Conversions to bool
+       and void* are permitted. Conversions from 'void noreturn (*)(...)'
+       to 'void (*)(...)' are permitted. Conversions from unsigned long or
+       '(void *)' to a function pointer are permitted.
+       Example::
+
+           unsigned long func_addr = (unsigned long)&some_function;
+           void (*restored_func)(void) = (void (*)(void))func_addr;
 
    * - `Rule 11.2 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_11_02.c>`_
      - Required
@@ -813,7 +845,9 @@ maintainers if you want to suggest a change.
        shall point to either a pointer type, an essentially signed type,
        an essentially unsigned type, an essentially Boolean type or an
        essentially enum type
-     - void* arguments are allowed
+     - void* arguments are allowed. string literal arguments are allowed
+       when the last argument passed for the comparison is less or equal
+       to the size of the string.
 
    * - `Rule 21.17 <https://gitlab.com/MISRA/MISRA-C/MISRA-C-2012/Example-Suite/-/blob/master/R_21_17.c>`_
      - Mandatory

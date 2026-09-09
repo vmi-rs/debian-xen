@@ -714,6 +714,65 @@ If this option is not specified then it will default to B<false>.
 
 =back
 
+=head3 Xenstore related settings
+
+=over 4
+
+=item B<xenstore_feature_mask=NUMBER>
+
+Specify which Xenstore features are visible for the guest.
+
+This might be needed when a guest should be able to be migrated to a host
+running a Xenstore implementation with less features than the one the guest
+is created on.
+
+The visible features are specified via a binary or of the following
+values:
+
+=over 4
+
+=item B<0x00000001>
+
+Xenstore is capable to reconnect to a guest.
+
+=item B<0x00000002>
+
+Xenstore will present an error value in case it disconnects due to an error
+condition.
+
+=item B<0x00000004>
+
+Xenstore supports to set watches with a limited depth (depth 0 matches
+only the watched node, depth 1 matches the node and its direct children,
+etc.).
+
+=item B<0x00000008>
+
+Xenstore supports the B<all domains> node access permission.
+
+=back
+
+The features supported by the running Xenstore instance can be retrieved
+via the B<xl info -x> command in dom0.
+
+The default value is B<0xffffffff>, meaning that all possible Xenstore
+features are visible by the guest.
+
+=item B<xenstore_quota=[ QUOTA_SPEC, QUOTA_SPEC, ...]>
+
+Specifies Xenstore quota values of the domain, overriding the default
+values of Xenstore.
+
+Each B<QUOTA_SPEC> is a B<quota-name>=B<value> specification. The supported
+B<quota-name> identifiers can be obtained by the B<xl xenstore-quota-get -g>
+command. B<value> is a non-negative integer.
+
+As per-domain Xenstore quota are an optional Xenstore feature, the
+B<xenstore_quota> config parameter may not be supported by all Xenstore
+implementations.
+
+=back
+
 =head2 Devices
 
 The following options define the paravirtual, emulated and physical
@@ -841,7 +900,7 @@ This option does not control the emulated graphics card presented to
 an HVM guest. See B<Emulated VGA Graphics Device> below for how to
 configure the emulated device. If B<Emulated VGA Graphics Device> options
 are used in a PV guest configuration, B<xl> will pick up B<vnc>, B<vnclisten>,
-B<vncpasswd>, B<vncdisplay>, B<vncunused>, B<sdl>, B<opengl> and
+B<vncpasswd>, B<vncdisplay>, B<vncunused>, B<sdl> and
 B<keymap> to construct the paravirtual framebuffer device for the guest.
 
 Each B<VFB_SPEC_STRING> is a comma-separated list of C<KEY=VALUE>
@@ -894,12 +953,6 @@ is used.
 
 Specifies the path to the X authority file that should be used to
 connect to the X server when the B<sdl> option is used.
-
-=item B<opengl=BOOLEAN>
-
-Enable OpenGL acceleration of the SDL display. Only effects machines
-using B<device_model_version="qemu-xen-traditional"> and only if the
-device-model was compiled with OpenGL support. The default is 0 (disabled).
 
 =item B<keymap=LANG>
 
@@ -1215,17 +1268,11 @@ working graphics passthrough. See the XenVGAPassthroughTestedAdapters
 L<https://wiki.xenproject.org/wiki/XenVGAPassthroughTestedAdapters> wiki page
 for graphics cards currently supported by B<gfx_passthru>.
 
-B<gfx_passthru> is currently supported both with the qemu-xen-traditional
-device-model and upstream qemu-xen device-model.
-
 When given as a boolean the B<gfx_passthru> option either disables graphics
 card passthrough or enables autodetection.
 
 When given as a string the B<gfx_passthru> option describes the type
-of device to enable. Note that this behavior is only supported with the
-upstream qemu-xen device-model. With qemu-xen-traditional IGD (Intel Graphics
-Device) is always assumed and options other than autodetect or explicit IGD
-will result in an error.
+of device to enable.
 
 Currently, valid values for the option are:
 
@@ -1903,10 +1950,7 @@ it may be useful to request a different one, like UEFI.
 
 =item B<rombios>
 
-Loads ROMBIOS, a 16-bit x86 compatible BIOS. This is used by default
-when B<device_model_version=qemu-xen-traditional>. This is the only BIOS
-option supported when B<device_model_version=qemu-xen-traditional>. This is
-the BIOS used by all previous Xen versions.
+Loads ROMBIOS, a 16-bit x86 compatible BIOS.
 
 =item B<seabios>
 
@@ -1926,8 +1970,7 @@ Override the path to the blob to be used as BIOS. The blob provided here MUST
 be consistent with the B<bios=> which you have specified. You should not
 normally need to specify this option.
 
-This option does not have any effect if using B<bios="rombios"> or
-B<device_model_version="qemu-xen-traditional">.
+Requires B<device_model_version="qemu-xen">.
 
 =item B<pae=BOOLEAN>
 
@@ -2038,6 +2081,20 @@ a single guest HVM domain. B<This option is deprecated, use the option
 
 B<Note>: While the option "altp2mhvm" is deprecated, legacy applications for
 x86 systems will continue to work using it.
+
+=item B<altp2m_count=NUMBER>
+
+Specifies the maximum number of alternate-p2m views available to the guest.
+This setting is crucial in domain introspection scenarios that require
+multiple physical-to-machine (p2m) memory mappings to be established
+simultaneously.
+
+Enabling multiple p2m views may increase memory usage. It is advisable to
+review and adjust the B<shadow_memory> setting as necessary to accommodate
+the additional memory requirements.
+
+B<Note>: This option is ignored if B<altp2m> is disabled. The default value
+is 10.
 
 =item B<nestedhvm=BOOLEAN>
 
@@ -2367,6 +2424,14 @@ Windows L<https://xenproject.org/windows-pv-drivers/>.
 Setting B<xen_platform_pci=0> with the default device_model "qemu-xen"
 requires at least QEMU 1.6.
 
+
+=item B<xen_platform_pci_bar_uc=BOOLEAN>
+
+B<x86 only:> Select whether the memory BAR of the Xen platform PCI device
+should have uncacheable (UC) cache attribute set in MTRR.
+
+Default is B<true>.
+
 =item B<viridian=[ "GROUP", "GROUP", ...]> or B<viridian=BOOLEAN>
 
 The groups of Microsoft Hyper-V (AKA viridian) compatible enlightenments
@@ -2516,15 +2581,10 @@ Sets the amount of RAM which the emulated video card will contain,
 which in turn limits the resolutions and bit depths which will be
 available.
 
-When using the qemu-xen-traditional device-model, the default as well as
-minimum amount of video RAM for stdvga is 8 MB, which is sufficient for e.g.
-1600x1200 at 32bpp. For the upstream qemu-xen device-model, the default and
-minimum is 16 MB.
+When using stdvga, the default and minimum is 16 MB.
 
-When using the emulated Cirrus graphics card (B<vga="cirrus">) and the
-qemu-xen-traditional device-model, the amount of video RAM is fixed at 4 MB,
-which is sufficient for 1024x768 at 32 bpp. For the upstream qemu-xen
-device-model, the default and minimum is 8 MB.
+When using the emulated Cirrus graphics card (B<vga="cirrus">), the
+default and minimum is 8 MB.
 
 For QXL vga, both the default and minimal are 128MB.
 If B<videoram> is set less than 128MB, an error will be triggered.
@@ -2589,12 +2649,6 @@ B<qemu(1)> manpage. The default is B<en-us>.
 
 Specifies that the display should be presented via an X window (using
 Simple DirectMedia Layer). The default is (0) not enabled.
-
-=item B<opengl=BOOLEAN>
-
-Enable OpenGL acceleration of the SDL display. Only effects machines
-using B<device_model_version="qemu-xen-traditional"> and only if the
-device-model was compiled with OpenGL support. Default is (0) false.
 
 =item B<nographic=BOOLEAN>
 
@@ -2925,11 +2979,6 @@ Valid values are:
 Use the device-model merged into the upstream QEMU project.
 This device-model is the default for Linux dom0.
 
-=item B<qemu-xen-traditional>
-
-Use the device-model based upon the historical Xen fork of QEMU.
-This device-model is still the default for NetBSD dom0.
-
 =back
 
 It is recommended to accept the default value for new guests.  If
@@ -2949,8 +2998,7 @@ to specify this option.
 Override the path to the kernel image used as device-model stubdomain.
 The binary provided here MUST be consistent with the
 B<device_model_version> which you have specified.
-In case of B<qemu-xen-traditional> it is expected to be MiniOS-based stubdomain
-image, in case of B<qemu-xen> it is expected to be Linux-based stubdomain
+In case of B<qemu-xen> it is expected to be Linux-based stubdomain
 kernel.
 
 =item B<stubdomain_cmdline="STRING">
@@ -3083,14 +3131,57 @@ interval of colors (such as "0-4").
 =item B<nr_spis="NR_SPIS">
 
 An optional integer parameter specifying the number of SPIs (Shared
-Peripheral Interrupts) to allocate for the domain. Max is 991 SPIs. If
-the value specified by the `nr_spis` parameter is smaller than the
-number of SPIs calculated by the toolstack based on the devices
-allocated for the domain, or the `nr_spis` parameter is not specified,
-the value calculated by the toolstack will be used for the domain.
-Otherwise, the value specified by the `nr_spis` parameter will be used.
-The number of SPIs should match the highest interrupt ID that will be
-assigned to the domain.
+Peripheral Interrupts) to allocate for the domain. Max is 960 for regular SPIs
+or 5088 for eSPIs (Extended SPIs). The eSPIs includes an additional 1024 SPIs
+from the eSPI range (4096 to 5119) if the hardware supports extended SPIs
+(GICv3.1+) and CONFIG_GICV3_ESPI is enabled. If the `nr_spis` parameter is not
+specified, the value calculated by the toolstack will be used for the domain.
+Otherwise, the value specified by the `nr_spis` parameter will be used. The
+number of SPIs should match the highest interrupt ID that will be assigned to
+the domain.
+
+=item B<trap_unmapped_accesses=BOOLEAN>
+
+An Optional boolean parameter that configures handling of accesses to unmapped
+address ranges. If enabled, guest accesses will trap. If disabled, guest
+accesses will read all bits as ones, e.g 0xFFFFFFFF for a 32bit access and
+writes will be ignored.
+
+This option is only implemented for Arm where the default is enabled.
+
+=item B<arm_sci="ARM_SCI_STRING">
+
+Set ARM_SCI specific options for the guest. ARM SCI is System
+Control Protocol allows domain to manage various functions that are provided
+by HW platform firmware.
+
+B<ARM_SCI_STRING> is a comma separated list of C<KEY=VALUE> settings,
+from the following list:
+
+=over 4
+
+=item B<type=STRING>
+
+Specifies an ARM SCI type for the guest.
+
+=over 4
+
+=item B<none>
+
+Don't allow guest to use ARM SCI if present on the platform. This is the
+default value.
+
+=item B<scmi_smc>
+
+Enables ARM SCMI SMC support for the guest by enabling SCMI over SMC calls
+forwarding from domain to the EL3 firmware (like Trusted Firmware-A) with a
+single SCMI OSPM agent support.
+Should be used together with B<scmi-smc-passthrough> Xen command line
+option.
+
+=back
+
+=back
 
 =back
 

@@ -19,13 +19,6 @@
 #include <asm/pv/domain.h>
 #include <asm/spec_ctrl.h>
 
-/* Debug builds: Wrap frequently to stress-test the wrap logic. */
-#ifdef NDEBUG
-#define WRAP_MASK (0xFFFFFFFFU)
-#else
-#define WRAP_MASK (0x000003FFU)
-#endif
-
 #ifndef CONFIG_PV
 # undef X86_CR4_PCIDE
 # define X86_CR4_PCIDE 0
@@ -55,7 +48,7 @@ static u32 pre_flush(void)
         /* Clock wrapped: someone else is leading a global TLB shootdown. */
         if ( unlikely(t1 == 0) )
             goto skip_clocktick;
-        t2 = (t + 1) & WRAP_MASK;
+        t2 = t + 1;
     }
     while ( unlikely((t = cmpxchg(&tlbflush_clock, t1, t2)) != t1) );
 
@@ -225,8 +218,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
                 }
             }
             else
-                asm volatile ( "invlpg %0"
-                               : : "m" (*(const char *)(va)) : "memory" );
+                invlpg(va);
         }
         else
             do_tlb_flush();
@@ -235,7 +227,7 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
     if ( flags & FLUSH_HVM_ASID_CORE )
         hvm_flush_guest_tlbs();
 
-    if ( flags & FLUSH_CACHE )
+    if ( flags & (FLUSH_CACHE_EVICT | FLUSH_CACHE_WRITEBACK) )
     {
         const struct cpuinfo_x86 *c = &current_cpu_data;
         unsigned long sz = 0;
@@ -248,13 +240,16 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
              c->x86_clflush_size && c->x86_cache_size && sz &&
              ((sz >> 10) < c->x86_cache_size) )
         {
-            cache_flush(va, sz);
-            flags &= ~FLUSH_CACHE;
+            if ( flags & FLUSH_CACHE_EVICT )
+                cache_flush(va, sz);
+            else
+                cache_writeback(va, sz);
+            flags &= ~(FLUSH_CACHE_EVICT | FLUSH_CACHE_WRITEBACK);
         }
-        else
-        {
+        else if ( flags & FLUSH_CACHE_EVICT )
             wbinvd();
-        }
+        else
+            wbnoinvd();
     }
 
     if ( flags & FLUSH_ROOT_PGTBL )
@@ -290,7 +285,7 @@ void cache_flush(const void *addr, unsigned int size)
          * of letting the alternative framework fill the gap by appending nops.
          */
         alternative_input("ds; clflush %[p]",/* Semicolon for Clang-IAS < 12 */
-                          "data16 clflush %[p]", /* clflushopt */
+                          "clflushopt %[p]",
                            X86_FEATURE_CLFLUSHOPT,
                            [p] "m" (*(const char *)(addr)));
     }
@@ -316,33 +311,7 @@ void cache_writeback(const void *addr, unsigned int size)
     clflush_size = current_cpu_data.x86_clflush_size ?: 16;
     addr -= (unsigned long)addr & (clflush_size - 1);
     for ( ; addr < end; addr += clflush_size )
-    {
-/*
- * The arguments to a macro must not include preprocessor directives. Doing so
- * results in undefined behavior, so we have to create some defines here in
- * order to avoid it.
- */
-#if defined(HAVE_AS_CLWB)
-# define CLWB_ENCODING "clwb %[p]"
-#elif defined(HAVE_AS_XSAVEOPT)
-# define CLWB_ENCODING "data16 xsaveopt %[p]" /* clwb */
-#else
-# define CLWB_ENCODING ".byte 0x66, 0x0f, 0xae, 0x30" /* clwb (%%rax) */
-#endif
-
-#define BASE_INPUT(addr) [p] "m" (*(const char *)(addr))
-#if defined(HAVE_AS_CLWB) || defined(HAVE_AS_XSAVEOPT)
-# define INPUT BASE_INPUT
-#else
-# define INPUT(addr) "a" (addr), BASE_INPUT(addr)
-#endif
-
-        asm volatile (CLWB_ENCODING :: INPUT(addr));
-
-#undef INPUT
-#undef BASE_INPUT
-#undef CLWB_ENCODING
-    }
+        clwb(addr);
 
     asm volatile ("sfence" ::: "memory");
 }

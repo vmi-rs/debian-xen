@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <xen/bitops.h>
+#include <xen/byteorder.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/mm.h>
@@ -7,7 +8,6 @@
 #include <xen/types.h>
 #include <xen/lib.h>
 
-#include <asm/byteorder.h>
 #include <asm/early_printk.h>
 #include <asm/page.h>
 #include <asm/processor.h>
@@ -265,7 +265,7 @@ int destroy_xen_mappings(unsigned long s, unsigned long e)
 int map_pages_to_xen(unsigned long virt,
                      mfn_t mfn,
                      unsigned long nr_mfns,
-                     unsigned int flags)
+                     pte_attr_t flags)
 {
     BUG_ON("unimplemented");
 }

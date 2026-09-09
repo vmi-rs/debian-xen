@@ -14,8 +14,6 @@ ov=4.0
     cd ~/git/qemu-xen.git
     git branch staging-$v staging
     git branch stable-$v master
-    cd ~/git/qemu-xen-traditional.git
-    git branch stable-$v master
 
 # make branch in libvirt
     ssh xen@xenbits.xen.org
@@ -63,7 +61,6 @@ ov=4.0
     cp xen--staging.patchbot-reported-heads xen--staging-$v.patchbot-reported-heads
     cp qemu-xen--master.patchbot-reported-heads  qemu-xen--stable-$v.patchbot-reported-heads
     cp qemu-xen--staging.patchbot-reported-heads  qemu-xen--staging-$v.patchbot-reported-heads
-    cp qemu-xen-traditional--master.patchbot-reported-heads qemu-xen-traditional--stable-$v.patchbot-reported-heads
 
     #emacs versions
     perl -i~ -pe 'next unless m/\b\Q'$ov'\E\b/; $x=$_; $x=~ s/\b\Q'$ov'\E\b/'$v'/g; print $x;' versions
@@ -74,7 +71,6 @@ ov=4.0
 Ensure references to qemu trees and Mini-OS in xen.git's Config.mk are updated.
 The variables and there content should be:
   * QEMU_UPSTREAM_REVISION: qemu-xen-X.Y.0
-  * QEMU_TRADITIONAL_REVISION: xen-X.Y.0
   * MINIOS_UPSTREAM_REVISION: xen-RELEASE-X.Y.0
 Where X.Y is the release version (e.g. 4.17).
 

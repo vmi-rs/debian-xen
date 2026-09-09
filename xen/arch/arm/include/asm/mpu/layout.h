@@ -3,6 +3,9 @@
 #ifndef __ARM_MPU_LAYOUT_H__
 #define __ARM_MPU_LAYOUT_H__
 
+#define FRAMETABLE_SIZE   GB(16)
+#define FRAMETABLE_NR     (FRAMETABLE_SIZE / sizeof(*frame_table))
+
 #define XEN_START_ADDRESS CONFIG_XEN_START_ADDRESS
 
 /*
@@ -21,6 +24,8 @@
  * address is determined by the physical address at which Xen is loaded.
  */
 #define XEN_VIRT_START         _AT(paddr_t, XEN_START_ADDRESS)
+
+#define HYPERVISOR_VIRT_START  XEN_VIRT_START
 
 #endif /* __ARM_MPU_LAYOUT_H__ */
 /*

@@ -153,8 +153,6 @@ static inline u32 get_apic_id(void)
 
 void apic_wait_icr_idle(void);
 
-int get_physical_broadcast(void);
-
 static inline void ack_APIC_irq(void)
 {
 	/* Docs say use 0 for future compatibility */
@@ -168,7 +166,6 @@ extern void disconnect_bsp_APIC (int virt_wire_setup);
 extern void disable_local_APIC (void);
 extern int verify_local_APIC (void);
 extern void cache_APIC_registers (void);
-extern void sync_Arb_IDs (void);
 extern void init_bsp_APIC (void);
 extern void setup_local_APIC(bool bsp);
 extern void init_apic_mappings (void);

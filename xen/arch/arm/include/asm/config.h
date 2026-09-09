@@ -8,18 +8,10 @@
 #define __ARM_CONFIG_H__
 
 #if defined(CONFIG_ARM_64)
-# define LONG_BYTEORDER 3
 # define ELFSIZE 64
 #else
-# define LONG_BYTEORDER 2
 # define ELFSIZE 32
 #endif
-
-#define BYTES_PER_LONG (1 << LONG_BYTEORDER)
-#define BITS_PER_LONG (BYTES_PER_LONG << 3)
-#define POINTER_ALIGN BYTES_PER_LONG
-
-#define BITS_PER_LLONG 64
 
 /* xen_ulong_t is always 64 bits */
 #define BITS_PER_XEN_ULONG 64
@@ -52,18 +44,10 @@
 #define CONFIG_AEABI
 
 /* Linkage for ARM */
-#ifdef __ASSEMBLY__
-#define ALIGN .balign CONFIG_FUNCTION_ALIGNMENT
-#define ENTRY(name)                             \
-  .globl name;                                  \
-  ALIGN;                                        \
-  name:
+#ifdef __ASSEMBLER__
 #define GLOBAL(name)                            \
   .globl name;                                  \
   name:
-#define ENDPROC(name) \
-  .type name, %function; \
-  END(name)
 #endif
 
 #include <xen/const.h>
@@ -82,14 +66,10 @@
 #define STACK_ORDER 3
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
 
-#ifndef __ASSEMBLY__
-extern unsigned long frametable_virt_end;
-#endif
-
 #define watchdog_disable() ((void)0)
 #define watchdog_enable()  ((void)0)
 
-#if defined(__ASSEMBLY__) && !defined(LINKER_SCRIPT)
+#if defined(__ASSEMBLER__) && !defined(LINKER_SCRIPT)
 #include <asm/asm_defns.h>
 #include <asm/macros.h>
 #endif

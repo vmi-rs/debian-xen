@@ -22,6 +22,7 @@
 
 #include <asm/processor.h>
 #include <asm/sbi.h>
+#include <asm/time.h>
 
 static unsigned long __ro_after_init sbi_spec_version = SBI_SPEC_VERSION_DEFAULT;
 
@@ -249,6 +250,55 @@ static int (* __ro_after_init sbi_rfence)(unsigned long fid,
                                           unsigned long arg4,
                                           unsigned long arg5);
 
+/*
+ * Programs the clock for next event at (or after) stime_value. stime_value is
+ * in absolute time. This function must clear the pending timer interrupt bit
+ * as well.
+ *
+ * If the supervisor wishes to clear the timer interrupt without scheduling the
+ * next timer event, it can either request a timer interrupt infinitely far
+ * into the future (i.e., (uint64_t)-1), or it can instead mask the timer
+ * interrupt by clearing sie.STIE CSR bit.
+ *
+ * The stime_value parameter represents absolute time measured in ticks.
+ *
+ * This SBI call returns 0 upon success or an implementation specific negative
+ * error code.
+ */
+static int cf_check sbi_set_timer_v02(uint64_t stime_value)
+{
+    struct sbiret ret;
+
+    ret = sbi_ecall(SBI_EXT_TIME, SBI_EXT_TIME_SET_TIMER, stime_value,
+#ifdef CONFIG_RISCV_32
+                    stime_value >> 32,
+#else
+                    0,
+#endif
+                    0, 0, 0, 0);
+
+    return sbi_err_map_xen_errno(ret.error);
+}
+
+/*
+ * Legacy SBI v0.1 SET_TIMER; functionally equivalent to sbi_set_timer_v02
+ * from Xen's perspective.
+ */
+static int cf_check sbi_set_timer_v01(uint64_t stime_value)
+{
+    struct sbiret ret;
+
+    ret = sbi_ecall(SBI_EXT_0_1_SET_TIMER, 0, stime_value,
+#ifdef CONFIG_RISCV_32
+                    stime_value >> 32,
+#else
+                    0,
+#endif
+                    0, 0, 0, 0);
+
+    return sbi_err_map_xen_errno(ret.error);
+}
+
 int sbi_remote_sfence_vma(const cpumask_t *cpu_mask, vaddr_t start,
                           size_t size)
 {
@@ -256,6 +306,20 @@ int sbi_remote_sfence_vma(const cpumask_t *cpu_mask, vaddr_t start,
 
     return sbi_rfence(SBI_EXT_RFENCE_REMOTE_SFENCE_VMA,
                       cpu_mask, start, size, 0, 0);
+}
+
+int sbi_remote_hfence_gvma(const cpumask_t *cpu_mask, vaddr_t start,
+                           size_t size)
+{
+    return sbi_rfence(SBI_EXT_RFENCE_REMOTE_HFENCE_GVMA,
+                      cpu_mask, start, size, 0, 0);
+}
+
+int sbi_remote_hfence_gvma_vmid(const cpumask_t *cpu_mask, vaddr_t start,
+                                size_t size, unsigned long vmid)
+{
+    return sbi_rfence(SBI_EXT_RFENCE_REMOTE_HFENCE_GVMA_VMID,
+                      cpu_mask, start, size, vmid, 0);
 }
 
 /* This function must always succeed. */
@@ -310,8 +374,13 @@ int __init sbi_init(void)
         if ( sbi_probe_extension(SBI_EXT_RFENCE) > 0 )
         {
             sbi_rfence = sbi_rfence_v02;
-            printk("SBI v0.2 RFENCE extension detected\n");
+            dprintk(XENLOG_INFO, "SBI v0.2 RFENCE extension detected\n");
         }
+
+        if ( sbi_probe_extension(SBI_EXT_TIME) > 0 )
+            set_xen_timer = sbi_set_timer_v02;
+        else
+            set_xen_timer = sbi_set_timer_v01;
     }
     else
         panic("Ooops. SBI spec version 0.1 detected. Need to add support");

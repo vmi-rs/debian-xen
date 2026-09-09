@@ -25,6 +25,9 @@ if [[ "${test_variant}" == "static-mem" ]]; then
     domU_check="
 mem_range=$(printf \"%08x-%08x\" ${domu_base} $(( ${domu_base} + ${domu_size} - 1 )))
 if grep -q -x \"\${mem_range} : System RAM\" /proc/iomem; then
+    until ifconfig eth0 192.168.0.2 &> /dev/null && ping -c 10 192.168.0.1; do
+        sleep 30
+    done
     echo \"${passed}\"
 fi
 "
@@ -75,9 +78,7 @@ if [[ "${test_variant}" == "gicv3" ]]; then
     domU_check="echo \"${passed}\""
 fi
 
-# XXX QEMU looks for "efi-virtio.rom" even if it is unneeded
-curl -fsSLO https://github.com/qemu/qemu/raw/v5.2.0/pc-bios/efi-virtio.rom
-./binaries/qemu-system-aarch64 \
+qemu-system-aarch64 \
    -machine virtualization=true \
    -cpu cortex-a57 -machine type=virt,gic-version=$gic_version \
    -m 2048 -smp 2 -display none \
@@ -200,7 +201,7 @@ bash imagebuilder/scripts/uboot-script-gen -t tftp -d binaries/ -c binaries/conf
 
 # Run the test
 rm -f smoke.serial
-export TEST_CMD="./binaries/qemu-system-aarch64 \
+export TEST_CMD="qemu-system-aarch64 \
     -machine virtualization=true \
     -cpu cortex-a57 -machine type=virt,gic-version=$gic_version \
     -m 2048 -monitor none -serial stdio \
@@ -215,4 +216,4 @@ export TEST_LOG="smoke.serial"
 export LOG_MSG="Welcome to Alpine Linux"
 export PASSED="${passed}"
 
-./automation/scripts/console.exp | sed 's/\r\+$//'
+./automation/scripts/console.exp |& sed 's/\r\+$//'

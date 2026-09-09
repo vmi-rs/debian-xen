@@ -9,38 +9,40 @@
  * Copyright (c) 1991, 1992, 1995  Linus Torvalds
  */
 
+#include <xen/cpuidle.h>
+#include <xen/efi.h>
 #include <xen/errno.h>
 #include <xen/event.h>
-#include <xen/sched.h>
-#include <xen/lib.h>
+#include <xen/guest_access.h>
 #include <xen/init.h>
+#include <xen/irq.h>
+#include <xen/keyhandler.h>
+#include <xen/muldiv64.h>
 #include <xen/param.h>
+#include <xen/pci_ids.h>
+#include <xen/sched.h>
+#include <xen/smp.h>
+#include <xen/softirq.h>
+#include <xen/symbols.h>
 #include <xen/time.h>
 #include <xen/timer.h>
-#include <xen/smp.h>
-#include <xen/irq.h>
-#include <xen/pci_ids.h>
-#include <xen/softirq.h>
-#include <xen/efi.h>
-#include <xen/cpuidle.h>
-#include <xen/symbols.h>
-#include <xen/keyhandler.h>
-#include <xen/guest_access.h>
+
+#include <asm/acpi.h>
 #include <asm/apic.h>
-#include <asm/io.h>
-#include <asm/iocap.h>
-#include <asm/msr.h>
-#include <asm/mpspec.h>
-#include <asm/processor.h>
+#include <asm/div64.h>
 #include <asm/fixmap.h>
 #include <asm/guest.h>
-#include <asm/mc146818rtc.h>
-#include <asm/mwait.h>
-#include <asm/div64.h>
-#include <asm/acpi.h>
 #include <asm/hpet.h>
 #include <asm/io-ports.h>
-#include <asm/setup.h> /* for early_time_init */
+#include <asm/io.h>
+#include <asm/iocap.h>
+#include <asm/mc146818rtc.h>
+#include <asm/mpspec.h>
+#include <asm/msr.h>
+#include <asm/mwait.h>
+#include <asm/processor.h>
+#include <asm/setup.h>
+
 #include <public/arch-x86/cpuid.h>
 
 /* opt_clocksource: Force clocksource to one of: pit, hpet, acpi. */
@@ -93,7 +95,7 @@ static u32 pit_stamp32;
 static bool __read_mostly using_pit;
 
 /* Boot timestamp, filled in head.S */
-u64 __initdata boot_tsc_stamp;
+uint64_t __initdata boot_tsc_stamp;
 
 /* Per-socket TSC_ADJUST values, for secondary cores/threads to sync to. */
 static uint64_t *__read_mostly tsc_adjust;
@@ -131,9 +133,9 @@ static inline u32 mul_frac(u32 multiplicand, u32 multiplier)
  * Scale a 64-bit delta by scaling and multiplying by a 32-bit fraction,
  * yielding a 64-bit result.
  */
-u64 scale_delta(u64 delta, const struct time_scale *scale)
+static uint64_t scale_delta(uint64_t delta, const struct time_scale *scale)
 {
-    u64 product;
+    uint64_t product;
 
     if ( scale->shift < 0 )
         delta >>= -scale->shift;
@@ -1174,20 +1176,26 @@ uint64_t __init calibrate_apic_timer(void)
     return elapsed * CALIBRATE_FRAC;
 }
 
-u64 stime2tsc(s_time_t stime)
+uint64_t stime2tsc(s_time_t stime)
 {
-    struct cpu_time *t;
-    struct time_scale sys_to_tsc;
-    s_time_t stime_delta;
+    const struct cpu_time *t = &this_cpu(cpu_time);
+    s_time_t stime_delta = stime - t->stamp.local_stime;
+    uint64_t delta = 0;
 
-    t = &this_cpu(cpu_time);
-    sys_to_tsc = scale_reciprocal(t->tsc_scale);
+    /*
+     * While for reprogram_timer() the capping at 0 isn't relevant (the returned
+     * value is likely in the past anyway then, by the time it is used), for
+     * cstate_restore_tsc() this is relevant: We need to avoid moving the TSC
+     * backwards (relative to when it may last have been read).
+     */
+    if ( stime_delta > 0 )
+    {
+        struct time_scale sys_to_tsc = scale_reciprocal(t->tsc_scale);
 
-    stime_delta = stime - t->stamp.local_stime;
-    if ( stime_delta < 0 )
-        stime_delta = 0;
+        delta = scale_delta(stime_delta, &sys_to_tsc);
+    }
 
-    return t->stamp.local_tsc + scale_delta(stime_delta, &sys_to_tsc);
+    return t->stamp.local_tsc + delta;
 }
 
 void cstate_restore_tsc(void)
@@ -1249,6 +1257,7 @@ struct rtc_time {
 static bool __get_cmos_time(struct rtc_time *rtc)
 {
     s_time_t start, t1, t2;
+    unsigned int century = 0;
     unsigned long flags;
 
     spin_lock_irqsave(&rtc_lock, flags);
@@ -1272,6 +1281,8 @@ static bool __get_cmos_time(struct rtc_time *rtc)
     rtc->day  = CMOS_READ(RTC_DAY_OF_MONTH);
     rtc->mon  = CMOS_READ(RTC_MONTH);
     rtc->year = CMOS_READ(RTC_YEAR);
+    if ( acpi_gbl_FADT.century && acpi_gbl_FADT.century < 0x80 )
+        century = CMOS_READ(acpi_gbl_FADT.century);
     
     if ( RTC_ALWAYS_BCD || !(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) )
     {
@@ -1285,7 +1296,12 @@ static bool __get_cmos_time(struct rtc_time *rtc)
 
     spin_unlock_irqrestore(&rtc_lock, flags);
 
-    if ( (rtc->year += 1900) < 1970 )
+    if ( century )
+    {
+        BCD_TO_BIN(century);
+        rtc->year += century * 100;
+    }
+    else if ( (rtc->year += 1900) < 1970 )
         rtc->year += 100;
 
     return t1 <= SECONDS(1) && t2 < MILLISECS(3);
@@ -1640,10 +1656,10 @@ static unsigned long get_wallclock_time(void)
  * System Time
  ***************************************************************************/
 
-s_time_t get_s_time_fixed(u64 at_tsc)
+s_time_t get_s_time_fixed(uint64_t at_tsc)
 {
     const struct cpu_time *t = &this_cpu(cpu_time);
-    u64 tsc, delta;
+    uint64_t tsc, delta;
 
     if ( at_tsc )
         tsc = at_tsc;
@@ -2592,6 +2608,11 @@ int __init init_xen_time(void)
     /* Finish platform timer initialization. */
     try_platform_timer_tail();
 
+    /*
+     * While early_time_init() called this already, call it again here to
+     * reduce the gap until local_time_calibration() gets to run for the
+     * first time.
+     */
     init_percpu_time();
 
     init_timer(&calibration_timer, time_calibration, NULL, 0);
@@ -2637,6 +2658,8 @@ void __init early_time_init(void)
     set_time_scale(&t->tsc_scale, tmp);
     t->stamp.local_tsc = boot_tsc_stamp;
 
+    init_percpu_time();
+
     cpu_khz = DIV_ROUND(tmp, 1000);
     printk("Detected %lu.%03lu MHz processor.\n", 
            cpu_khz / 1000, cpu_khz % 1000);
@@ -2658,7 +2681,7 @@ static int _disable_pit_irq(bool init)
      * XXX dom0 may rely on RTC interrupt delivery, so only enable
      * hpet_broadcast if FSB mode available or if force_hpet_broadcast.
      */
-    if ( cpuidle_usable_deep_cstate() && !boot_cpu_has(X86_FEATURE_ARAT) )
+    if ( cpuidle_usable_deep_cstate() && !boot_cpu_has(X86_FEATURE_XEN_ARAT) )
     {
         init ? hpet_broadcast_init() : hpet_broadcast_resume();
         if ( !hpet_broadcast_is_available() )
@@ -2849,27 +2872,13 @@ uint64_t gtime_to_gtsc(const struct domain *d, uint64_t time)
     return scale_delta(time, &d->arch.ns_to_vtsc);
 }
 
+#ifdef CONFIG_HVM
 uint64_t gtsc_to_gtime(const struct domain *d, uint64_t tsc)
 {
-    u64 time = scale_delta(tsc, &d->arch.vtsc_to_ns);
-
-    if ( !is_hvm_domain(d) )
-        time += d->arch.vtsc_offset;
-    return time;
+    ASSERT(is_hvm_domain(d));
+    return scale_delta(tsc, &d->arch.vtsc_to_ns);
 }
-
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
-{
-    s_time_t old, new, now = get_s_time();
-    struct domain *d = v->domain;
-
-    do {
-        old = d->arch.vtsc_last;
-        new = now > d->arch.vtsc_last ? now : old + 1;
-    } while ( cmpxchg(&d->arch.vtsc_last, old, new) != old );
-
-    return gtime_to_gtsc(d, new);
-}
+#endif /* CONFIG_HVM */
 
 bool clocksource_is_tsc(void)
 {
@@ -2994,8 +3003,7 @@ int tsc_set_info(struct domain *d,
              */
             d->arch.hvm.sync_tsc = rdtsc();
             hvm_set_tsc_offset(d->vcpu[0],
-                               d->vcpu[0]->arch.hvm.cache_tsc_offset,
-                               d->arch.hvm.sync_tsc);
+                               d->vcpu[0]->arch.hvm.cache_tsc_offset);
         }
     }
 

@@ -14,7 +14,7 @@
 
 #include <asm/bug.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/compiler.h>
 #include <xen/macros.h>
@@ -89,11 +89,12 @@ struct bug_frame {
 #ifndef BUG_FRAME
 
 #define BUG_FRAME(type, line, ptr, second_frame, msg) do {                   \
-    BUG_CHECK_LINE_WIDTH(line);                                           \
-    BUILD_BUG_ON((type) >= BUGFRAME_NR);                                     \
-    asm volatile ( _ASM_BUGFRAME_TEXT(second_frame)                          \
-                   :: _ASM_BUGFRAME_INFO(type, line, ptr, msg) );            \
-} while ( false )
+        BUG_CHECK_LINE_WIDTH(line);                                          \
+        BUILD_BUG_ON((type) >= BUGFRAME_NR);                                 \
+        asm_inline volatile (                                                \
+            _ASM_BUGFRAME_TEXT(second_frame)                                 \
+            :: _ASM_BUGFRAME_INFO(type, line, ptr, msg) );                   \
+    } while ( false )
 
 #endif
 
@@ -155,7 +156,7 @@ int do_bug_frame(const struct cpu_user_regs *regs, unsigned long pc);
 
 #endif /* CONFIG_GENERIC_BUG_FRAME */
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __XEN_BUG_H__ */
 /*

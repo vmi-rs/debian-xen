@@ -1,67 +1,68 @@
-#include <xen/init.h>
-#include <xen/lib.h>
+#include <xen/acpi.h>
+#include <xen/alternative-call.h>
+#include <xen/bitops.h>
+#include <xen/console.h>
+#include <xen/cpu.h>
+#include <xen/cpuidle.h>
+#include <xen/dmi.h>
+#include <xen/domain.h>
+#include <xen/efi.h>
 #include <xen/err.h>
 #include <xen/grant_table.h>
+#include <xen/init.h>
+#include <xen/kexec.h>
+#include <xen/keyhandler.h>
+#include <xen/lib.h>
+#include <xen/multiboot.h>
+#include <xen/nodemask.h>
+#include <xen/numa.h>
 #include <xen/param.h>
+#include <xen/pfn.h>
+#include <xen/rcupdate.h>
 #include <xen/sched.h>
-#include <xen/domain.h>
 #include <xen/sections.h>
 #include <xen/serial.h>
 #include <xen/softirq.h>
-#include <xen/acpi.h>
-#include <xen/efi.h>
-#include <xen/console.h>
-#include <xen/serial.h>
-#include <xen/trace.h>
-#include <xen/multiboot.h>
-#include <xen/domain_page.h>
 #include <xen/version.h>
-#include <xen/hypercall.h>
-#include <xen/keyhandler.h>
-#include <xen/numa.h>
-#include <xen/rcupdate.h>
 #include <xen/vga.h>
-#include <xen/dmi.h>
-#include <xen/pfn.h>
-#include <xen/nodemask.h>
 #include <xen/virtual_region.h>
 #include <xen/watchdog.h>
-#include <public/version.h>
+
+#include <asm/alternative.h>
+#include <asm/apic.h>
+#include <asm/bootinfo.h>
+#include <asm/bzimage.h>
+#include <asm/cpu-policy.h>
+#include <asm/e820.h>
+#include <asm/edd.h>
+#include <asm/genapic.h>
+#include <asm/guest.h>
+#include <asm/invpcid.h>
+#include <asm/io_apic.h>
+#include <asm/mc146818rtc.h>
+#include <asm/microcode.h>
+#include <asm/mpspec.h>
+#include <asm/msi.h>
+#include <asm/nmi.h>
+#include <asm/paging.h>
+#include <asm/processor.h>
+#include <asm/prot-key.h>
+#include <asm/pv/domain.h>
+#include <asm/setup.h>
+#include <asm/shstk.h>
+#include <asm/smp.h>
+#include <asm/spec_ctrl.h>
+#include <asm/stubs.h>
+#include <asm/tboot.h>
+#include <asm/trampoline.h>
+#include <asm/traps.h>
+
+#include <xsm/xsm.h>
+
 #ifdef CONFIG_COMPAT
 #include <compat/platform.h>
 #include <compat/xen.h>
 #endif
-#include <xen/bitops.h>
-#include <asm/bootinfo.h>
-#include <asm/smp.h>
-#include <asm/processor.h>
-#include <asm/mpspec.h>
-#include <asm/apic.h>
-#include <asm/msi.h>
-#include <asm/desc.h>
-#include <asm/paging.h>
-#include <asm/e820.h>
-#include <xen/kexec.h>
-#include <asm/edd.h>
-#include <xsm/xsm.h>
-#include <asm/tboot.h>
-#include <asm/bzimage.h> /* for bzimage_headroom */
-#include <asm/genapic.h>
-#include <asm/io_apic.h>
-#include <asm/setup.h>
-#include <xen/cpu.h>
-#include <xen/cpuidle.h>
-#include <asm/nmi.h>
-#include <asm/alternative.h>
-#include <asm/mc146818rtc.h>
-#include <asm/cpu-policy.h>
-#include <asm/invpcid.h>
-#include <asm/spec_ctrl.h>
-#include <asm/guest.h>
-#include <asm/microcode.h>
-#include <asm/prot-key.h>
-#include <asm/pv/domain.h>
-#include <asm/trampoline.h>
 
 /* opt_nosmp: If true, secondary processors are ignored. */
 static bool __initdata opt_nosmp;
@@ -173,7 +174,7 @@ void *stack_start = cpu0_stack + STACK_SIZE - sizeof(struct cpu_info);
 /* Used by the boot asm and EFI to stash the multiboot_info paddr. */
 unsigned int __initdata multiboot_ptr;
 
-struct cpuinfo_x86 __read_mostly boot_cpu_data = { 0, 0, 0, 0, -1 };
+struct cpuinfo_x86 __read_mostly boot_cpu_data = { CPU_DATA_INIT() };
 
 unsigned long __read_mostly mmu_cr4_features = XEN_MINIMAL_CR4;
 
@@ -292,6 +293,13 @@ static const char *cmdline_cook(const char *p, const char *loader_name);
 struct boot_info __initdata xen_boot_info = {
     .loader = "unknown",
     .cmdline = "",
+    .domains = { [0 ... MAX_NR_BOOTDOMS - 1] = { .domid = DOMID_INVALID } },
+    /*
+     * There's a MAX_NR_BOOTMODS-th entry in the array. It's not off by one.
+     *
+     * The extra entry exists to be able to add the Xen image as a module.
+     */
+    .mods = { [0 ... MAX_NR_BOOTMODS] = { .kind = BOOTMOD_UNKNOWN } },
 };
 
 static struct boot_info *__init multiboot_fill_boot_info(
@@ -326,7 +334,7 @@ static struct boot_info *__init multiboot_fill_boot_info(
      */
     for ( i = 0; i < MAX_NR_BOOTMODS && i < bi->nr_modules; i++ )
     {
-        bi->mods[i].cmdline_pa = mods[i].string;
+        bi->mods[i].arch.cmdline_pa = mods[i].string;
 
         if ( efi_enabled(EFI_LOADER) )
         {
@@ -349,7 +357,7 @@ static struct boot_info *__init multiboot_fill_boot_info(
     }
 
     /* Variable 'i' should be one entry past the last module. */
-    bi->mods[i].type = BOOTMOD_XEN;
+    bi->mods[i].kind = BOOTMOD_XEN;
 
     return bi;
 }
@@ -376,11 +384,11 @@ unsigned long __init initial_images_nrpages(nodeid_t node)
 
 void __init release_boot_module(struct boot_module *bm)
 {
-    ASSERT(!bm->released);
+    ASSERT(!bm->arch.released);
 
     init_domheap_pages(bm->start, bm->start + PAGE_ALIGN(bm->size));
 
-    bm->released = true;
+    bm->arch.released = true;
 }
 
 void __init free_boot_modules(void)
@@ -390,7 +398,7 @@ void __init free_boot_modules(void)
 
     for ( i = 0; i < bi->nr_modules; ++i )
     {
-        if ( bi->mods[i].released )
+        if ( bi->mods[i].arch.released )
             continue;
 
         release_boot_module(&bi->mods[i]);
@@ -869,6 +877,8 @@ static void noreturn init_done(void)
     startup_cpu_idle_loop();
 }
 
+unsigned int xen_msr_s_cet_value(void); /* To avoid ifdefary, and placate MISRA */
+
 #if defined(CONFIG_XEN_SHSTK) || defined(CONFIG_XEN_IBT)
 /*
  * Used by AP and S3 asm code to calcualte the appropriate MSR_S_CET setting.
@@ -880,8 +890,6 @@ unsigned int xen_msr_s_cet_value(void)
     return ((cpu_has_xen_shstk ? CET_SHSTK_EN | CET_WRSS_EN : 0) |
             (cpu_has_xen_ibt   ? CET_ENDBR_EN : 0));
 }
-#else
-unsigned int xen_msr_s_cet_value(void); /* To avoid ifdefary */
 #endif
 
 /* Reinitalise all state referring to the old virtual address of the stack. */
@@ -890,11 +898,7 @@ static void __init noreturn reinit_bsp_stack(void)
     unsigned long *stack = (void*)(get_stack_bottom() & ~(STACK_SIZE - 1));
     int rc;
 
-    /* Update TSS and ISTs */
-    load_system_tables();
-
-    /* Update SYSCALL trampolines */
-    percpu_traps_init();
+    bsp_traps_reinit();
 
     stack_base[0] = stack;
 
@@ -911,10 +915,30 @@ static void __init noreturn reinit_bsp_stack(void)
          */
         local_irq_disable();
 
-        wrmsrl(MSR_PL0_SSP,
-               (unsigned long)stack + (PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8);
         wrmsrl(MSR_S_CET, xen_msr_s_cet_value());
-        asm volatile ("setssbsy" ::: "memory");
+
+        /*
+         * IDT and FRED differ by a Supervisor Token on the shadow stack.
+         *
+         * In IDT mode, we use SETSSBSY (itself using MSR_PL0_SSP, configured
+         * previously) to mark the Supervisor Token as Busy.  In FRED mode,
+         * there is no token, so we need to create a temporary Restore Token
+         * to establish SSP.
+         */
+        if ( opt_fred )
+        {
+            unsigned long *token =
+                (void *)stack + (PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8;
+
+            wrss((unsigned long)token + 9, token);
+            asm volatile ( "rstorssp %0" : "+m" (*token) );
+            /*
+             * We need to discard the resulting Previous-SSP Token, but
+             * reset_stack_and_jump() will do that for us.
+             */
+        }
+        else
+            asm volatile ( "setssbsy" ::: "memory" );
 
         local_irq_enable();
     }
@@ -983,10 +1007,37 @@ static unsigned int __init copy_bios_e820(struct e820entry *map, unsigned int li
     return n;
 }
 
+/*
+ * Calculate the maximum possible size of the dom0 cmdline.  Pieces of the
+ * dom0 cmdline optionally come from the bootloader directly, from Xen's
+ * cmdline (following " -- "), and individual Xen parameters are forwarded
+ * too.
+ */
+static size_t __init domain_cmdline_size(const struct boot_info *bi,
+                                         const struct boot_domain *bd)
+{
+    size_t s = 0;
+
+    if ( bd->kernel->arch.cmdline_pa )
+        s += strlen(__va(bd->kernel->arch.cmdline_pa));
+
+    if ( bi->kextra )
+        s += strlen(bi->kextra);
+
+    /*
+     * Certain parameters from the Xen command line may be added to the dom0
+     * command line. Add additional space for the possible cases along with one
+     * extra char to hold \0.
+     */
+    s += strlen(" noapic") + strlen(" acpi=") + sizeof(acpi_param) + 1;
+
+    return s;
+}
+
 static struct domain *__init create_dom0(struct boot_info *bi)
 {
-    static char __initdata cmdline[MAX_GUEST_CMDLINE];
-
+    char *cmdline = NULL;
+    size_t cmdline_size;
     struct xen_domctl_createdomain dom0_cfg = {
         .flags = IS_ENABLED(CONFIG_TBOOT) ? XEN_DOMCTL_CDF_s3_integrity : 0,
         .max_evtchn_port = -1,
@@ -998,22 +1049,17 @@ static struct domain *__init create_dom0(struct boot_info *bi)
             .misc_flags = opt_dom0_msr_relaxed ? XEN_X86_MSR_RELAXED : 0,
         },
     };
+    struct boot_domain *bd = &bi->domains[0];
     struct domain *d;
-    domid_t domid;
-    struct boot_module *image;
-    unsigned int idx;
-
-    idx = first_boot_module_index(bi, BOOTMOD_KERNEL);
-    if ( idx >= bi->nr_modules )
-        panic("Missing kernel boot module for building domain\n");
-
-    image = &bi->mods[idx];
 
     if ( opt_dom0_pvh )
     {
-        dom0_cfg.flags |= (XEN_DOMCTL_CDF_hvm |
-                           ((hvm_hap_supported() && !opt_dom0_shadow) ?
-                            XEN_DOMCTL_CDF_hap : 0));
+        dom0_cfg.flags |= XEN_DOMCTL_CDF_hvm;
+
+        if ( hvm_hap_supported() && !opt_dom0_shadow )
+            dom0_cfg.flags |= XEN_DOMCTL_CDF_hap;
+        else if ( !IS_ENABLED(CONFIG_SHADOW_PAGING) )
+            panic("Neither HAP nor Shadow available for PVH domain\n");
 
         dom0_cfg.arch.emulation_flags |=
             XEN_X86_EMU_LAPIC | XEN_X86_EMU_IOAPIC | XEN_X86_EMU_VPCI;
@@ -1022,49 +1068,62 @@ static struct domain *__init create_dom0(struct boot_info *bi)
     if ( iommu_enabled )
         dom0_cfg.flags |= XEN_DOMCTL_CDF_iommu;
 
-    /* Create initial domain.  Not d0 for pvshim. */
-    domid = get_initial_domain_id();
-    d = domain_create(domid, &dom0_cfg, pv_shim ? 0 : CDF_privileged);
+    /* Allocate initial domain ID.  Not d0 for pvshim. */
+    bd->domid = domid_alloc(get_initial_domain_id());
+    if ( bd->domid == DOMID_INVALID )
+        panic("Error allocating domain ID %u\n", get_initial_domain_id());
+
+    d = domain_create(bd->domid, &dom0_cfg,
+                      pv_shim ? 0 : CDF_privileged | CDF_hardware);
     if ( IS_ERR(d) )
-        panic("Error creating d%u: %ld\n", domid, PTR_ERR(d));
+        panic("Error creating d%u: %ld\n", bd->domid, PTR_ERR(d));
 
     init_dom0_cpuid_policy(d);
 
     if ( alloc_dom0_vcpu0(d) == NULL )
-        panic("Error creating d%uv0\n", domid);
+        panic("Error creating %pdv0\n", d);
 
-    /* Grab the DOM0 command line. */
-    if ( image->cmdline_pa || bi->kextra )
+    cmdline_size = domain_cmdline_size(bi, bd);
+    if ( cmdline_size )
     {
-        if ( image->cmdline_pa )
-            safe_strcpy(
-                cmdline, cmdline_cook(__va(image->cmdline_pa), bi->loader));
+        if ( !(cmdline = xzalloc_array(char, cmdline_size)) )
+            panic("Error allocating cmdline buffer for %pd\n", d);
+
+        if ( bd->kernel->arch.cmdline_pa )
+            strlcpy(cmdline,
+                    cmdline_cook(__va(bd->kernel->arch.cmdline_pa),
+                                 bi->loader),
+                    cmdline_size);
 
         if ( bi->kextra )
             /* kextra always includes exactly one leading space. */
-            safe_strcat(cmdline, bi->kextra);
+            strlcat(cmdline, bi->kextra, cmdline_size);
 
         /* Append any extra parameters. */
         if ( skip_ioapic_setup && !strstr(cmdline, "noapic") )
-            safe_strcat(cmdline, " noapic");
+            strlcat(cmdline, " noapic", cmdline_size);
 
         if ( (strlen(acpi_param) == 0) && acpi_disabled )
         {
-            printk("ACPI is disabled, notifying Domain 0 (acpi=off)\n");
+            printk("ACPI is disabled, notifying %pd (acpi=off)\n", d);
             safe_strcpy(acpi_param, "off");
         }
 
         if ( (strlen(acpi_param) != 0) && !strstr(cmdline, "acpi=") )
         {
-            safe_strcat(cmdline, " acpi=");
-            safe_strcat(cmdline, acpi_param);
+            strlcat(cmdline, " acpi=", cmdline_size);
+            strlcat(cmdline, acpi_param, cmdline_size);
         }
-
-        image->cmdline_pa = __pa(cmdline);
+        bd->kernel->arch.cmdline_pa = 0;
+        bd->cmdline = cmdline;
     }
 
-    if ( construct_dom0(bi, d) != 0 )
-        panic("Could not construct domain 0\n");
+    bd->d = d;
+    if ( construct_dom0(bd) != 0 )
+        panic("Could not construct %pd\n", d);
+
+    bd->cmdline = NULL;
+    xfree(cmdline);
 
     return d;
 }
@@ -1093,14 +1152,13 @@ void asmlinkage __init noreturn __start_xen(void)
     };
     const char *hypervisor_name;
 
-    /* Critical region without IDT or TSS.  Any fault is deadly! */
+    /* Critical region without exception handling.  Any fault is deadly! */
 
-    init_shadow_spec_ctrl_state();
+    init_shadow_spec_ctrl_state(info);
 
     percpu_init_areas();
 
-    init_idt_traps();
-    load_system_tables();
+    bsp_early_traps_init();
 
     smp_prepare_boot_cpu();
     sort_exception_tables();
@@ -1269,7 +1327,8 @@ void asmlinkage __init noreturn __start_xen(void)
     }
 
     /* Dom0 kernel is always first */
-    bi->mods[0].type = BOOTMOD_KERNEL;
+    bi->mods[0].kind = BOOTMOD_KERNEL;
+    bi->domains[0].kernel = &bi->mods[0];
 
     if ( pvh_boot )
     {
@@ -1336,6 +1395,8 @@ void asmlinkage __init noreturn __start_xen(void)
     else
         panic("Bootloader provided no memory information\n");
 
+    traps_init();
+
     /* Choose shadow stack early, to set infrastructure up appropriately. */
     if ( !boot_cpu_has(X86_FEATURE_CET_SS) )
         opt_xen_shstk = 0;
@@ -1357,18 +1418,22 @@ void asmlinkage __init noreturn __start_xen(void)
          * supervisor shadow stacks are now safe to use.
          */
         bool cpu_has_bug_shstk_fracture =
-            boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
+            boot_cpu_data.vendor == X86_VENDOR_INTEL &&
             !boot_cpu_has(X86_FEATURE_CET_SSS);
 
+        ASSERT(opt_fred >= 0); /* Confirm that FRED-ness has been resolved */
+
         /*
-         * On bare metal, assume that Xen won't be impacted by shstk
-         * fracturing problems.  Under virt, be more conservative and disable
-         * shstk by default.
+         * If FRED is in use, Supervisor Shadow Stack tokens are not used and
+         * shstk fracturing is of no consequence.  Otherwise:
+         * - On bare metal, assume that Xen won't be impacted by shstk
+         *   fracturing problems.
+         * - Under virt, be more conservative and disable shstk by default.
          */
         if ( opt_xen_shstk == -1 )
             opt_xen_shstk =
-                cpu_has_hypervisor ? !cpu_has_bug_shstk_fracture
-                                   : true;
+                opt_fred || (cpu_has_hypervisor ? !cpu_has_bug_shstk_fracture
+                                                : true);
 
         if ( opt_xen_shstk )
         {
@@ -1452,7 +1517,7 @@ void asmlinkage __init noreturn __start_xen(void)
         xen->size  = __2M_rwdata_end - _stext;
     }
 
-    bi->mods[0].headroom =
+    bi->mods[0].arch.headroom =
         bzimage_headroom(bootstrap_map_bm(&bi->mods[0]), bi->mods[0].size);
     bootstrap_unmap();
 
@@ -1534,9 +1599,9 @@ void asmlinkage __init noreturn __start_xen(void)
         for ( j = bi->nr_modules - 1; j >= 0; j-- )
         {
             struct boot_module *bm = &bi->mods[j];
-            unsigned long size = PAGE_ALIGN(bm->headroom + bm->size);
+            unsigned long size = PAGE_ALIGN(bm->arch.headroom + bm->size);
 
-            if ( bm->relocated )
+            if ( bm->arch.relocated )
                 continue;
 
             /* Don't overlap with other modules (or Xen itself). */
@@ -1546,12 +1611,12 @@ void asmlinkage __init noreturn __start_xen(void)
             if ( highmem_start && end > highmem_start )
                 continue;
 
-            if ( s < end && (bm->headroom || (end - size) > bm->start) )
+            if ( s < end && (bm->arch.headroom || (end - size) > bm->start) )
             {
-                move_memory(end - size + bm->headroom, bm->start, bm->size);
+                move_memory(end - size + bm->arch.headroom, bm->start, bm->size);
                 bm->start = (end - size);
-                bm->size += bm->headroom;
-                bm->relocated = true;
+                bm->size += bm->arch.headroom;
+                bm->arch.relocated = true;
             }
         }
 
@@ -1577,7 +1642,7 @@ void asmlinkage __init noreturn __start_xen(void)
 #endif
     }
 
-    if ( bi->mods[0].headroom && !bi->mods[0].relocated )
+    if ( bi->mods[0].arch.headroom && !bi->mods[0].arch.relocated )
         panic("Not enough memory to relocate the dom0 kernel image\n");
     for ( i = 0; i < bi->nr_modules; ++i )
     {
@@ -1873,7 +1938,7 @@ void asmlinkage __init noreturn __start_xen(void)
 
     system_state = SYS_STATE_boot;
 
-    bsp_stack = cpu_alloc_stack(0);
+    bsp_stack = cpu_alloc_stack(0); /* Needs to know IDT vs FRED */
     if ( !bsp_stack )
         panic("No memory for BSP stack\n");
 
@@ -1910,7 +1975,7 @@ void asmlinkage __init noreturn __start_xen(void)
      * Initialize PCI (create segment 0, setup MMCFG access) ahead of IOMMU
      * setup, as devices in segment > 0 must also be discoverable.
      */
-    acpi_mmcfg_init();
+    pci_setup();
 
     /*
      * IOMMU-related ACPI table parsing has to happen before APIC probing, for
@@ -1988,10 +2053,10 @@ void asmlinkage __init noreturn __start_xen(void)
 
     /* Do not enable SMEP/SMAP in PV shim on AMD and Hygon by default */
     if ( opt_smep == -1 )
-        opt_smep = !pv_shim || !(boot_cpu_data.x86_vendor &
+        opt_smep = !pv_shim || !(boot_cpu_data.vendor &
                                  (X86_VENDOR_AMD | X86_VENDOR_HYGON));
     if ( opt_smap == -1 )
-        opt_smap = !pv_shim || !(boot_cpu_data.x86_vendor &
+        opt_smap = !pv_shim || !(boot_cpu_data.vendor &
                                  (X86_VENDOR_AMD | X86_VENDOR_HYGON));
 
     if ( !opt_smep )
@@ -2026,7 +2091,9 @@ void asmlinkage __init noreturn __start_xen(void)
 
     init_stubs();
 
-    trap_init();
+    bsp_traps_reinit(); /* Needs stubs allocated, must be before presmp_initcalls. */
+
+    cpu_init();
 
     rcu_init();
 
@@ -2061,7 +2128,7 @@ void asmlinkage __init noreturn __start_xen(void)
 
     do_presmp_initcalls();
 
-    alternative_branches();
+    boot_apply_alt_calls();
 
     /*
      * NB: when running as a PV shim VCPUOP_up/down is wired to the shim
@@ -2130,7 +2197,8 @@ void asmlinkage __init noreturn __start_xen(void)
     initrdidx = first_boot_module_index(bi, BOOTMOD_UNKNOWN);
     if ( initrdidx < MAX_NR_BOOTMODS )
     {
-        bi->mods[initrdidx].type = BOOTMOD_RAMDISK;
+        bi->mods[initrdidx].kind = BOOTMOD_RAMDISK;
+        bi->domains[0].initrd = &bi->mods[initrdidx];
         if ( first_boot_module_index(bi, BOOTMOD_UNKNOWN) < MAX_NR_BOOTMODS )
             printk(XENLOG_WARNING
                    "Multiple initrd candidates, picking module #%u\n",
@@ -2146,8 +2214,6 @@ void asmlinkage __init noreturn __start_xen(void)
         panic("Could not set up DOM0 guest OS\n");
 
     heap_init_late();
-
-    init_trace_bufs();
 
     init_constructors();
 

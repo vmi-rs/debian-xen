@@ -23,7 +23,7 @@
 #define FIXADDR_START FIXMAP_ADDR(0)
 #define FIXADDR_TOP FIXMAP_ADDR(FIX_LAST + 1)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * Direct access to xen_fixmap[] should only happen when {set,
@@ -33,7 +33,7 @@
 extern pte_t xen_fixmap[];
 
 /* Map a page in a fixmap entry */
-void set_fixmap(unsigned int map, mfn_t mfn, unsigned int flags);
+void set_fixmap(unsigned int map, mfn_t mfn, pte_attr_t flags);
 /* Remove a mapping from a fixmap entry */
 void clear_fixmap(unsigned int map);
 
@@ -46,6 +46,6 @@ static inline unsigned int virt_to_fix(vaddr_t vaddr)
     return ((vaddr - FIXADDR_START) >> PAGE_SHIFT);
 }
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* ASM__RISCV__FIXMAP_H */

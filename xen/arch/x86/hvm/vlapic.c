@@ -72,7 +72,7 @@ static void vlapic_do_init(struct vlapic *vlapic);
 static int vlapic_find_highest_vector(const void *bitmap)
 {
     const uint32_t *word = bitmap;
-    unsigned int word_offset = X86_NR_VECTORS / 32;
+    unsigned int word_offset = X86_IDT_VECTORS / 32;
 
     /* Work backwards through the bitmap (first 32-bit word in every four). */
     while ( (word_offset != 0) && (word[(--word_offset)*4] == 0) )
@@ -102,14 +102,16 @@ static int vlapic_find_highest_irr(struct vlapic *vlapic)
     return vlapic_find_highest_vector(&vlapic->regs->data[APIC_IRR]);
 }
 
-static void vlapic_error(struct vlapic *vlapic, unsigned int errmask)
+static void vlapic_error(struct vlapic *vlapic, unsigned int err_bit)
 {
-    unsigned long flags;
-    uint32_t esr;
-
-    spin_lock_irqsave(&vlapic->esr_lock, flags);
-    esr = vlapic->hw.pending_esr;
-    if ( (esr & errmask) != errmask )
+    /*
+     * Whether LVTERR is delivered on a per-bit basis, or only on
+     * pending_esr becoming nonzero is implementation specific.
+     *
+     * Xen implements the per-bit behaviour as it can be expressed
+     * locklessly.
+     */
+    if ( !test_and_set_bit(err_bit, &vlapic->hw.pending_esr) )
     {
         uint32_t lvterr = vlapic_get_reg(vlapic, APIC_LVTERR);
         bool inj = false;
@@ -121,23 +123,20 @@ static void vlapic_error(struct vlapic *vlapic, unsigned int errmask)
              * will end up back here.  Break the cycle by only injecting LVTERR
              * if it will succeed, and folding in RECVILL otherwise.
              */
-            if ( (lvterr & APIC_VECTOR_MASK) >= 16 )
-                 inj = true;
+            if ( APIC_VECTOR_VALID(lvterr) )
+                inj = true;
             else
-                 errmask |= APIC_ESR_RECVILL;
+                set_bit(ilog2(APIC_ESR_RECVILL), &vlapic->hw.pending_esr);
         }
-
-        vlapic->hw.pending_esr |= errmask;
 
         if ( inj )
             vlapic_set_irq(vlapic, lvterr & APIC_VECTOR_MASK, 0);
     }
-    spin_unlock_irqrestore(&vlapic->esr_lock, flags);
 }
 
 bool vlapic_test_irq(const struct vlapic *vlapic, uint8_t vec)
 {
-    if ( unlikely(vec < 16) )
+    if ( unlikely(!APIC_VECTOR_VALID(vec)) )
         return false;
 
     if ( hvm_funcs.test_pir &&
@@ -151,9 +150,9 @@ void vlapic_set_irq(struct vlapic *vlapic, uint8_t vec, uint8_t trig)
 {
     struct vcpu *target = vlapic_vcpu(vlapic);
 
-    if ( unlikely(vec < 16) )
+    if ( unlikely(!APIC_VECTOR_VALID(vec)) )
     {
-        vlapic_error(vlapic, APIC_ESR_RECVILL);
+        vlapic_error(vlapic, ilog2(APIC_ESR_RECVILL));
         return;
     }
 
@@ -277,7 +276,6 @@ static void vlapic_init_sipi_one(struct vcpu *target, uint32_t icr)
     switch ( icr & APIC_DM_MASK )
     {
     case APIC_DM_INIT: {
-        bool fpu_initialised;
         int rc;
 
         /* No work on INIT de-assert for P4-type APIC. */
@@ -290,10 +288,8 @@ static void vlapic_init_sipi_one(struct vcpu *target, uint32_t icr)
         hvm_vcpu_down(target);
         domain_lock(target->domain);
         /* Reset necessary VCPU state. This does not include FPU state. */
-        fpu_initialised = target->fpu_initialised;
         rc = vcpu_reset(target);
         ASSERT(!rc);
-        target->fpu_initialised = fpu_initialised;
         vlapic_do_init(vcpu_vlapic(target));
         domain_unlock(target->domain);
         break;
@@ -427,7 +423,8 @@ void vlapic_EOI_set(struct vlapic *vlapic)
      * priority vector and then recurse to handle the lower priority
      * vector.
      */
-    bool missed_eoi = viridian_apic_assist_completed(v);
+    bool missed_eoi = has_viridian_apic_assist(v->domain) &&
+                      viridian_apic_assist_completed(v);
     int vector;
 
  again:
@@ -443,7 +440,7 @@ void vlapic_EOI_set(struct vlapic *vlapic)
      * NOTE: It is harmless to call viridian_apic_assist_clear() on a
      *       recursion, even though it is not necessary.
      */
-    if ( !missed_eoi )
+    if ( has_viridian_apic_assist(v->domain) && !missed_eoi )
         viridian_apic_assist_clear(v);
 
     vlapic_clear_vector(vector, &vlapic->regs->data[APIC_ISR]);
@@ -524,17 +521,17 @@ void vlapic_ipi(
         struct vlapic *target = vlapic_lowest_prio(
             vlapic_domain(vlapic), vlapic, short_hand, dest, dest_mode);
 
-        if ( unlikely((icr_low & APIC_VECTOR_MASK) < 16) )
-            vlapic_error(vlapic, APIC_ESR_SENDILL);
+        if ( unlikely(!APIC_VECTOR_VALID(icr_low)) )
+            vlapic_error(vlapic, ilog2(APIC_ESR_SENDILL));
         else if ( target )
             vlapic_accept_irq(vlapic_vcpu(target), icr_low);
         break;
     }
 
     case APIC_DM_FIXED:
-        if ( unlikely((icr_low & APIC_VECTOR_MASK) < 16) )
+        if ( unlikely(!APIC_VECTOR_VALID(icr_low)) )
         {
-            vlapic_error(vlapic, APIC_ESR_SENDILL);
+            vlapic_error(vlapic, ilog2(APIC_ESR_SENDILL));
             break;
         }
         /* fall through */
@@ -665,7 +662,7 @@ int guest_rdmsr_x2apic(const struct vcpu *v, uint32_t msr, uint64_t *val)
         REG(LVT0)  | REG(LVT1) | REG(LVTERR)  | REG(TMICT)   |
         REG(TMCCT) | REG(TDCR) |
 #undef REG
-#define REGBLOCK(x) (((1UL << (X86_NR_VECTORS / 32)) - 1) << (APIC_ ## x >> 4))
+#define REGBLOCK(x) (((1UL << (X86_IDT_VECTORS / 32)) - 1) << (APIC_ ## x >> 4))
         REGBLOCK(ISR) | REGBLOCK(TMR) | REGBLOCK(IRR)
 #undef REGBLOCK
     };
@@ -803,17 +800,9 @@ void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val)
         break;
 
     case APIC_ESR:
-    {
-        unsigned long flags;
-
-        spin_lock_irqsave(&vlapic->esr_lock, flags);
-        val = vlapic->hw.pending_esr;
-        vlapic->hw.pending_esr = 0;
-        spin_unlock_irqrestore(&vlapic->esr_lock, flags);
-
+        val = xchg(&vlapic->hw.pending_esr, 0);
         vlapic_set_reg(vlapic, APIC_ESR, val);
         break;
-    }
 
     case APIC_TASKPRI:
         vlapic_set_reg(vlapic, APIC_TASKPRI, val & 0xff);
@@ -1369,7 +1358,8 @@ int vlapic_has_pending_irq(struct vcpu *v)
      * If so, we need to emulate the EOI here before comparing ISR
      * with IRR.
      */
-    if ( viridian_apic_assist_completed(v) )
+    if ( has_viridian_apic_assist(v->domain) &&
+         viridian_apic_assist_completed(v) )
         vlapic_EOI_set(vlapic);
 
     isr = vlapic_find_highest_isr(vlapic);
@@ -1382,7 +1372,8 @@ int vlapic_has_pending_irq(struct vcpu *v)
     if ( isr >= 0 &&
          (irr & 0xf0) <= (isr & 0xf0) )
     {
-        viridian_apic_assist_clear(v);
+        if ( has_viridian_apic_assist(v->domain) )
+            viridian_apic_assist_clear(v);
         return -1;
     }
 
@@ -1715,8 +1706,6 @@ int vlapic_init(struct vcpu *v)
     clear_page(vlapic->regs);
 
     vlapic_reset(vlapic);
-
-    spin_lock_init(&vlapic->esr_lock);
 
     tasklet_init(&vlapic->init_sipi.tasklet, vlapic_init_sipi_action, v);
 

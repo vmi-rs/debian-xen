@@ -9,13 +9,13 @@ for the definitions of the support status levels etc.
 
 # Release Support
 
-    Xen-Version: 4.20
-    Initial-Release: 2025-03-05
-    Supported-Until: 2028-03-05
-    Security-Support-Until: 2030-03-05
+    Xen-Version: 4.22
+    Initial-Release: 2026-07-30
+    Supported-Until: 2029-07-30
+    Security-Support-Until: 2031-07-30
 
 Release Notes
-: <a href="https://wiki.xenproject.org/wiki/Xen_Project_4.20_Release_Notes">RN</a>
+: <a href="https://wiki.xenproject.org/wiki/Xen_Project_4.22_Release_Notes">RN</a>
 
 # Feature Support
 
@@ -170,7 +170,7 @@ unexpected behavior or issues on some hardware.
 
 At least the following features are missing on a PVH dom0:
 
-  * PCI SR-IOV and Resizable BARs.
+  * PCI SR-IOV.
 
   * Native NMI forwarding (nmi=dom0 command line option).
 
@@ -260,14 +260,27 @@ Go (golang) bindings for libxl
 
 Support for running qemu-xen device model in a linux stubdomain.
 
-    Status: Tech Preview
+    Status: Supported, with caveats
+
+Any issue in the stubdomain affecting only the guest it is servicing
+or itself will not be regarded a security issue.
 
 ## Xenstore
 
 ### C xenstored daemon
 
     Status: Supported
-    Status, Liveupdate: Tech Preview
+    Status, Liveupdate: Supported
+
+### C xenstore stubdom PV
+
+    Status: Supported
+    Status, Liveupdate: Not implemented
+
+### C xenstore stubdom PVH
+
+    Status: Supported
+    Status, Liveupdate: Supported
 
 ### OCaml xenstored daemon
 
@@ -959,6 +972,16 @@ by hwdom. Some platforms use SCMI for access to system-level resources.
 
     Status: Supported
 
+### ARM: Guest PSCI support
+
+Emulated PSCI interface exposed to guests. We support all mandatory
+functions of PSCI 1.1. See below for the list of optional PSCI call
+implemented and their status.
+
+    Status, Mandatory: Supported
+    Status, MIGRATE_INFO_TYPE: Supported
+    Status, SYSTEM_SUSPEND: Tech Preview
+
 ## Virtual Hardware, QEMU
 
 This section describes supported devices available in HVM mode using a
@@ -1011,21 +1034,6 @@ See the section **Blkback** for image formats supported by QEMU.
 
     Status: Supported, not security supported
 
-### qemu-xen-traditional ###
-
-The Xen Project provides an old version of qemu with modifications
-which enable use as a device model stub domain.  The old version is
-normally selected by default only in a stub dm configuration, but it
-can be requested explicitly in other configurations, for example in
-`xl` with `device_model_version="QEMU_XEN_TRADITIONAL"`.
-
-    Status, Device Model Stub Domains: Supported, with caveats
-    Status, as host process device model: No security support, not recommended
-
-qemu-xen-traditional is security supported only for those available
-devices which are supported for mainstream QEMU (see above), with
-trusted driver domains (see Device Model Stub Domains).
-
 ## Virtual Firmware
 
 ### x86/HVM iPXE
@@ -1044,7 +1052,6 @@ as the guest itself.
 Booting a guest via guest BIOS firmware
 
     Status, SeaBIOS (qemu-xen): Supported
-    Status, ROMBIOS (qemu-xen-traditional): Supported
 
 ### x86/HVM OVMF
 

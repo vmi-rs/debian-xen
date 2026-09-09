@@ -121,7 +121,7 @@
 #define GV2M_WRITE (1u<<0)
 #define GV2M_EXEC  (1u<<1)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/errno.h>
 #include <xen/types.h>
@@ -143,6 +143,12 @@
 extern size_t dcache_line_bytes;
 
 #define copy_page(dp, sp) memcpy(dp, sp, PAGE_SIZE)
+
+#define clear_page_hot  clear_page
+#define clear_page_cold clear_page
+
+#define scrub_page_hot(page) memset(page, SCRUB_BYTE_PATTERN, PAGE_SIZE)
+#define scrub_page_cold      scrub_page_hot
 
 static inline size_t read_dcache_line_bytes(void)
 {
@@ -176,7 +182,8 @@ static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
     {
         size -= dcache_line_bytes - ((uintptr_t)p & cacheline_mask);
         p = (void *)((uintptr_t)p & ~cacheline_mask);
-        asm volatile (__clean_and_invalidate_dcache_one(0) : : "r" (p));
+        asm_inline volatile (
+            __clean_and_invalidate_dcache_one(0) :: "r" (p) );
         p += dcache_line_bytes;
     }
 
@@ -185,7 +192,8 @@ static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
         asm volatile (__invalidate_dcache_one(0) : : "r" (p + idx));
 
     if ( size > 0 )
-        asm volatile (__clean_and_invalidate_dcache_one(0) : : "r" (p + idx));
+        asm_inline volatile (
+            __clean_and_invalidate_dcache_one(0) :: "r" (p + idx) );
 
     dsb(sy);           /* So we know the flushes happen before continuing */
 
@@ -209,7 +217,7 @@ static inline int clean_dcache_va_range(const void *p, unsigned long size)
     p = (void *)((uintptr_t)p & ~cacheline_mask);
     for ( ; size >= dcache_line_bytes;
             idx += dcache_line_bytes, size -= dcache_line_bytes )
-        asm volatile (__clean_dcache_one(0) : : "r" (p + idx));
+        asm_inline volatile ( __clean_dcache_one(0) : : "r" (p + idx) );
     dsb(sy);           /* So we know the flushes happen before continuing */
     /* ARM callers assume that dcache_* functions cannot fail. */
     return 0;
@@ -247,7 +255,7 @@ static inline int clean_and_invalidate_dcache_va_range
     if ( sizeof(x) > MIN_CACHELINE_BYTES || sizeof(x) > alignof(x) )    \
         clean_dcache_va_range(_p, sizeof(x));                           \
     else                                                                \
-        asm volatile (                                                  \
+        asm_inline volatile (                                           \
             "dsb sy;"   /* Finish all earlier writes */                 \
             __clean_dcache_one(0)                                       \
             "dsb sy;"   /* Finish flush before continuing */            \
@@ -259,7 +267,7 @@ static inline int clean_and_invalidate_dcache_va_range
     if ( sizeof(x) > MIN_CACHELINE_BYTES || sizeof(x) > alignof(x) )    \
         clean_and_invalidate_dcache_va_range(_p, sizeof(x));            \
     else                                                                \
-        asm volatile (                                                  \
+        asm_inline volatile (                                           \
             "dsb sy;"   /* Finish all earlier writes */                 \
             __clean_and_invalidate_dcache_one(0)                        \
             "dsb sy;"   /* Finish flush before continuing */            \
@@ -287,8 +295,6 @@ void flush_page_to_ram(unsigned long mfn, bool sync_icache);
 
 /* Print a walk of the hypervisor's page tables for a virtual addr. */
 extern void dump_hyp_walk(vaddr_t addr);
-/* Print a walk of the p2m for a domain for a physical address. */
-extern void dump_p2m_lookup(struct domain *d, paddr_t addr);
 
 static inline uint64_t va_to_par(vaddr_t va)
 {
@@ -314,7 +320,7 @@ static inline int gva_to_ipa(vaddr_t va, paddr_t *paddr, unsigned int flags)
 /* Bits in the PAR returned by va_to_par */
 #define PAR_FAULT 0x1
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __ARM_PAGE_H__ */
 

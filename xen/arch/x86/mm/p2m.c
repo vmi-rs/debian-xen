@@ -101,11 +101,12 @@ void p2m_change_entry_type_global(struct domain *d,
 
     change_entry_type_global(hostp2m, ot, nt);
 
+#ifdef CONFIG_ALTP2M
     if ( unlikely(altp2m_active(d)) )
     {
         unsigned int i;
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
             {
@@ -117,6 +118,7 @@ void p2m_change_entry_type_global(struct domain *d,
             }
         }
     }
+#endif
 
     p2m_unlock(hostp2m);
 }
@@ -126,21 +128,31 @@ static void _memory_type_changed(struct p2m_domain *p2m)
 {
     if ( p2m->memory_type_changed )
         p2m->memory_type_changed(p2m);
+    else
+        ASSERT_UNREACHABLE();
 }
 
-void p2m_memory_type_changed(struct domain *d)
+bool p2m_memory_type_changed(struct domain *d)
 {
     struct p2m_domain *hostp2m = p2m_get_hostp2m(d);
+
+    /*
+     * The p2m memory_type_changed hook will be the same for the host p2m or
+     * the altp2ms, do the check early and return if not set.
+     */
+    if ( !hostp2m->memory_type_changed )
+        return false;
 
     p2m_lock(hostp2m);
 
     _memory_type_changed(hostp2m);
 
+#ifdef CONFIG_ALTP2M
     if ( unlikely(altp2m_active(d)) )
     {
         unsigned int i;
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
             {
@@ -152,8 +164,11 @@ void p2m_memory_type_changed(struct domain *d)
             }
         }
     }
+#endif
 
     p2m_unlock(hostp2m);
+
+    return true;
 }
 
 int p2m_set_ioreq_server(struct domain *d,
@@ -323,9 +338,9 @@ mfn_t p2m_get_gfn_type_access(struct p2m_domain *p2m, gfn_t gfn,
 
 void p2m_put_gfn(struct p2m_domain *p2m, gfn_t gfn)
 {
-    ASSERT(gfn_locked_by_me(p2m, gfn_x(gfn)));
+    ASSERT(gfn_locked_by_me(p2m, gfn));
 
-    gfn_unlock(p2m, gfn_x(gfn), 0);
+    gfn_unlock(p2m, gfn, 0);
 }
 
 static struct page_info *get_page_from_mfn_and_type(
@@ -537,9 +552,9 @@ p2m_remove_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
         mfn_t mfn_return = p2m->get_entry(p2m, gfn_add(gfn, i), &t, &a, 0,
                                           &cur_order, NULL);
 
-        if ( p2m_is_valid(t) &&
-             (!mfn_valid(mfn) || t == p2m_mmio_direct ||
-              !mfn_eq(mfn_add(mfn, i), mfn_return)) )
+        if ( p2m_is_any_ram(t) || p2m_is_broken(t)
+             ? !mfn_valid(mfn) || !mfn_eq(mfn_add(mfn, i), mfn_return)
+             : !p2m_is_hole(t) || !mfn_eq(mfn, INVALID_MFN) )
             return -EILSEQ;
 
         i += (1UL << cur_order) -
@@ -552,7 +567,10 @@ p2m_remove_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
         {
             p2m->get_entry(p2m, gfn_add(gfn, i), &t, &a, 0, NULL, NULL);
             if ( !p2m_is_special(t) && !p2m_is_shared(t) )
+            {
                 set_gpfn_from_mfn(mfn_x(mfn) + i, INVALID_M2P_ENTRY);
+                paging_mark_pfn_clean(p2m->domain, _pfn(gfn_x(gfn) + i));
+            }
         }
     }
 
@@ -927,11 +945,12 @@ void p2m_change_type_range(struct domain *d,
 
     change_type_range(hostp2m, start, end, ot, nt);
 
+#ifdef CONFIG_ALTP2M
     if ( unlikely(altp2m_active(d)) )
     {
         unsigned int i;
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
             {
@@ -943,6 +962,8 @@ void p2m_change_type_range(struct domain *d,
             }
         }
     }
+#endif
+
     hostp2m->defer_nested_flush = false;
     if ( nestedhvm_enabled(d) )
         p2m_flush_nestedp2m(d);
@@ -1000,11 +1021,12 @@ int p2m_finish_type_change(struct domain *d,
     if ( rc < 0 )
         goto out;
 
+#ifdef CONFIG_ALTP2M
     if ( unlikely(altp2m_active(d)) )
     {
         unsigned int i;
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             if ( d->arch.altp2m_eptp[i] != mfn_x(INVALID_MFN) )
             {
@@ -1019,6 +1041,7 @@ int p2m_finish_type_change(struct domain *d,
             }
         }
     }
+#endif
 
  out:
     p2m_unlock(hostp2m);
@@ -1109,6 +1132,7 @@ static int set_typed_p2m_entry(struct domain *d, unsigned long gfn_l,
                 {
                     ASSERT(mfn_valid(mfn_add(omfn, i)));
                     set_gpfn_from_mfn(mfn_x(omfn) + i, INVALID_M2P_ENTRY);
+                    paging_mark_pfn_clean(d, _pfn(gfn_x(gfn) + i));
 
                     ioreq_request_mapcache_invalidate(d);
                 }
@@ -1130,6 +1154,7 @@ static int set_typed_p2m_entry(struct domain *d, unsigned long gfn_l,
         {
             ASSERT(mfn_valid(mfn_add(omfn, i)));
             set_gpfn_from_mfn(mfn_x(omfn) + i, INVALID_M2P_ENTRY);
+            paging_mark_pfn_clean(d, _pfn(gfn_x(gfn) + i));
         }
 
         ioreq_request_mapcache_invalidate(d);
@@ -1307,6 +1332,7 @@ int set_shared_p2m_entry(struct domain *d, unsigned long gfn_l, mfn_t mfn)
     p2m_access_t a;
     p2m_type_t ot;
     mfn_t omfn;
+    const struct page_info *pg;
     unsigned long pg_type;
 
     if ( !paging_mode_translate(p2m->domain) )
@@ -1320,7 +1346,8 @@ int set_shared_p2m_entry(struct domain *d, unsigned long gfn_l, mfn_t mfn)
     ASSERT(mfn_valid(omfn));
     /* Set the m2p entry to invalid only if there are no further type
      * refs to this page as shared */
-    pg_type = read_atomic(&(mfn_to_page(omfn)->u.inuse.type_info));
+    pg = mfn_to_page(omfn);
+    pg_type = read_atomic(&pg->u.inuse.type_info);
     if ( (pg_type & PGT_count_mask) == 0
          || (pg_type & PGT_type_mask) != PGT_shared_page )
         set_gpfn_from_mfn(mfn_x(omfn), INVALID_M2P_ENTRY);
@@ -2161,6 +2188,74 @@ int relinquish_p2m_mapping(struct domain *d)
 
     return rc;
 }
+
+void p2m_log_dirty_range(struct domain *d, unsigned long begin_pfn,
+                         unsigned long nr, uint8_t *dirty_bitmap)
+{
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    unsigned int i;
+    unsigned long pfn;
+
+    /*
+     * Set l1e entries of P2M table to be read-only.
+     *
+     * On first write, it page faults, its entry is changed to read-write,
+     * and on retry the write succeeds.
+     *
+     * We populate dirty_bitmap by looking for entries that have been
+     * switched to read-write.
+     */
+
+    p2m_lock(p2m);
+
+    for ( i = 0, pfn = begin_pfn; pfn < begin_pfn + nr; i++, pfn++ )
+        if ( !p2m_change_type_one(d, pfn, p2m_ram_rw, p2m_ram_logdirty) )
+            dirty_bitmap[i >> 3] |= (1 << (i & 7));
+
+    p2m_unlock(p2m);
+
+    guest_flush_tlb_mask(d, d->dirty_cpumask);
+}
+
+#if defined(CONFIG_VM_EVENT) || defined(CONFIG_ALTP2M)
+bool xenmem_access_to_p2m_access(const struct p2m_domain *p2m,
+                                 xenmem_access_t xaccess,
+                                 p2m_access_t *paccess)
+{
+    static const p2m_access_t memaccess[] = {
+#define ACCESS(ac) [XENMEM_access_##ac] = p2m_access_##ac
+        ACCESS(n),
+        ACCESS(r),
+        ACCESS(w),
+        ACCESS(rw),
+        ACCESS(x),
+        ACCESS(rx),
+        ACCESS(wx),
+        ACCESS(rwx),
+        ACCESS(rx2rw),
+        ACCESS(n2rwx),
+        ACCESS(r_pw),
+#undef ACCESS
+    };
+
+    switch ( xaccess )
+    {
+    case 0 ... ARRAY_SIZE(memaccess) - 1:
+        xaccess = array_index_nospec(xaccess, ARRAY_SIZE(memaccess));
+        *paccess = memaccess[xaccess];
+        break;
+
+    case XENMEM_access_default:
+        *paccess = p2m->default_access;
+        break;
+
+    default:
+        return false;
+    }
+
+    return true;
+}
+#endif /* VM_EVENT || ALTP2M */
 
 /*
  * Local variables:

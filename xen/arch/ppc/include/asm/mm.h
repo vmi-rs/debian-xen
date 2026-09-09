@@ -13,7 +13,6 @@ void setup_initial_pagetables(void);
 
 #define pfn_to_paddr(pfn) ((paddr_t)(pfn) << PAGE_SHIFT)
 #define paddr_to_pfn(pa)  ((unsigned long)((pa) >> PAGE_SHIFT))
-#define paddr_to_pdx(pa)  mfn_to_pdx(maddr_to_mfn(pa))
 #define gfn_to_gaddr(gfn) pfn_to_paddr(gfn_x(gfn))
 #define gaddr_to_gfn(ga)  _gfn(paddr_to_pfn(ga))
 #define mfn_to_maddr(mfn) pfn_to_paddr(mfn_x(mfn))
@@ -58,6 +57,9 @@ static inline struct page_info *virt_to_page(const void *v)
 /* Page is Xen heap? */
 #define _PGC_xen_heap     PG_shift(2)
 #define PGC_xen_heap      PG_mask(1, 2)
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(3)
+#define PGC_need_scrub    PG_mask(1, 3)
 /* Page is broken? */
 #define _PGC_broken       PG_shift(7)
 #define PGC_broken        PG_mask(1, 7)
@@ -76,13 +78,6 @@ static inline struct page_info *virt_to_page(const void *v)
 #define PGC_count_width   PG_shift(10)
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
 
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
-
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
 #define is_xen_heap_mfn(mfn) \
     (mfn_valid(mfn) && is_xen_heap_page(mfn_to_page(mfn)))
@@ -96,9 +91,6 @@ static inline struct page_info *virt_to_page(const void *v)
 
 /* TODO: implement */
 #define mfn_valid(mfn) ({ (void) (mfn); 0; })
-
-#define domain_set_alloc_bitsize(d) ((void)(d))
-#define domain_clamp_alloc_bitsize(d, b) (b)
 
 #define PFN_ORDER(pfn_) ((pfn_)->v.free.order)
 

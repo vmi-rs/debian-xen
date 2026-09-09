@@ -1,24 +1,27 @@
-#include <xen/init.h>
-#include <xen/string.h>
 #include <xen/delay.h>
+#include <xen/init.h>
 #include <xen/param.h>
 #include <xen/smp.h>
+#include <xen/string.h>
 
 #include <asm/amd.h>
+#include <asm/apic.h>
 #include <asm/cpu-policy.h>
 #include <asm/current.h>
 #include <asm/debugreg.h>
-#include <asm/processor.h>
-#include <asm/xstate.h>
-#include <asm/msr.h>
+#include <asm/guest-msr.h>
+#include <asm/idt.h>
 #include <asm/io.h>
+#include <asm/match-cpu.h>
 #include <asm/mpspec.h>
-#include <asm/apic.h>
+#include <asm/msr.h>
 #include <asm/prot-key.h>
 #include <asm/random.h>
 #include <asm/setup.h>
 #include <asm/shstk.h>
-#include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
+#include <asm/xstate.h>
+
+#include <public/sysctl.h>
 
 #include "cpu.h"
 #include "mcheck/x86_mca.h"
@@ -27,19 +30,6 @@ bool __read_mostly opt_dom0_cpuid_faulting = true;
 
 bool opt_arat = true;
 boolean_param("arat", opt_arat);
-
-unsigned int opt_cpuid_mask_ecx = ~0u;
-integer_param("cpuid_mask_ecx", opt_cpuid_mask_ecx);
-unsigned int opt_cpuid_mask_edx = ~0u;
-integer_param("cpuid_mask_edx", opt_cpuid_mask_edx);
-
-unsigned int opt_cpuid_mask_xsave_eax = ~0u;
-integer_param("cpuid_mask_xsave_eax", opt_cpuid_mask_xsave_eax);
-
-unsigned int opt_cpuid_mask_ext_ecx = ~0u;
-integer_param("cpuid_mask_ext_ecx", opt_cpuid_mask_ext_ecx);
-unsigned int opt_cpuid_mask_ext_edx = ~0u;
-integer_param("cpuid_mask_ext_edx", opt_cpuid_mask_ext_edx);
 
 unsigned int __initdata expected_levelling_cap;
 unsigned int __read_mostly levelling_caps;
@@ -58,6 +48,9 @@ DEFINE_PER_CPU(bool, full_gdt_loaded);
 
 DEFINE_PER_CPU(uint32_t, pkrs);
 
+extern uint32_t clear_page_clzero_post_count[];
+extern int8_t clear_page_clzero_post_neg_size[];
+
 void __init setup_clear_cpu_cap(unsigned int cap)
 {
 	const uint32_t *dfs;
@@ -73,8 +66,10 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 	__clear_bit(cap, boot_cpu_data.x86_capability);
 	dfs = x86_cpu_policy_lookup_deep_deps(cap);
 
-	if (!dfs)
+	if (!dfs) {
+		calculate_host_cpu_policy();
 		return;
+	}
 
 	for (i = 0; i < FSCAPINTS; ++i) {
 		cleared_caps[i] |= dfs[i];
@@ -85,6 +80,8 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 		       __builtin_return_address(0),
 		       i, forced_caps[i] & dfs[i]);
 	}
+
+	calculate_host_cpu_policy();
 }
 
 void __init setup_force_cpu_cap(unsigned int cap)
@@ -99,6 +96,10 @@ void __init setup_force_cpu_cap(unsigned int cap)
 	}
 
 	__set_bit(cap, boot_cpu_data.x86_capability);
+
+	/* Don't recalculate when the bit isn't represented in the policy. */
+	if (cap < FSCAPINTS * 32)
+		calculate_host_cpu_policy();
 }
 
 bool __init is_forced_cpu_cap(unsigned int cap)
@@ -106,15 +107,6 @@ bool __init is_forced_cpu_cap(unsigned int cap)
 	return test_bit(cap, forced_caps) || test_bit(cap, cleared_caps);
 }
 
-static void cf_check default_init(struct cpuinfo_x86 * c)
-{
-	/* Not much we can do here... */
-	__clear_bit(X86_FEATURE_SEP, c->x86_capability);
-}
-
-static const struct cpu_dev __initconst_cf_clobber __used default_cpu = {
-	.c_init	= default_init,
-};
 static struct cpu_dev __ro_after_init actual_cpu;
 
 static DEFINE_PER_CPU(uint64_t, msr_misc_features);
@@ -125,14 +117,14 @@ bool __init probe_cpuid_faulting(void)
 	uint64_t val;
 	int rc;
 
-	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
+	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, &val)) == 0)
 		raw_cpu_policy.platform_info.cpuid_faulting =
 			val & MSR_PLATFORM_INFO_CPUID_FAULTING;
 
 	if (rc ||
 	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
 	    rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES,
-		       this_cpu(msr_misc_features)))
+		       &this_cpu(msr_misc_features)))
 	{
 		setup_clear_cpu_cap(X86_FEATURE_CPUID_FAULTING);
 		return false;
@@ -323,6 +315,7 @@ static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
 void __init early_cpu_init(bool verbose)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
+	uint64_t val;
 	u32 eax, ebx, ecx, edx;
 
 	c->x86_cache_alignment = 32;
@@ -333,8 +326,8 @@ void __init early_cpu_init(bool verbose)
 	*(u32 *)&c->x86_vendor_id[8] = ecx;
 	*(u32 *)&c->x86_vendor_id[4] = edx;
 
-	c->x86_vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
-	switch (c->x86_vendor) {
+	c->vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
+	switch (c->vendor) {
 	case X86_VENDOR_INTEL:    intel_unlock_cpuid_leaves(c);
 				  actual_cpu = intel_cpu_dev;    break;
 	case X86_VENDOR_AMD:      actual_cpu = amd_cpu_dev;      break;
@@ -342,7 +335,6 @@ void __init early_cpu_init(bool verbose)
 	case X86_VENDOR_SHANGHAI: actual_cpu = shanghai_cpu_dev; break;
 	case X86_VENDOR_HYGON:    actual_cpu = hygon_cpu_dev;    break;
 	default:
-		actual_cpu = default_cpu;
 		if (!verbose)
 			break;
 		printk(XENLOG_ERR
@@ -351,12 +343,42 @@ void __init early_cpu_init(bool verbose)
 	}
 
 	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
+	c->family = get_cpu_family(eax, &c->model, &c->stepping);
 
 	edx &= ~cleared_caps[FEATURESET_1d];
 	ecx &= ~cleared_caps[FEATURESET_1c];
-	if (edx & cpufeat_mask(X86_FEATURE_CLFLUSH))
-		c->x86_cache_alignment = ((ebx >> 8) & 0xff) * 8;
+	if (edx & cpufeat_mask(X86_FEATURE_CLFLUSH)) {
+		unsigned int size = ((ebx >> 8) & 0xff) * 8;
+
+		c->x86_cache_alignment = size;
+
+		/*
+		 * Patch in parameters of clear_page_cold()'s CLZERO
+		 * alternative. Note that for now we cap this at 128 bytes.
+		 * Larger cache line sizes would still be dealt with
+		 * correctly, but would cause redundant work done.
+		 */
+		if (size > 128)
+			size = 128;
+		if (size && !(size & (size - 1))) {
+			/*
+			 * Need to play some games to keep the compiler from
+			 * recognizing the negative array index as being out
+			 * of bounds. The labels in assembler code really are
+			 * _after_ the locations to be patched, so the
+			 * negative index is intentional.
+			 */
+			uint32_t *pcount = clear_page_clzero_post_count;
+			int8_t *neg_size = clear_page_clzero_post_neg_size;
+
+			OPTIMIZER_HIDE_VAR(pcount);
+			OPTIMIZER_HIDE_VAR(neg_size);
+			pcount[-1] = PAGE_SIZE / size;
+			neg_size[-1] = -size;
+		}
+		else
+			setup_clear_cpu_cap(X86_FEATURE_CLZERO);
+	}
 	/* Leaf 0x1 capabilities filled in early for Xen. */
 	c->x86_capability[FEATURESET_1d] = edx;
 	c->x86_capability[FEATURESET_1c] = ecx;
@@ -365,8 +387,8 @@ void __init early_cpu_init(bool verbose)
 		printk(XENLOG_INFO
 		       "CPU Vendor: %s, Family %u (%#x), "
 		       "Model %u (%#x), Stepping %u (raw %08x)\n",
-		       x86_cpuid_vendor_to_str(c->x86_vendor), c->x86,
-		       c->x86, c->x86_model, c->x86_model, c->x86_mask,
+		       x86_cpuid_vendor_to_str(c->vendor), c->family,
+		       c->family, c->model, c->model, c->stepping,
 		       eax);
 
 	if (c->cpuid_level >= 7) {
@@ -376,15 +398,16 @@ void __init early_cpu_init(bool verbose)
 			    &c->x86_capability[FEATURESET_7c0],
 			    &c->x86_capability[FEATURESET_7d0]);
 
-		if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability))
-			rdmsr(MSR_ARCH_CAPABILITIES,
-			      c->x86_capability[FEATURESET_m10Al],
-			      c->x86_capability[FEATURESET_m10Ah]);
+		if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability)) {
+			val = rdmsr(MSR_ARCH_CAPABILITIES);
+			c->x86_capability[FEATURESET_m10Al] = val;
+			c->x86_capability[FEATURESET_m10Ah] = val >> 32;
+		}
 
 		if (max_subleaf >= 1)
 			cpuid_count(7, 1,
-				    &c->x86_capability[FEATURESET_7a1],
-				    &ebx, &ecx,
+                                    &c->x86_capability[FEATURESET_7a1],
+                                    &ebx, &ecx,
 				    &c->x86_capability[FEATURESET_7d1]);
 	}
 
@@ -409,15 +432,35 @@ void __init early_cpu_init(bool verbose)
 		paddr_bits -= (ebx >> 6) & 0x3f;
 	}
 
-	if (!(c->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
+	if (!(c->vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
 		park_offline_cpus = opt_mce;
 
 	initialize_cpu_data(0);
 }
 
-static void generic_identify(struct cpuinfo_x86 *c)
+void reset_cpuinfo(struct cpuinfo_x86 *c, bool keep_basic)
 {
+    if ( !keep_basic )
+    {
+        c->vendor = 0;
+        c->family = 0;
+        c->model = 0;
+        c->stepping = 0;
+        memset(&c->x86_capability, 0, sizeof(c->x86_capability));
+        memset(&c->x86_vendor_id, 0, sizeof(c->x86_vendor_id));
+        memset(&c->x86_model_id, 0, sizeof(c->x86_model_id));
+    }
+
+    CPU_DATA_INIT((*c));
+}
+
+void identify_cpu(struct cpuinfo_x86 *c)
+{
+	uint64_t val;
 	u32 eax, ebx, ecx, edx, tmp;
+	unsigned int i;
+
+	reset_cpuinfo(c, false);
 
 	/* Get vendor name */
 	cpuid(0, &c->cpuid_level, &ebx, &ecx, &edx);
@@ -425,18 +468,18 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	*(u32 *)&c->x86_vendor_id[8] = ecx;
 	*(u32 *)&c->x86_vendor_id[4] = edx;
 
-	c->x86_vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
-	if (boot_cpu_data.x86_vendor != c->x86_vendor)
+	c->vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
+	if (boot_cpu_data.vendor != c->vendor)
 		printk(XENLOG_ERR "CPU%u vendor %u mismatch against BSP %u\n",
-		       smp_processor_id(), c->x86_vendor,
-		       boot_cpu_data.x86_vendor);
+		       smp_processor_id(), c->vendor,
+		       boot_cpu_data.vendor);
 
 	/* Initialize the standard set of capabilities */
 	/* Note that the vendor-specific code below might override */
 
 	/* Model and family information. */
 	cpuid(1, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
+	c->family = get_cpu_family(eax, &c->model, &c->stepping);
 	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
 	c->phys_proc_id = c->apicid;
 
@@ -469,10 +512,6 @@ static void generic_identify(struct cpuinfo_x86 *c)
 
 	if ( cpu_has(c, X86_FEATURE_CLFLUSH) )
 		c->x86_clflush_size = ((ebx >> 8) & 0xff) * 8;
-
-	if ( (c->cpuid_level >= CPUID_PM_LEAF) &&
-	     (cpuid_ecx(CPUID_PM_LEAF) & CPUID6_ECX_APERFMPERF_CAPABILITY) )
-		__set_bit(X86_FEATURE_APERFMPERF, c->x86_capability);
 
 	/* AMD-defined flags: level 0x80000001 */
 	if (c->extended_cpuid_level >= 0x80000001)
@@ -516,37 +555,11 @@ static void generic_identify(struct cpuinfo_x86 *c)
 			    &c->x86_capability[FEATURESET_Da1],
 			    &tmp, &tmp, &tmp);
 
-	if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability))
-		rdmsr(MSR_ARCH_CAPABILITIES,
-		      c->x86_capability[FEATURESET_m10Al],
-		      c->x86_capability[FEATURESET_m10Ah]);
-}
-
-/*
- * This does the hard work of actually picking apart the CPU stuff...
- */
-void identify_cpu(struct cpuinfo_x86 *c)
-{
-	int i;
-
-	c->x86_cache_size = -1;
-	c->x86_model = c->x86_mask = 0;	/* So far unknown... */
-	c->x86_model_id[0] = '\0';  /* Unset */
-	c->x86_max_cores = 1;
-	c->x86_num_siblings = 1;
-	c->x86_clflush_size = 0;
-	c->cpu_core_id = XEN_INVALID_CORE_ID;
-	c->compute_unit_id = INVALID_CUID;
-	memset(&c->x86_capability, 0, sizeof c->x86_capability);
-
-	generic_identify(c);
-
-#ifdef NOISY_CAPS
-	printk(KERN_DEBUG "CPU: After vendor identify, caps:");
-	for (i = 0; i < NCAPINTS; i++)
-		printk(" %08x", c->x86_capability[i]);
-	printk("\n");
-#endif
+	if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability)) {
+		val = rdmsr(MSR_ARCH_CAPABILITIES);
+		c->x86_capability[FEATURESET_m10Al] = val;
+		c->x86_capability[FEATURESET_m10Ah] = val >> 32;
+	}
 
 	/*
 	 * Vendor-specific initialization.  In this section we
@@ -577,19 +590,14 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	if ( !c->x86_model_id[0] ) {
 		/* Last resort... */
 		snprintf(c->x86_model_id, sizeof(c->x86_model_id),
-			"%02x/%02x", c->x86_vendor, c->x86_model);
+			"%02x/%02x", c->vendor, c->model);
 	}
 
 	/* Now the feature flags better reflect actual CPU features! */
+	if (c == &boot_cpu_data)
+		calculate_host_cpu_policy();
 
 	xstate_init(c);
-
-#ifdef NOISY_CAPS
-	printk(KERN_DEBUG "CPU: After all inits, caps:");
-	for (i = 0; i < NCAPINTS; i++)
-		printk(" %08x", c->x86_capability[i]);
-	printk("\n");
-#endif
 
 	/*
 	 * If RDRAND is available, make an attempt to check that it actually
@@ -800,144 +808,19 @@ void print_cpu_info(unsigned int cpu)
 
 	printk("CPU%u: ", cpu);
 
-	vendor = x86_cpuid_vendor_to_str(c->x86_vendor);
+	vendor = x86_cpuid_vendor_to_str(c->vendor);
 	if (strncmp(c->x86_model_id, vendor, strlen(vendor)))
 		printk("%s ", vendor);
 
 	if (!c->x86_model_id[0])
-		printk("%d86", c->x86);
+		printk("%d86", c->family);
 	else
 		printk("%s", c->x86_model_id);
 
-	printk(" stepping %02x\n", c->x86_mask);
+	printk(" stepping %02x\n", c->stepping);
 }
 
 static cpumask_t cpu_initialized;
-
-/*
- * Sets up system tables and descriptors.
- *
- * - Sets up TSS with stack pointers, including ISTs
- * - Inserts TSS selector into regular and compat GDTs
- * - Loads GDT, IDT, TR then null LDT
- * - Sets up IST references in the IDT
- */
-void load_system_tables(void)
-{
-	unsigned int i, cpu = smp_processor_id();
-	unsigned long stack_bottom = get_stack_bottom(),
-		stack_top = stack_bottom & ~(STACK_SIZE - 1);
-	/*
-	 * NB: define tss_page as a local variable because clang 3.5 doesn't
-	 * support using ARRAY_SIZE against per-cpu variables.
-	 */
-	struct tss_page *tss_page = &this_cpu(tss_page);
-
-	/* The TSS may be live.	 Disuade any clever optimisations. */
-	volatile struct tss64 *tss = &tss_page->tss;
-	seg_desc_t *gdt =
-		this_cpu(gdt) - FIRST_RESERVED_GDT_ENTRY;
-
-	const struct desc_ptr gdtr = {
-		.base = (unsigned long)gdt,
-		.limit = LAST_RESERVED_GDT_BYTE,
-	};
-	const struct desc_ptr idtr = {
-		.base = (unsigned long)idt_tables[cpu],
-		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
-	};
-
-	/*
-	 * Set up the TSS.  Warning - may be live, and the NMI/#MC must remain
-	 * valid on every instruction boundary.  (Note: these are all
-	 * semantically ACCESS_ONCE() due to tss's volatile qualifier.)
-	 *
-	 * rsp0 refers to the primary stack.  #MC, NMI, #DB and #DF handlers
-	 * each get their own stacks.  No IO Bitmap.
-	 */
-	tss->rsp0 = stack_bottom;
-	tss->ist[IST_MCE - 1] = stack_top + (1 + IST_MCE) * PAGE_SIZE;
-	tss->ist[IST_NMI - 1] = stack_top + (1 + IST_NMI) * PAGE_SIZE;
-	tss->ist[IST_DB  - 1] = stack_top + (1 + IST_DB)  * PAGE_SIZE;
-	/*
-	 * Gross bodge.  The #DF handler uses the vm86 fields of cpu_user_regs
-	 * beyond the hardware frame.  Adjust the stack entrypoint so this
-	 * doesn't manifest as an OoB write which hits the guard page.
-	 */
-	tss->ist[IST_DF  - 1] = stack_top + (1 + IST_DF)  * PAGE_SIZE -
-		(sizeof(struct cpu_user_regs) - offsetof(struct cpu_user_regs, es));
-	tss->bitmap = IOBMP_INVALID_OFFSET;
-
-	/* All other stack pointers poisioned. */
-	for ( i = IST_MAX; i < ARRAY_SIZE(tss->ist); ++i )
-		tss->ist[i] = 0x8600111111111111ul;
-	tss->rsp1 = 0x8600111111111111ul;
-	tss->rsp2 = 0x8600111111111111ul;
-
-	/*
-	 * Set up the shadow stack IST.  Used entries must point at the
-	 * supervisor stack token.  Unused entries are poisoned.
-	 *
-	 * This IST Table may be live, and the NMI/#MC entries must
-	 * remain valid on every instruction boundary, hence the
-	 * volatile qualifier.
-	 */
-	if (cpu_has_xen_shstk) {
-		volatile uint64_t *ist_ssp = tss_page->ist_ssp;
-		unsigned long
-			mce_ssp = stack_top + (IST_MCE * IST_SHSTK_SIZE) - 8,
-			nmi_ssp = stack_top + (IST_NMI * IST_SHSTK_SIZE) - 8,
-			db_ssp  = stack_top + (IST_DB  * IST_SHSTK_SIZE) - 8,
-			df_ssp  = stack_top + (IST_DF  * IST_SHSTK_SIZE) - 8;
-
-		ist_ssp[0] = 0x8600111111111111ul;
-		ist_ssp[IST_MCE] = mce_ssp;
-		ist_ssp[IST_NMI] = nmi_ssp;
-		ist_ssp[IST_DB]	 = db_ssp;
-		ist_ssp[IST_DF]	 = df_ssp;
-		for ( i = IST_DF + 1; i < ARRAY_SIZE(tss_page->ist_ssp); ++i )
-			ist_ssp[i] = 0x8600111111111111ul;
-
-		if (IS_ENABLED(CONFIG_XEN_SHSTK) && rdssp() != SSP_NO_SHSTK) {
-			/*
-			 * Rewrite supervisor tokens when shadow stacks are
-			 * active.  This resets any busy bits left across S3.
-			 */
-			wrss(mce_ssp, _p(mce_ssp));
-			wrss(nmi_ssp, _p(nmi_ssp));
-			wrss(db_ssp,  _p(db_ssp));
-			wrss(df_ssp,  _p(df_ssp));
-		}
-
-		wrmsrl(MSR_INTERRUPT_SSP_TABLE, (unsigned long)ist_ssp);
-	}
-
-	BUILD_BUG_ON(sizeof(*tss) <= 0x67); /* Mandated by the architecture. */
-
-	_set_tssldt_desc(gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_avail);
-	if ( IS_ENABLED(CONFIG_PV32) )
-		_set_tssldt_desc(
-			this_cpu(compat_gdt) - FIRST_RESERVED_GDT_ENTRY + TSS_ENTRY,
-			(unsigned long)tss, sizeof(*tss) - 1, SYS_DESC_tss_busy);
-
-	per_cpu(full_gdt_loaded, cpu) = false;
-	lgdt(&gdtr);
-	lidt(&idtr);
-	ltr(TSS_SELECTOR);
-	lldt(0);
-
-	enable_each_ist(idt_tables[cpu]);
-
-	/*
-	 * Bottom-of-stack must be 16-byte aligned!
-	 *
-	 * Defer checks until exception support is sufficiently set up.
-	 */
-	BUILD_BUG_ON((sizeof(struct cpu_info) -
-		      offsetof(struct cpu_info, guest_cpu_user_regs.es)) & 0xf);
-	BUG_ON(system_state != SYS_STATE_early_boot && (stack_bottom & 0xf));
-}
 
 static void skinit_enable_intr(void)
 {
@@ -947,7 +830,7 @@ static void skinit_enable_intr(void)
 	 * If the platform is performing a Secure Launch via SKINIT
 	 * INIT_REDIRECTION flag will be active.
 	 */
-	if ( !cpu_has_skinit || rdmsr_safe(MSR_K8_VM_CR, val) ||
+	if ( !cpu_has_skinit || rdmsr_safe(MSR_K8_VM_CR, &val) ||
 	     !(val & VM_CR_INIT_REDIRECTION) )
 		return;
 
@@ -982,9 +865,6 @@ void cpu_init(void)
 	/* Install correct page table. */
 	write_ptbase(current);
 
-	/* Ensure FPU gets initialised for each domain. */
-	stts();
-
 	/* Reset debug registers: */
 	write_debugreg(0, 0);
 	write_debugreg(1, 0);
@@ -1014,40 +894,30 @@ void cpu_uninit(unsigned int cpu)
 	cpumask_clear_cpu(cpu, &cpu_initialized);
 }
 
-/*
- * x86_match_cpu - match the current CPU against an array of
- * x86_cpu_ids
- * @match: Pointer to array of x86_cpu_ids. Last entry terminated with
- *         {}.
- * Return the entry if the current CPU matches the entries in the
- * passed x86_cpu_id match table. Otherwise NULL.  The match table
- * contains vendor (X86_VENDOR_*), family, model and feature bits or
- * respective wildcard entries.
- *
- * A typical table entry would be to match a specific CPU
- * { X86_VENDOR_INTEL, 6, 0x12 }
- * or to match a specific CPU feature
- * { X86_FEATURE_MATCH(X86_FEATURE_FOOBAR) }
- *
- * This always matches against the boot cpu, assuming models and
-features are
- * consistent over all CPUs.
- */
 const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id table[])
 {
-	const struct x86_cpu_id *m;
-	const struct cpuinfo_x86 *c = &boot_cpu_data;
+    const struct x86_cpu_id *m;
+    const struct cpuinfo_x86 *c = &boot_cpu_data;
 
-	for (m = table; m->vendor | m->family | m->model | m->feature; m++) {
-		if (c->x86_vendor != m->vendor)
-			continue;
-		if (c->x86 != m->family)
-			continue;
-		if (c->x86_model != m->model)
-			continue;
-		if (!cpu_has(c, m->feature))
-			continue;
-		return m;
-	}
-	return NULL;
+    /*
+     * Although derived from Linux originally, Xen has no valid rows where
+     * ->vendor is zero, so used this in place of checking all metadata.
+     */
+    for ( m = table; m->vendor; m++ )
+    {
+        if ( c->vendor != m->vendor )
+            continue;
+        if ( c->family != m->family )
+            continue;
+        if ( c->model != m->model )
+            continue;
+        if ( !((1U << c->stepping) & m->steppings) )
+            continue;
+        if ( !cpu_has(c, m->feature) )
+            continue;
+
+        return m;
+    }
+
+    return NULL;
 }

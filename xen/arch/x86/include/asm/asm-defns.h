@@ -1,25 +1,16 @@
 #include <asm/page-bits.h>
 
-#ifndef HAVE_AS_CLAC_STAC
-.macro clac
-    .byte 0x0f, 0x01, 0xca
+/* binutils >= 2.26 or Clang >= 3.8 */
+.macro clzero
+    .byte 0x0f, 0x01, 0xfc
 .endm
 
-.macro stac
-    .byte 0x0f, 0x01, 0xcb
+/* binutils >= 2.41 or LLVM >= 19 */
+.macro eretu
+    .byte 0xf3, 0x0f, 0x01, 0xca
 .endm
-#endif
-
-.macro vmrun
-    .byte 0x0f, 0x01, 0xd8
-.endm
-
-.macro stgi
-    .byte 0x0f, 0x01, 0xdc
-.endm
-
-.macro clgi
-    .byte 0x0f, 0x01, 0xdd
+.macro erets
+    .byte 0xf2, 0x0f, 0x01, 0xca
 .endm
 
 /*

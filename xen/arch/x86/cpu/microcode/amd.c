@@ -14,9 +14,9 @@
  *  License version 2. See file COPYING for details.
  */
 
+#include <xen/bsearch.h>
 #include <xen/err.h>
 #include <xen/init.h>
-#include <xen/lib.h>
 #include <xen/mm.h> /* TODO: Fix asm/tlbflush.h breakage */
 #include <xen/sha2.h>
 
@@ -54,7 +54,6 @@ struct microcode_patch {
     uint8_t  sb_rev_id;
     uint8_t  bios_api_rev;
     uint8_t  reserved1[3];
-    uint32_t match_reg[8];
 };
 
 #define UCODE_MAGIC                0x00414d44
@@ -103,12 +102,12 @@ static const struct patch_digest {
 } patch_digests[] = {
 #include "amd-patch-digests.c"
 };
-static bool __ro_after_init entrysign_mitigiated_in_firmware;
+static bool __ro_after_init entrysign_mitigated_in_firmware;
 
 static int cf_check cmp_patch_id(const void *key, const void *elem)
 {
     const struct patch_digest *pd = elem;
-    uint32_t patch_id = *(uint32_t *)key;
+    uint32_t patch_id = *(const uint32_t *)key;
 
     if ( patch_id == pd->patch_id )
         return 0;
@@ -128,8 +127,8 @@ static bool check_digest(const struct container_microcode *mc)
      * microcode updates.  If this has not been mitigated in firmware, check
      * the digest of the patch against a list of known provenance.
      */
-    if ( boot_cpu_data.x86 < 0x17 || boot_cpu_data.x86 > 0x1a ||
-         is_zen6_uarch() || entrysign_mitigiated_in_firmware ||
+    if ( boot_cpu_data.family < 0x17 || boot_cpu_data.family > 0x1a ||
+         is_zen6_uarch() || entrysign_mitigated_in_firmware ||
          !opt_digest_check )
         return true;
 
@@ -142,7 +141,7 @@ static bool check_digest(const struct container_microcode *mc)
         return false;
     }
 
-    sha2_256_digest(digest, patch, mc->len);
+    sha2_256(digest, patch, mc->len);
 
     if ( memcmp(digest, pd->digest, sizeof(digest)) )
     {
@@ -181,7 +180,7 @@ static bool verify_patch_size(uint32_t patch_size)
 #define F19H_MPB_MAX_SIZE 5568
 #define F1AH_MPB_MAX_SIZE 15296
 
-    switch ( boot_cpu_data.x86 )
+    switch ( boot_cpu_data.family )
     {
     case 0x14:
         max_size = F14H_MPB_MAX_SIZE;
@@ -229,7 +228,7 @@ static bool check_final_patch_levels(const struct cpu_signature *sig)
     };
     unsigned int i;
 
-    if ( boot_cpu_data.x86 != 0x10 )
+    if ( boot_cpu_data.family != 0x10 )
         return false;
 
     for ( i = 0; i < ARRAY_SIZE(final_levels); i++ )
@@ -313,8 +312,8 @@ static bool check_min_rev(const struct microcode_patch *patch)
     return this_cpu(cpu_sig).rev >= patch->min_rev;
 }
 
-static int cf_check apply_microcode(const struct microcode_patch *patch,
-                                    unsigned int flags)
+static int cf_check amd_ucode_load(const struct microcode_patch *patch,
+                                   unsigned int flags)
 {
     int hw_err, result;
     unsigned int cpu = smp_processor_id();
@@ -357,10 +356,18 @@ static int cf_check apply_microcode(const struct microcode_patch *patch,
     sig->rev = rev;
 
     /*
-     * Some processors leave the ucode blob mapping as UC after the update.
-     * Flush the mapping to regain normal cacheability.
+     * Fam17h processors leave the mapping of the ucode as UC after the
+     * update.  Flush the mapping to regain normal cacheability.
+     *
+     * We do not know the granularity of mapping, and at 3200 bytes in size
+     * there is a good chance of crossing a 4k page boundary.  Shoot-down the
+     * start and end just to be safe.
      */
-    flush_area_local(patch, FLUSH_TLB_GLOBAL | FLUSH_ORDER(0));
+    if ( boot_cpu_data.family == 0x17 )
+    {
+        invlpg(patch);
+        invlpg((const void *)patch + F17H_MPB_MAX_SIZE - 1);
+    }
 
     /* check current patch id and patch's id for match */
     if ( hw_err || (rev != patch->patch_id) )
@@ -417,7 +424,7 @@ static int scan_equiv_cpu_table(const struct container_equiv_table *et)
     return -ESRCH;
 }
 
-static struct microcode_patch *cf_check cpu_request_microcode(
+static struct microcode_patch *cf_check amd_ucode_parse(
     const void *buf, size_t size, bool make_copy)
 {
     const struct microcode_patch *saved = NULL;
@@ -556,11 +563,11 @@ static const char __initconst amd_cpio_path[] =
     "kernel/x86/microcode/AuthenticAMD.bin";
 
 static const struct microcode_ops __initconst_cf_clobber amd_ucode_ops = {
-    .cpu_request_microcode            = cpu_request_microcode,
     .collect_cpu_info                 = collect_cpu_info,
-    .apply_microcode                  = apply_microcode,
-    .compare                          = amd_compare,
-    .cpio_path                        = amd_cpio_path,
+    .parse                            = MICROCODE_OP(amd_ucode_parse),
+    .load                             = MICROCODE_OP(amd_ucode_load),
+    .compare                          = MICROCODE_OP(amd_compare),
+    .cpio_path                        = MICROCODE_OP(amd_cpio_path),
 };
 
 void __init ucode_probe_amd(struct microcode_ops *ops)
@@ -569,7 +576,8 @@ void __init ucode_probe_amd(struct microcode_ops *ops)
      * The Entrysign vulnerability (SB-7033, CVE-2024-36347) affects Zen1-5
      * CPUs.  Taint Xen if digest checking is turned off.
      */
-    if ( boot_cpu_data.x86 >= 0x17 && boot_cpu_data.x86 <= 0x1a &&
+    if ( IS_ENABLED(CONFIG_MICROCODE_LOADING) &&
+         boot_cpu_data.family >= 0x17 && boot_cpu_data.family <= 0x1a &&
          !is_zen6_uarch() && !opt_digest_check )
     {
         printk(XENLOG_WARNING
@@ -577,7 +585,7 @@ void __init ucode_probe_amd(struct microcode_ops *ops)
         add_taint(TAINT_CPU_OUT_OF_SPEC);
     }
 
-    if ( boot_cpu_data.x86 < 0x10 )
+    if ( boot_cpu_data.family < 0x10 )
         return;
 
     *ops = amd_ucode_ops;
@@ -609,9 +617,10 @@ void __init amd_check_entrysign(void)
     unsigned int curr_rev;
     uint8_t fixed_rev;
 
-    if ( boot_cpu_data.x86_vendor != X86_VENDOR_AMD ||
-         boot_cpu_data.x86 < 0x17 ||
-         boot_cpu_data.x86 > 0x1a ||
+    if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING)  ||
+         boot_cpu_data.vendor != X86_VENDOR_AMD ||
+         boot_cpu_data.family < 0x17            ||
+         boot_cpu_data.family > 0x1a            ||
          is_zen6_uarch() )
         return;
 
@@ -660,8 +669,8 @@ void __init amd_check_entrysign(void)
     default:
         printk(XENLOG_WARNING
                "Unrecognised CPU %02x-%02x-%02x ucode 0x%08x, assuming vulnerable to Entrysign\n",
-               boot_cpu_data.x86, boot_cpu_data.x86_model,
-               boot_cpu_data.x86_mask, curr_rev);
+               boot_cpu_data.family, boot_cpu_data.model,
+               boot_cpu_data.stepping, curr_rev);
         return;
     }
 
@@ -672,7 +681,7 @@ void __init amd_check_entrysign(void)
      */
     if ( (uint8_t)curr_rev >= fixed_rev )
     {
-        entrysign_mitigiated_in_firmware = true;
+        entrysign_mitigated_in_firmware = true;
         return;
     }
 

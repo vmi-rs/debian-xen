@@ -3,9 +3,7 @@
 #define _ASM_PPC_PAGE_H
 
 #include <xen/bitops.h>
-#include <xen/types.h>
-
-#include <asm/byteorder.h>
+#include <xen/byteorder.h>
 
 #define PDE_VALID     PPC_BIT(0)
 #define PDE_NLB_MASK  0x1ffffffffffffe0UL
@@ -189,6 +187,12 @@ static inline void invalidate_icache(void)
 
 #define clear_page(page) memset(page, 0, PAGE_SIZE)
 #define copy_page(dp, sp) memcpy(dp, sp, PAGE_SIZE)
+
+#define clear_page_hot  clear_page
+#define clear_page_cold clear_page
+
+#define scrub_page_hot(page) memset(page, SCRUB_BYTE_PATTERN, PAGE_SIZE)
+#define scrub_page_cold      scrub_page_hot
 
 /* TODO: Flush the dcache for an entire page. */
 static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache)

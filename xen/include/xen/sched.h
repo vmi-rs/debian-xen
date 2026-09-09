@@ -85,6 +85,12 @@ extern domid_t hardware_domid;
 #define XEN_CONSUMER_BITS 3
 #define NR_XEN_CONSUMERS ((1 << XEN_CONSUMER_BITS) - 1)
 
+enum virq_type {
+    VIRQ_GLOBAL,
+    VIRQ_DOMAIN,
+    VIRQ_VCPU,
+};
+
 struct evtchn
 {
     rwlock_t lock;
@@ -208,10 +214,6 @@ struct vcpu
     struct seqcount  runstate_seq;
     unsigned int     new_state;
 
-    /* Has the FPU been initialised? */
-    bool             fpu_initialised;
-    /* Has the FPU been used since it was last saved? */
-    bool             fpu_dirtied;
     /* Initialization completed for this VCPU? */
     bool             is_initialised;
     /* Currently running on a CPU? */
@@ -289,16 +291,20 @@ struct vcpu
     /* Multicall information. */
     struct mc_state  mc_state;
 
+#ifdef CONFIG_VM_EVENT
     struct waitqueue_vcpu *waitqueue_vcpu;
+#endif
 
     struct evtchn_fifo_vcpu *evtchn_fifo;
 
     /* vPCI per-vCPU area, used to store data for long running operations. */
     struct vpci_vcpu vpci;
 
+#ifdef CONFIG_VMTRACE
     struct {
         struct page_info *pg; /* One contiguous allocation of d->vmtrace_size */
     } vmtrace;
+#endif
 
     struct arch_vcpu arch;
 
@@ -367,9 +373,24 @@ struct evtchn_port_ops;
 
 #define MAX_NR_IOREQ_SERVERS 8
 
+/* Domain console settings. */
+struct domain_console {
+    /* Permission to take ownership of the physical console input. */
+    bool input_allowed;
+
+    /* hvm_print_line() and guest_console_write() logging. */
+    unsigned int idx;
+    spinlock_t lock;
+    char buf[256];
+};
+
 struct domain
 {
     domid_t          domain_id;
+
+#ifdef CONFIG_HAS_DOMAIN_TYPE
+    enum domain_type type;
+#endif
 
     unsigned int     max_vcpus;
 
@@ -509,7 +530,7 @@ struct domain
     bool             auto_node_affinity;
     /* Is this guest fully privileged (aka dom0)? */
     bool             is_privileged;
-    /* Can this guest access the Xen console? */
+    /* XSM: permission to use HYPERCALL_console_io hypercall */
     bool             is_console;
     /* Is this guest being debugged by dom0? */
     bool             debugger_attached;
@@ -560,15 +581,6 @@ struct domain
     /* Control-plane tools handle for this domain. */
     xen_domain_handle_t handle;
 
-    /* hvm_print_line() and guest_console_write() logging. */
-#define DOMAIN_PBUF_SIZE 200
-    char       *pbuf;
-    unsigned int pbuf_idx;
-    spinlock_t  pbuf_lock;
-
-    /* OProfile support. */
-    struct xenoprof *xenoprof;
-
     /* Domain watchdog. */
 #define NR_DOMAIN_WATCHDOG_TIMERS 2
     spinlock_t watchdog_lock;
@@ -617,7 +629,13 @@ struct domain
         unsigned int guest_request_sync          : 1;
     } monitor;
 
+#ifdef CONFIG_ALTP2M
+    unsigned int nr_altp2m;    /* Number of altp2m tables. */
+#endif
+
+#ifdef CONFIG_VMTRACE
     unsigned int vmtrace_size; /* Buffer size in bytes, or 0 to disable. */
+#endif
 
 #ifdef CONFIG_ARGO
     /* Argo interdomain communication support */
@@ -647,9 +665,17 @@ struct domain
 
 #ifdef CONFIG_LLC_COLORING
     unsigned int num_llc_colors;
-    const unsigned int *llc_colors;
+    unsigned int *llc_colors;
 #endif
-};
+
+    /* Pointer to console settings; NULL for system domains. */
+    struct domain_console *console;
+
+    /* Pointer to allocated domheap page that possibly needs scrubbing. */
+    struct page_info *pending_scrub;
+    unsigned int pending_scrub_order;
+    unsigned int pending_scrub_index;
+} __aligned(PAGE_SIZE);
 
 static inline struct page_list_head *page_to_list(
     struct domain *d, const struct page_info *pg)
@@ -809,6 +835,11 @@ void domain_resume(struct domain *d);
 
 int domain_soft_reset(struct domain *d, bool resuming);
 
+int domain_init_states(void);
+void domain_deinit_states(const struct domain *d);
+int get_domain_state(struct xen_domctl_get_domain_state *info,
+                     struct domain *d, domid_t *domid);
+
 int vcpu_start_shutdown_deferral(struct vcpu *v);
 void vcpu_end_shutdown_deferral(struct vcpu *v);
 
@@ -858,6 +889,7 @@ void vcpu_wake(struct vcpu *v);
 long vcpu_yield(void);
 void vcpu_sleep_nosync(struct vcpu *v);
 void vcpu_sleep_sync(struct vcpu *v);
+void vcpu_kick(struct vcpu *v);
 
 /*
  * Force synchronisation of given VCPU's state. If it is currently descheduled,
@@ -1017,6 +1049,7 @@ static inline bool vcpu_cpu_dirty(const struct vcpu *v)
 }
 
 void vcpu_block(void);
+void vcpu_block_enable_events(void);
 void vcpu_unblock(struct vcpu *v);
 
 void vcpu_pause(struct vcpu *v);
@@ -1063,6 +1096,9 @@ static inline struct vcpu *domain_vcpu(const struct domain *d,
     return vcpu_id >= d->max_vcpus ? NULL : d->vcpu[idx];
 }
 
+void freeze_domains(void);
+void thaw_domains(void);
+
 void cpu_init(void);
 
 /*
@@ -1085,6 +1121,7 @@ int vcpu_affinity_domctl(struct domain *d, uint32_t cmd,
 
 void vcpu_runstate_get(const struct vcpu *v,
                        struct vcpu_runstate_info *runstate);
+uint64_t vcpu_runstate_get_running(const struct vcpu *v);
 uint64_t get_cpu_idle_time(unsigned int cpu);
 void sched_guest_idle(void (*idle) (void), unsigned int cpu);
 void scheduler_enable(void);
@@ -1284,15 +1321,15 @@ static inline unsigned int btcpupools_get_cpupool_id(unsigned int cpu)
 {
     return 0;
 }
-#ifdef CONFIG_HAS_DEVICE_TREE
+
+struct dt_device_node;
+
 static inline int
 btcpupools_get_domain_pool_id(const struct dt_device_node *node)
 {
     return 0;
 }
-#endif
-
-#endif
+#endif /* CONFIG_BOOT_TIME_CPUPOOLS */
 
 #endif /* __SCHED_H__ */
 

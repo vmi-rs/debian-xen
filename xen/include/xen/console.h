@@ -8,6 +8,7 @@
 #define __CONSOLE_H__
 
 #include <xen/inttypes.h>
+#include <xen/ctype.h>
 #include <public/xen.h>
 
 struct xen_sysctl_readconsole;
@@ -31,7 +32,8 @@ void console_end_sync(void);
 void console_start_log_everything(void);
 void console_end_log_everything(void);
 
-struct domain *console_input_domain(void);
+struct domain *console_get_domain(void);
+void console_put_domain(struct domain *d);
 
 /*
  * Steal output from the console. Returns +ve identifier, else -ve error.
@@ -42,12 +44,19 @@ int console_steal(int handle, void (*fn)(const char *str, size_t nr));
 /* Give back stolen console. Takes the identifier returned by console_steal. */
 void console_giveback(int id);
 
+#ifdef CONFIG_SYSTEM_SUSPEND
 int console_suspend(void);
 int console_resume(void);
+#endif
 
 /* Emit a string via the serial console. */
 void console_serial_puts(const char *s, size_t nr);
 
 extern int8_t opt_console_xen;
+
+static inline bool is_console_printable(unsigned char c)
+{
+    return isprint(c) || c == '\n' || c == '\t';
+}
 
 #endif /* __CONSOLE_H__ */

@@ -277,6 +277,7 @@ void libxl__xcinfo2xlinfo(libxl_ctx *ctx,
                           libxl_dominfo *xlinfo)
 {
     size_t size;
+    int saved_errno = errno;
 
     memcpy(&(xlinfo->uuid), xcinfo->handle, sizeof(xen_domain_handle_t));
     xlinfo->domid = xcinfo->domain;
@@ -284,6 +285,7 @@ void libxl__xcinfo2xlinfo(libxl_ctx *ctx,
     if (libxl_flask_sid_to_context(ctx, xlinfo->ssidref,
                                    &xlinfo->ssid_label, &size) < 0)
         xlinfo->ssid_label = NULL;
+    errno = saved_errno;
 
     xlinfo->dying      = !!(xcinfo->flags&XEN_DOMINF_dying);
     xlinfo->shutdown   = !!(xcinfo->flags&XEN_DOMINF_shutdown);
@@ -1877,8 +1879,6 @@ int libxl_set_vcpuonline(libxl_ctx *ctx, uint32_t domid,
     switch (libxl__domain_type(gc, domid)) {
     case LIBXL_DOMAIN_TYPE_HVM:
         switch (libxl__device_model_version_running(gc, domid)) {
-        case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-            break;
         case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
             rc = libxl__ev_time_register_rel(ao, &svos->timeout,
                                              set_vcpuonline_timeout,
@@ -2116,7 +2116,6 @@ static void domain_s3_resume(libxl__ao *ao, libxl__egc *egc, int domid)
     AO_GC;
     libxl__ev_qmp *qmp;
     int rc = 0;
-    int r;
 
     GCNEW(qmp);
     libxl__ev_qmp_init(qmp);
@@ -2128,14 +2127,6 @@ static void domain_s3_resume(libxl__ao *ao, libxl__egc *egc, int domid)
     switch (libxl__domain_type(gc, domid)) {
     case LIBXL_DOMAIN_TYPE_HVM:
         switch (libxl__device_model_version_running(gc, domid)) {
-        case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-            r = xc_hvm_param_set(CTX->xch, domid, HVM_PARAM_ACPI_S_STATE, 0);
-            if (r) {
-                LOGED(ERROR, domid, "Send trigger '%s' failed",
-                      libxl_trigger_to_string(LIBXL_TRIGGER_S3RESUME));
-                rc = ERROR_FAIL;
-            }
-            break;
         case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
             rc = libxl__ev_qmp_send(egc, qmp, "system_wakeup", NULL);
             if (rc) goto out;
@@ -2481,10 +2472,6 @@ static void retrieve_domain_configuration_end(libxl__egc *egc,
             case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
                 libxl_bitmap_copy(CTX, map, &rdcs->qemuu_cpus);
                 break;
-            case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-                rc = libxl__update_avail_vcpus_xenstore(gc, domid,
-                                                        max_vcpus, map);
-                break;
             default:
                 abort();
             }
@@ -2542,6 +2529,17 @@ static void retrieve_domain_configuration_end(libxl__egc *egc,
                                            &d_config->b_info.sched_params);
         if (rc) {
             LOGD(ERROR, domid, "Fail to get scheduler parameters");
+            goto out;
+        }
+    }
+
+    /* Xenstore quota */
+    {
+        libxl_xs_quota_list_dispose(&d_config->b_info.xenstore_quota);
+        rc = libxl_xs_quota_domain_get(CTX, domid,
+                                       &d_config->b_info.xenstore_quota);
+        if (rc) {
+            LOGED(ERROR, domid, "Fail to get xenstore quota");
             goto out;
         }
     }

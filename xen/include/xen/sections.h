@@ -6,7 +6,14 @@
 #include <xen/compiler.h>
 
 /* SAF-0-safe */
+extern const char __ro_after_init_start[], __ro_after_init_end[];
+
+/* SAF-0-safe */
 extern char __init_begin[], __init_end[];
+#define is_init_section(p) ({                           \
+    const char *p_ = (const char *)(unsigned long)(p);  \
+    (p_ >= __init_begin) && (p_ < __init_end);          \
+})
 
 /*
  * Some data is expected to be written rarely (if at all).

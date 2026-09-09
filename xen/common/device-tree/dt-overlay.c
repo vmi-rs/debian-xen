@@ -6,12 +6,14 @@
  * Written by Vikram Garhwal <vikram.garhwal@amd.com>
  *
  */
-#include <asm/domain_build.h>
 #include <xen/dt-overlay.h>
+#include <xen/fdt-kernel.h>
 #include <xen/guest_access.h>
 #include <xen/iocap.h>
 #include <xen/libfdt/libfdt.h>
 #include <xen/xmalloc.h>
+
+#include <asm/setup.h>
 
 #define DT_OVERLAY_MAX_SIZE KB(500)
 
@@ -123,11 +125,11 @@ static int dt_overlay_remove_node(struct dt_device_node *device_node)
             else
                 np->allnext = np->allnext->allnext;
 
-            break;
+            return 0;
         }
     }
 
-    return 0;
+    return -ENODEV;
 }
 
 static int dt_overlay_add_node(struct dt_device_node *device_node,
@@ -285,6 +287,63 @@ static unsigned int overlay_node_count(const void *overlay_fdt)
 }
 
 /*
+ * Resolve the target path for an overlay fragment.
+ *
+ * This is called before fdt_overlay_apply(), so phandle-based targets
+ * (target = <&label>) are still unresolved (compiled as 0xffffffff by DTC).
+ * Handle the two cases that actually occur:
+ *  - target-path property: the path string is used directly,
+ *  - target = <&label>: the label is looked up in the overlay's __fixups__
+ *    node, then resolved to a path via the base DTB's __symbols__ node.
+ *
+ * Returns a pointer into the FDT on success, NULL on failure.
+ */
+static const char *overlay_get_target_path(const void *fdt, const void *fdto,
+                                           int fragment)
+{
+    const char *path, *fragment_name;
+    int fixups_off, symbols_off, property;
+    int fragment_name_len;
+
+    /* Try target-path first (string-based targeting) */
+    path = fdt_getprop(fdto, fragment, "target-path", NULL);
+    if ( path )
+        return path;
+
+    /* Phandle-based target: resolve via __fixups__ and __symbols__ */
+    fixups_off = fdt_path_offset(fdto, "/__fixups__");
+    if ( fixups_off < 0 )
+        return NULL;
+
+    symbols_off = fdt_path_offset(fdt, "/__symbols__");
+    if ( symbols_off < 0 )
+        return NULL;
+
+    fragment_name = fdt_get_name(fdto, fragment, &fragment_name_len);
+    if ( !fragment_name )
+        return NULL;
+
+    fdt_for_each_property_offset(property, fdto, fixups_off)
+    {
+        const char *val, *label, *p;
+        int val_len;
+
+        val = fdt_getprop_by_offset(fdto, property, &label, &val_len);
+        if ( !val || !val_len || (val[val_len - 1] != '\0') )
+            continue;
+
+        /* Match entries of the form "/<fragment_name>:target:0" */
+        for ( p = val; p < (val + val_len); p += (strlen(p) + 1) )
+            if ( p[0] == '/' &&
+                 !strncmp(p + 1, fragment_name, fragment_name_len) &&
+                 !strcmp(p + 1 + fragment_name_len, ":target:0") )
+                return fdt_getprop(fdt, symbols_off, label, NULL);
+    }
+
+    return NULL;
+}
+
+/*
  * overlay_get_nodes_info gets full name with path for all the nodes which
  * are in one level of __overlay__ tag. This is useful when checking node for
  * duplication i.e. dtbo tries to add nodes which already exists in device tree.
@@ -296,7 +355,6 @@ static int overlay_get_nodes_info(const void *fdto, char **nodes_full_path)
 
     fdt_for_each_subnode(fragment, fdto, 0)
     {
-        int target;
         int overlay;
         int subnode;
         const char *target_path;
@@ -305,11 +363,8 @@ static int overlay_get_nodes_info(const void *fdto, char **nodes_full_path)
         if ( overlay < 0 )
             continue;
 
-        target = fdt_overlay_target_offset(device_tree_flattened, fdto,
-                                           fragment, &target_path);
-        if ( target < 0 )
-            return target;
-
+        target_path = overlay_get_target_path(device_tree_flattened, fdto,
+                                              fragment);
         if ( target_path == NULL )
             return -EINVAL;
 
@@ -377,7 +432,8 @@ find_track_entry_from_tracker(const void *overlay_fdt,
      */
     list_for_each_entry_safe( entry, temp, &overlay_tracker, entry )
     {
-        if ( memcmp(entry->overlay_fdt, overlay_fdt, overlay_fdt_size) == 0 )
+        if ( (fdt_totalsize(entry->overlay_fdt) == overlay_fdt_size) &&
+             !memcmp(entry->overlay_fdt, overlay_fdt, overlay_fdt_size) )
         {
             found_entry = true;
             break;
@@ -838,6 +894,30 @@ static long handle_add_overlay_nodes(void *overlay_fdt,
     return rc;
 }
 
+static int handle_device_and_children(struct domain *d,
+                                      struct dt_device_node *dev,
+                                      p2m_type_t p2mt,
+                                      struct rangeset *iomem_ranges,
+                                      struct rangeset *irq_ranges)
+{
+    int rc;
+    struct dt_device_node *child;
+
+    rc = handle_device(d, dev, p2mt, iomem_ranges, irq_ranges);
+    if ( rc )
+        return rc;
+
+    dt_for_each_child_node(dev, child)
+    {
+        rc = handle_device_and_children(d, child, p2mt,
+                                        iomem_ranges, irq_ranges);
+        if ( rc )
+            return rc;
+    }
+
+    return 0;
+}
+
 static long handle_attach_overlay_nodes(struct domain *d,
                                         const void *overlay_fdt,
                                         uint32_t overlay_fdt_size)
@@ -857,6 +937,13 @@ static long handle_attach_overlay_nodes(struct domain *d,
     {
         rc = -EINVAL;
         goto out;
+    }
+
+    if ( entry->irq_ranges || entry->iomem_ranges )
+    {
+        printk(XENLOG_ERR "Overlay is already attached\n");
+        spin_unlock(&overlay_lock);
+        return -EEXIST;
     }
 
     entry->irq_ranges = rangeset_new(d, "Overlays: Interrupts", 0);
@@ -888,8 +975,9 @@ static long handle_attach_overlay_nodes(struct domain *d,
         }
 
         write_lock(&dt_host_lock);
-        rc = handle_device(d, overlay_node, p2m_mmio_direct_c,
-                           entry->iomem_ranges, entry->irq_ranges);
+        rc = handle_device_and_children(d, overlay_node, p2m_mmio_direct_c,
+                                        entry->iomem_ranges,
+                                        entry->irq_ranges);
         write_unlock(&dt_host_lock);
         if ( rc )
         {
@@ -905,10 +993,17 @@ static long handle_attach_overlay_nodes(struct domain *d,
  out:
     spin_unlock(&overlay_lock);
 
+    /*
+     * TODO: IRQ/MMIO permissions and IOMMU assignments granted by
+     * handle_device() before the failure are not revoked here.  We only
+     * destroy the tracking rangesets, leaking the actual grants.
+     */
     if ( entry )
     {
         rangeset_destroy(entry->irq_ranges);
+        entry->irq_ranges = NULL;
         rangeset_destroy(entry->iomem_ranges);
+        entry->iomem_ranges = NULL;
     }
 
     return rc;
@@ -987,10 +1082,7 @@ long dt_overlay_domctl(struct domain *d, struct xen_domctl_dt_overlay *op)
         return -EFAULT;
     }
 
-    if ( op->overlay_op == XEN_DOMCTL_DT_OVERLAY_ATTACH )
-        ret = handle_attach_overlay_nodes(d, overlay_fdt, op->overlay_fdt_size);
-    else
-        ret = -EOPNOTSUPP;
+    ret = handle_attach_overlay_nodes(d, overlay_fdt, op->overlay_fdt_size);
 
     xfree(overlay_fdt);
 

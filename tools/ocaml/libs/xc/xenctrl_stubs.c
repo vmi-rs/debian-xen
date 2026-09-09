@@ -205,14 +205,23 @@ CAMLprim value stub_xc_domain_create(value xch_val, value wanted_domid, value co
 #define VAL_MAX_MAPTRACK_FRAMES Field(config, 7)
 #define VAL_MAX_GRANT_VERSION   Field(config, 8)
 #define VAL_ALTP2M_OPTS         Field(config, 9)
-#define VAL_VMTRACE_BUF_KB      Field(config, 10)
-#define VAL_CPUPOOL_ID          Field(config, 11)
-#define VAL_ARCH                Field(config, 12)
+#define VAL_ALTP2M_COUNT        Field(config, 10)
+#define VAL_VMTRACE_BUF_KB      Field(config, 11)
+#define VAL_CPUPOOL_ID          Field(config, 12)
+#define VAL_ARCH                Field(config, 13)
 
 	uint32_t domid = Int_val(wanted_domid);
+	uint32_t altp2m_opts = Int32_val(VAL_ALTP2M_OPTS);
+	uint32_t altp2m_nr = Int32_val(VAL_ALTP2M_COUNT);
 	uint64_t vmtrace_size = Int32_val(VAL_VMTRACE_BUF_KB);
 
-	vmtrace_size = ROUNDUP(vmtrace_size << 10, XC_PAGE_SHIFT);
+	if ( altp2m_opts != (uint16_t)altp2m_opts )
+		caml_invalid_argument("altp2m_opts");
+
+	if ( altp2m_nr != (uint16_t)altp2m_nr )
+		caml_invalid_argument("altp2m_count");
+
+	vmtrace_size = ROUNDUP(vmtrace_size << 10, XC_PAGE_SIZE);
 	if ( vmtrace_size != (uint32_t)vmtrace_size )
 		caml_invalid_argument("vmtrace_buf_kb");
 
@@ -225,7 +234,10 @@ CAMLprim value stub_xc_domain_create(value xch_val, value wanted_domid, value co
 		.max_maptrack_frames = Int_val(VAL_MAX_MAPTRACK_FRAMES),
 		.grant_opts =
 		    XEN_DOMCTL_GRANT_version(Int_val(VAL_MAX_GRANT_VERSION)),
-		.altp2m_opts = Int32_val(VAL_ALTP2M_OPTS),
+		.altp2m = {
+			.opts = altp2m_opts,
+			.nr = altp2m_nr,
+		},
 		.vmtrace_size = vmtrace_size,
 		.cpupool_id = Int32_val(VAL_CPUPOOL_ID),
 	};
@@ -284,6 +296,7 @@ CAMLprim value stub_xc_domain_create(value xch_val, value wanted_domid, value co
 #undef VAL_ARCH
 #undef VAL_CPUPOOL_ID
 #undef VAL_VMTRACE_BUF_KB
+#undef VAL_ALTP2M_COUNT
 #undef VAL_ALTP2M_OPTS
 #undef VAL_MAX_GRANT_VERSION
 #undef VAL_MAX_MAPTRACK_FRAMES
@@ -401,7 +414,8 @@ CAMLprim value stub_xc_domain_shutdown(value xch_val, value domid, value reason)
 static value alloc_domaininfo(xc_domaininfo_t * info)
 {
 	CAMLparam0();
-	CAMLlocal5(result, tmp, arch_config, x86_arch_config, emul_list);
+	CAMLlocal4(result, tmp, arch_config, emul_list);
+	int tag = -1;
 	int i;
 
 	result = caml_alloc_tuple(17);
@@ -430,7 +444,22 @@ static value alloc_domaininfo(xc_domaininfo_t * info)
 
 	Store_field(result, 15, tmp);
 
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__arm__) || defined(__aarch64__)
+
+	tag = 0; /* tag ARM */
+
+	/* xen_arm_arch_domainconfig */
+	arch_config = caml_alloc_tuple(3);
+	Field(arch_config, 0) = Val_int(info->arch_config.gic_version);
+	Field(arch_config, 1) = Val_int(info->arch_config.nr_spis);
+
+	tmp = caml_copy_int32(info->arch_config.clock_frequency);
+	Field(arch_config, 2) = tmp;
+
+#elif defined(__i386__) || defined(__x86_64__)
+
+	tag = 1; /* tag x86 */
+
 	/*
 	 * emulation_flags: x86_arch_emulation_flags list;
 	 */
@@ -439,16 +468,17 @@ static value alloc_domaininfo(xc_domaininfo_t * info)
 		(info->arch_config.emulation_flags);
 
 	/* xen_x86_arch_domainconfig */
-	x86_arch_config = caml_alloc_tuple(1);
-	Store_field(x86_arch_config, 0, emul_list);
+	arch_config = caml_alloc_tuple(1);
+	Field(arch_config, 0) = emul_list;
+
+#endif
+	if (tag < 0)
+		caml_failwith("Unimplemented architecture in alloc_domaininfo()");
 
 	/* arch_config: arch_domainconfig */
-	arch_config = caml_alloc_small(1, 1);
-
-	Store_field(arch_config, 0, x86_arch_config);
-
-	Store_field(result, 16, arch_config);
-#endif
+	tmp = caml_alloc_small(1, tag);
+	Field(tmp, 0) = arch_config;
+	Field(result, 16) = tmp;
 
 	CAMLreturn(result);
 }

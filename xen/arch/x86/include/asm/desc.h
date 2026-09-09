@@ -42,7 +42,7 @@
 #define LDT_SELECTOR     (LDT_ENTRY << 3)
 #define PER_CPU_SELECTOR (PER_CPU_GDT_ENTRY << 3)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define GUEST_KERNEL_RPL(d) (is_pv_32bit_domain(d) ? 1 : 3)
 
@@ -76,7 +76,7 @@
                 FLAT_COMPAT_KERNEL_CS)) ||                              \
      ((sel) & 4))                               /* LDT seg? */
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 /* These are bitmasks for the high 32 bits of a descriptor table entry. */
 #define _SEGMENT_TYPE    (15<< 8)
@@ -92,7 +92,7 @@
 #define _SEGMENT_DB      ( 1<<22) /* 16- or 32-bit segment */
 #define _SEGMENT_G       ( 1<<23) /* Granularity */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /* System Descriptor types for GDT and IDT entries. */
 #define SYS_DESC_tss16_avail  1
@@ -114,82 +114,6 @@ typedef union {
         uint32_t a, b;
     };
 } seg_desc_t;
-
-typedef union {
-    struct {
-        uint64_t a, b;
-    };
-    struct {
-        uint16_t addr0;
-        uint16_t cs;
-        uint8_t  ist; /* :3, 5 bits rsvd, but this yields far better code. */
-        uint8_t  type:4, s:1, dpl:2, p:1;
-        uint16_t addr1;
-        uint32_t addr2;
-        /* 32 bits rsvd. */
-    };
-} idt_entry_t;
-
-/* Write the lower 64 bits of an IDT Entry. This relies on the upper 32
- * bits of the address not changing, which is a safe assumption as all
- * functions we are likely to load will live inside the 1GB
- * code/data/bss address range.
- *
- * Ideally, we would use cmpxchg16b, but this is not supported on some
- * old AMD 64bit capable processors, and has no safe equivalent.
- */
-static inline void _write_gate_lower(volatile idt_entry_t *gate,
-                                     const idt_entry_t *new)
-{
-    ASSERT(gate->b == new->b);
-    gate->a = new->a;
-}
-
-#define _set_gate(gate_addr,type,dpl,addr)               \
-do {                                                     \
-    (gate_addr)->a = 0;                                  \
-    smp_wmb(); /* disable gate /then/ rewrite */         \
-    (gate_addr)->b =                                     \
-        ((unsigned long)(addr) >> 32);                   \
-    smp_wmb(); /* rewrite /then/ enable gate */          \
-    (gate_addr)->a =                                     \
-        (((unsigned long)(addr) & 0xFFFF0000UL) << 32) | \
-        ((unsigned long)(dpl) << 45) |                   \
-        ((unsigned long)(type) << 40) |                  \
-        ((unsigned long)(addr) & 0xFFFFUL) |             \
-        ((unsigned long)__HYPERVISOR_CS << 16) |         \
-        (1UL << 47);                                     \
-} while (0)
-
-static inline void _set_gate_lower(idt_entry_t *gate, unsigned long type,
-                                   unsigned long dpl, void *addr)
-{
-    idt_entry_t idte;
-    idte.b = gate->b;
-    idte.a =
-        (((unsigned long)(addr) & 0xFFFF0000UL) << 32) |
-        ((unsigned long)(dpl) << 45) |
-        ((unsigned long)(type) << 40) |
-        ((unsigned long)(addr) & 0xFFFFUL) |
-        ((unsigned long)__HYPERVISOR_CS << 16) |
-        (1UL << 47);
-    _write_gate_lower(gate, &idte);
-}
-
-/* Update the lower half handler of an IDT Entry, without changing any
- * other configuration. */
-static inline void _update_gate_addr_lower(idt_entry_t *gate, void *addr)
-{
-    idt_entry_t idte;
-    idte.a = gate->a;
-
-    idte.b = ((unsigned long)(addr) >> 32);
-    idte.a &= 0x0000FFFFFFFF0000ULL;
-    idte.a |= (((unsigned long)(addr) & 0xFFFF0000UL) << 32) |
-        ((unsigned long)(addr) & 0xFFFFUL);
-
-    _write_gate_lower(gate, &idte);
-}
 
 #define _set_tssldt_desc(desc,addr,limit,type)           \
 do {                                                     \
@@ -238,6 +162,6 @@ static inline void ltr(unsigned int sel)
     __asm__ __volatile__ ( "ltr %w0" :: "rm" (sel) : "memory" );
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __ARCH_DESC_H */

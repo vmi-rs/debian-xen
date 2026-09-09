@@ -12,7 +12,7 @@
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #include <xen/linkage.h>
 #include <asm/asm-defns.h>
 #ifndef CONFIG_INDIRECT_THUNK
@@ -24,12 +24,13 @@ asm ( "\t.equ CONFIG_INDIRECT_THUNK, "
       __stringify(IS_ENABLED(CONFIG_INDIRECT_THUNK)) );
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * This output constraint should be used for any inline asm which has a "call"
- * instruction.  Otherwise the asm may be inserted before the frame pointer
- * gets set up by the containing function.
+ * instruction, which forces the frame pointer to be set up prior to the asm
+ * block.  This matters when unwinding using frame pointers, where the asm's
+ * function can get skipped over.
  */
 #ifdef CONFIG_FRAME_POINTER
 register unsigned long current_stack_pointer asm("rsp");
@@ -56,31 +57,28 @@ register unsigned long current_stack_pointer asm("rsp");
 #define ASSERT_INTERRUPTS_DISABLED \
     ASSERT_INTERRUPT_STATUS(z, "INTERRUPTS DISABLED")
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 # define _ASM_EX(p) p-.
 #else
 # define _ASM_EX(p) #p "-."
 #endif
 
 /* Exception table entry */
-#ifdef __ASSEMBLY__
-# define _ASM__EXTABLE(sfx, from, to)             \
-    .section .ex_table##sfx, "a" ;                \
+#ifdef __ASSEMBLER__
+# define _ASM_EXTABLE(from, to)                   \
+    .section .ex_table, "a" ;                     \
     .balign 4 ;                                   \
     .long _ASM_EX(from), _ASM_EX(to) ;            \
     .previous
 #else
-# define _ASM__EXTABLE(sfx, from, to)             \
-    " .section .ex_table" #sfx ",\"a\"\n"         \
+# define _ASM_EXTABLE(from, to)                   \
+    " .section .ex_table,\"a\"\n"                 \
     " .balign 4\n"                                \
     " .long " _ASM_EX(from) ", " _ASM_EX(to) "\n" \
     " .previous\n"
 #endif
 
-#define _ASM_EXTABLE(from, to)     _ASM__EXTABLE(, from, to)
-#define _ASM_PRE_EXTABLE(from, to) _ASM__EXTABLE(.pre, from, to)
-
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 .macro BUILD_BUG_ON condstr, cond:vararg
         .if \cond
@@ -220,7 +218,7 @@ static always_inline void stac(void)
 }
 #endif
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 .macro SAVE_ALL compat=0
         addq  $-(UREGS_error_code-UREGS_r15), %rsp
         cld
@@ -312,6 +310,69 @@ static always_inline void stac(void)
         LOAD_ONE_REG(si, \compat)
         LOAD_ONE_REG(di, \compat)
         subq  $-(UREGS_error_code-UREGS_r15+\adj), %rsp
+.endm
+
+/*
+ * Push and clear GPRs
+ */
+.macro PUSH_AND_CLEAR_GPRS
+        push  %rdi
+        xor   %edi, %edi
+        push  %rsi
+        xor   %esi, %esi
+        push  %rdx
+        xor   %edx, %edx
+        push  %rcx
+        xor   %ecx, %ecx
+        push  %rax
+        xor   %eax, %eax
+        push  %r8
+        xor   %r8d, %r8d
+        push  %r9
+        xor   %r9d, %r9d
+        push  %r10
+        xor   %r10d, %r10d
+        push  %r11
+        xor   %r11d, %r11d
+        push  %rbx
+        xor   %ebx, %ebx
+        push  %rbp
+#ifdef CONFIG_FRAME_POINTER
+/* Indicate special exception stack frame by inverting the frame pointer. */
+        mov   %rsp, %rbp
+        not   %rbp
+#else
+        xor   %ebp, %ebp
+#endif
+        push  %r12
+        xor   %r12d, %r12d
+        push  %r13
+        xor   %r13d, %r13d
+        push  %r14
+        xor   %r14d, %r14d
+        push  %r15
+        xor   %r15d, %r15d
+.endm
+
+/*
+ * POP GPRs from a UREGS_* frame on the stack.  Does not modify flags.
+ */
+.macro POP_GPRS
+        pop   %r15
+        pop   %r14
+        pop   %r13
+        pop   %r12
+        pop   %rbp
+        pop   %rbx
+        pop   %r11
+        pop   %r10
+        pop   %r9
+        pop   %r8
+        pop   %rax
+        pop   %rcx
+        pop   %rdx
+        pop   %rsi
+        pop   %rdi
 .endm
 
 #ifdef CONFIG_PV32

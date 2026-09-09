@@ -23,19 +23,12 @@ static inline void clflush(const void *p)
 
 static inline void clflushopt(const void *p)
 {
-    asm volatile ( "data16 clflush %0" :: "m" (*(const char *)p) );
+    asm volatile ( "clflushopt %0" :: "m" (*(const char *)p) );
 }
 
 static inline void clwb(const void *p)
 {
-#if defined(HAVE_AS_CLWB)
     asm volatile ( "clwb %0" :: "m" (*(const char *)p) );
-#elif defined(HAVE_AS_XSAVEOPT)
-    asm volatile ( "data16 xsaveopt %0" :: "m" (*(const char *)p) );
-#else
-    asm volatile ( ".byte 0x66, 0x0f, 0xae, 0x32"
-                   :: "d" (p), "m" (*(const char *)p) );
-#endif
 }
 
 #define xchg(ptr,v) \
@@ -262,11 +255,5 @@ static inline int local_irq_is_enabled(void)
 
 #define BROKEN_ACPI_Sx          0x0001
 #define BROKEN_INIT_AFTER_S1    0x0002
-
-void trap_init(void);
-void init_idt_traps(void);
-void load_system_tables(void);
-void percpu_traps_init(void);
-void subarch_percpu_traps_init(void);
 
 #endif

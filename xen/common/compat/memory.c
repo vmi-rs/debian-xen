@@ -162,8 +162,8 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                 return -EFAULT;
 
             /* Early coarse check, as max_order() isn't available here. */
-            if ( cmp.xchg.in.extent_order >= 32 ||
-                 cmp.xchg.out.extent_order >= 32 )
+            if ( cmp.xchg.in.extent_order >= BITS_PER_INT ||
+                 cmp.xchg.out.extent_order >= BITS_PER_INT )
                 return -EPERM;
 
             order_delta = cmp.xchg.out.extent_order - cmp.xchg.in.extent_order;

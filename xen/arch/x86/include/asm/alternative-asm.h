@@ -3,7 +3,7 @@
 
 #include <asm/nops.h>
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 /*
  * Issue one struct alt_instr descriptor entry (need to put it into
@@ -51,6 +51,8 @@
 
 #define decl_repl(insn, nr)     .L\@_repl_s\()nr: insn; .L\@_repl_e\()nr:
 #define repl_len(nr)           (.L\@_repl_e\()nr  -     .L\@_repl_s\()nr)
+#define clone_repl(new, old)    .equiv .L\@_repl_s\()new, .L\@_repl_s\()old; \
+                                .equiv .L\@_repl_e\()new, .L\@_repl_e\()old
 
 #define as_max(a, b)           ((a) ^ (((a) ^ (b)) & -as_true((a) < (b))))
 
@@ -100,7 +102,11 @@
     .section .altinstr_replacement, "ax", @progbits
 
     decl_repl(\newinstr1, 1)
+    .ifnes "\newinstr2", "\newinstr1"
     decl_repl(\newinstr2, 2)
+    .else
+    clone_repl(2, 1)
+    .endif
 
     .popsection
 .endm
@@ -114,7 +120,7 @@
 #undef decl_orig
 #undef as_true
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* _ASM_X86_ALTERNATIVE_ASM_H_ */
 
 /*

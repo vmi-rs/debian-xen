@@ -1,5 +1,8 @@
 /* Event channel handling private header. */
 
+#ifndef EVENT_CHANNEL_H
+#define EVENT_CHANNEL_H
+
 #include <xen/event.h>
 
 static inline unsigned int max_evtchns(const struct domain *d)
@@ -45,12 +48,29 @@ void evtchn_2l_init(struct domain *d);
 
 /* FIFO */
 
+#ifdef CONFIG_EVTCHN_FIFO
 struct evtchn_init_control;
 struct evtchn_expand_array;
 
 int evtchn_fifo_init_control(struct evtchn_init_control *init_control);
 int evtchn_fifo_expand_array(const struct evtchn_expand_array *expand_array);
 void evtchn_fifo_destroy(struct domain *d);
+#else
+static inline int evtchn_fifo_init_control(struct evtchn_init_control *init_control)
+{
+    return -EOPNOTSUPP;
+}
+static inline int evtchn_fifo_expand_array(const struct evtchn_expand_array *expand_array)
+{
+    return -EOPNOTSUPP;
+}
+static inline void evtchn_fifo_destroy(struct domain *d)
+{
+    return;
+}
+#endif /* CONFIG_EVTCHN_FIFO */
+
+#endif /* EVENT_CHANNEL_H */
 
 /*
  * Local variables:

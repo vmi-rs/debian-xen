@@ -1,22 +1,16 @@
-#include <xen/lib.h>
+#include <xen/muldiv64.h>
 
-/* Compute with 96 bit intermediate result: (a*b)/c */
-uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c)
+uint64_t generic_muldiv64(uint64_t a, uint32_t b, uint32_t c)
 {
-#ifdef CONFIG_X86
-    asm ( "mulq %1; divq %2" : "+a" (a)
-                             : "rm" ((uint64_t)b), "rm" ((uint64_t)c)
-                             : "rdx" );
-
-    return a;
-#else
     union {
         uint64_t ll;
         struct {
-#ifdef WORDS_BIGENDIAN
+#if defined(__BIG_ENDIAN)
             uint32_t high, low;
-#else
+#elif defined(__LITTLE_ENDIAN)
             uint32_t low, high;
+#else
+# error Unknown Endianness
 #endif
         } l;
     } u, res;
@@ -30,7 +24,6 @@ uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c)
     res.l.low = (((rh % c) << 32) + (uint32_t)rl) / c;
 
     return res.ll;
-#endif
 }
 
 /*

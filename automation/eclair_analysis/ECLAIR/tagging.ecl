@@ -23,6 +23,8 @@
 "MC3A2.D1.1||
 MC3A2.D2.1||
 MC3A2.D4.1||
+MC3A2.D4.7||
+MC3A2.D4.10||
 MC3A2.D4.11||
 MC3A2.D4.14||
 MC3A2.R1.1||
@@ -62,7 +64,9 @@ MC3A2.R11.2||
 MC3A2.R11.6||
 MC3A2.R11.7||
 MC3A2.R11.9||
+MC3A2.R12.2||
 MC3A2.R12.5||
+MC3A2.R13.2||
 MC3A2.R13.6||
 MC3A2.R14.1||
 MC3A2.R14.3||
@@ -78,6 +82,7 @@ MC3A2.R17.5||
 MC3A2.R17.6||
 MC3A2.R18.6||
 MC3A2.R18.8||
+MC3A2.R19.1||
 MC3A2.R20.2||
 MC3A2.R20.3||
 MC3A2.R20.4||
@@ -91,6 +96,7 @@ MC3A2.R20.14||
 MC3A2.R21.3||
 MC3A2.R21.4||
 MC3A2.R21.5||
+MC3A2.R21.6||
 MC3A2.R21.7||
 MC3A2.R21.8||
 MC3A2.R21.9||
@@ -98,7 +104,9 @@ MC3A2.R21.10||
 MC3A2.R21.11||
 MC3A2.R21.12||
 MC3A2.R21.13||
+MC3A2.R21.18||
 MC3A2.R21.19||
+MC3A2.R21.20||
 MC3A2.R21.21||
 MC3A2.R22.1||
 MC3A2.R22.2||
@@ -119,7 +127,7 @@ if(string_equal(target,"x86_64"),
 )
 
 if(string_equal(target,"arm64"),
-    service_selector({"additional_clean_guidelines","MC3A2.R5.3||MC3.R11.2||MC3A2.R16.6"})
+    service_selector({"additional_clean_guidelines","none()"})
 )
 
 -reports+={clean:added,"service(clean_guidelines_common||additional_clean_guidelines)"}

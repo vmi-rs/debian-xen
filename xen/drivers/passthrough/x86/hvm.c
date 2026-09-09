@@ -329,7 +329,8 @@ int pt_irq_create_bind(
                 pirq_dpci->gmsi.gvec = 0;
                 pirq_dpci->dom = NULL;
                 pirq_dpci->flags = 0;
-                pirq_cleanup_check(info, d);
+                if ( !info->evtchn )
+                    pirq_cleanup_check(info, d);
                 write_unlock(&d->event_lock);
                 return rc;
             }
@@ -536,7 +537,8 @@ int pt_irq_create_bind(
                     hvm_irq_dpci->link_cnt[link]--;
                 }
                 pirq_dpci->flags = 0;
-                pirq_cleanup_check(info, d);
+                if ( !info->evtchn )
+                    pirq_cleanup_check(info, d);
                 write_unlock(&d->event_lock);
                 xfree(girq);
                 xfree(digl);
@@ -693,7 +695,8 @@ int pt_irq_destroy_bind(
          */
         pt_pirq_softirq_reset(pirq_dpci);
 
-        pirq_cleanup_check(pirq, d);
+        if ( !pirq->evtchn )
+            pirq_cleanup_check(pirq, d);
     }
 
     write_unlock(&d->event_lock);
@@ -958,7 +961,7 @@ static void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq)
 {
     const struct hvm_irq_dpci *dpci = NULL;
 
-    ASSERT(isairq < NR_ISAIRQS);
+    ASSERT(isairq < NR_ISA_IRQS);
 
     if ( !is_iommu_enabled(d) )
         return;
@@ -991,7 +994,7 @@ void hvm_dpci_eoi(struct domain *d, unsigned int guest_gsi)
         goto unlock;
     }
 
-    if ( guest_gsi < NR_ISAIRQS )
+    if ( guest_gsi < NR_ISA_IRQS )
     {
         hvm_dpci_isairq_eoi(d, guest_gsi);
         return;

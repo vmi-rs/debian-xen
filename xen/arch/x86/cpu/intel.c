@@ -1,18 +1,15 @@
+#include <xen/bitops.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/sched.h>
-#include <xen/string.h>
-#include <xen/bitops.h>
 #include <xen/smp.h>
+#include <xen/string.h>
 
-#include <asm/intel-family.h>
-#include <asm/processor.h>
-#include <asm/msr.h>
-#include <asm/mwait.h>
-#include <asm/uaccess.h>
-#include <asm/mpspec.h>
 #include <asm/apic.h>
 #include <asm/i387.h>
+#include <asm/match-cpu.h>
+#include <asm/mpspec.h>
+#include <asm/msr.h>
 #include <asm/trampoline.h>
 
 #include "cpu.h"
@@ -21,22 +18,22 @@
  * MSR_MCU_OPT_CTRL is a collection of unrelated functionality, with separate
  * enablement requirements, but which want to be consistent across the system.
  */
-static uint32_t __read_mostly mcu_opt_ctrl_mask;
-static uint32_t __read_mostly mcu_opt_ctrl_val;
+static uint32_t __ro_after_init mcu_opt_ctrl_mask;
+static uint32_t __ro_after_init mcu_opt_ctrl_val;
 
 void update_mcu_opt_ctrl(void)
 {
-    uint32_t mask = mcu_opt_ctrl_mask, lo, hi;
+    uint64_t mask = mcu_opt_ctrl_mask, val;
 
     if ( !mask )
         return;
 
-    rdmsr(MSR_MCU_OPT_CTRL, lo, hi);
+    val = rdmsr(MSR_MCU_OPT_CTRL);
 
-    lo &= ~mask;
-    lo |= mcu_opt_ctrl_val;
+    val &= ~mask;
+    val |= mcu_opt_ctrl_val;
 
-    wrmsr(MSR_MCU_OPT_CTRL, lo, hi);
+    wrmsrns(MSR_MCU_OPT_CTRL, val);
 }
 
 void __init set_in_mcu_opt_ctrl(uint32_t mask, uint32_t val)
@@ -54,17 +51,17 @@ static uint32_t __ro_after_init pb_opt_ctrl_val;
 
 void update_pb_opt_ctrl(void)
 {
-    uint32_t mask = pb_opt_ctrl_mask, lo, hi;
+    uint64_t mask = pb_opt_ctrl_mask, val;
 
     if ( !mask )
         return;
 
-    rdmsr(MSR_PB_OPT_CTRL, lo, hi);
+    val = rdmsr(MSR_PB_OPT_CTRL);
 
-    lo &= ~mask;
-    lo |= pb_opt_ctrl_val;
+    val &= ~mask;
+    val |= pb_opt_ctrl_val;
 
-    wrmsr(MSR_PB_OPT_CTRL, lo, hi);
+    wrmsrns(MSR_PB_OPT_CTRL, val);
 }
 
 void __init set_in_pb_opt_ctrl(uint32_t mask, uint32_t val)
@@ -118,7 +115,7 @@ static uint64_t __init _probe_mask_msr(unsigned int *msr, uint64_t caps)
 
 	expected_levelling_cap |= caps;
 
-	if (rdmsr_safe(*msr, val) || wrmsr_safe(*msr, val))
+	if (rdmsr_safe(*msr, &val) || wrmsr_safe(*msr, val))
 		*msr = 0;
 	else
 		levelling_caps |= caps;
@@ -254,14 +251,10 @@ static const typeof(ctxt_switch_masking) __initconst_cf_clobber __used csm =
     intel_ctxt_switch_masking;
 #endif
 
-/*
- * opt_cpuid_mask_ecx/edx: cpuid.1[ecx, edx] feature mask.
- * For example, E8400[Intel Core 2 Duo Processor series] ecx = 0x0008E3FD,
- * edx = 0xBFEBFBFF when executing CPUID.EAX = 1 normally. If you want to
- * 'rev down' to E8400, you can set these values in these Xen boot parameters.
- */
 static void __init noinline intel_init_levelling(void)
 {
+	uint32_t eax, ecx, edx, tmp;
+
 	/*
 	 * Intel Fam0f is old enough that probing for CPUID faulting support
 	 * introduces spurious #GP(0) when the appropriate MSRs are read,
@@ -278,12 +271,7 @@ static void __init noinline intel_init_levelling(void)
 	probe_masking_msrs();
 
 	if (msr_basic) {
-		uint32_t ecx, edx, tmp;
-
 		cpuid(0x00000001, &tmp, &tmp, &ecx, &edx);
-
-		ecx &= opt_cpuid_mask_ecx;
-		edx &= opt_cpuid_mask_edx;
 
 		/* Fast-forward bits - Must be set. */
 		if (ecx & cpufeat_mask(X86_FEATURE_XSAVE))
@@ -294,23 +282,12 @@ static void __init noinline intel_init_levelling(void)
 	}
 
 	if (msr_ext) {
-		uint32_t ecx, edx, tmp;
-
 		cpuid(0x80000001, &tmp, &tmp, &ecx, &edx);
-
-		ecx &= opt_cpuid_mask_ext_ecx;
-		edx &= opt_cpuid_mask_ext_edx;
-
 		cpuidmask_defaults.e1cd &= ((u64)edx << 32) | ecx;
 	}
 
 	if (msr_xsave) {
-		uint32_t eax, tmp;
-
 		cpuid_count(0x0000000d, 1, &eax, &tmp, &tmp, &tmp);
-
-		eax &= opt_cpuid_mask_xsave_eax;
-
 		cpuidmask_defaults.Da1 &= (~0ULL << 32) | eax;
 	}
 
@@ -366,7 +343,17 @@ static void cf_check early_init_intel(struct cpuinfo_x86 *c)
 		paddr_bits = 36;
 
 	if (c == &boot_cpu_data) {
+		uint64_t misc_enable;
+
 		check_memory_type_self_snoop_errata();
+
+		/*
+		 * If fast string is not enabled in IA32_MISC_ENABLE for any reason,
+		 * clear the enhanced fast string CPU capability.
+		 */
+		rdmsrl(MSR_IA32_MISC_ENABLE, misc_enable);
+		if (!(misc_enable & MSR_IA32_MISC_ENABLE_FAST_STRING))
+			setup_clear_cpu_cap(X86_FEATURE_ERMS);
 
 		intel_init_levelling();
 	}
@@ -385,16 +372,14 @@ static void cf_check early_init_intel(struct cpuinfo_x86 *c)
  */
 static void probe_c3_errata(const struct cpuinfo_x86 *c)
 {
-#define INTEL_FAM6_MODEL(m) { X86_VENDOR_INTEL, 6, m, X86_FEATURE_ALWAYS }
     static const struct x86_cpu_id models[] = {
-        /* Nehalem */
-        INTEL_FAM6_MODEL(0x1a),
-        INTEL_FAM6_MODEL(0x1e),
-        INTEL_FAM6_MODEL(0x1f),
-        INTEL_FAM6_MODEL(0x2e),
-        /* Westmere (note Westmere-EX is not affected) */
-        INTEL_FAM6_MODEL(0x2c),
-        INTEL_FAM6_MODEL(0x25),
+        X86_MATCH_VFM(INTEL_NEHALEM_EP,   NULL),
+        X86_MATCH_VFM(INTEL_NEHALEM,      NULL),
+        X86_MATCH_VFM(INTEL_NEHALEM_G,    NULL),
+        X86_MATCH_VFM(INTEL_NEHALEM_EX,   NULL), /* BA80 */
+        X86_MATCH_VFM(INTEL_WESTMERE,     NULL),
+        X86_MATCH_VFM(INTEL_WESTMERE_EP,  NULL),
+        /* Westmere-EX is not affected */
         { }
     };
 
@@ -408,29 +393,30 @@ static void probe_c3_errata(const struct cpuinfo_x86 *c)
     }
 }
 
-/*
- * APL30: One use of the MONITOR/MWAIT instruction pair is to allow a logical
- * processor to wait in a sleep state until a store to the armed address range
- * occurs. Due to this erratum, stores to the armed address range may not
- * trigger MWAIT to resume execution.
- *
- * ICX143: Under complex microarchitectural conditions, a monitor that is armed
- * with the MWAIT instruction may not be triggered, leading to a processor
- * hang.
- *
- * LNL030: Problem P-cores may not exit power state Core C6 on monitor hit.
- *
- * Force the sending of an IPI in those cases.
- */
 static void __init probe_mwait_errata(void)
 {
     static const struct x86_cpu_id __initconst models[] = {
-        INTEL_FAM6_MODEL(INTEL_FAM6_ATOM_GOLDMONT), /* APL30  */
-        INTEL_FAM6_MODEL(INTEL_FAM6_ICELAKE_X),     /* ICX143 */
-        INTEL_FAM6_MODEL(INTEL_FAM6_LUNARLAKE_M),   /* LNL030 */
+        /*
+         * APL30: One use of the MONITOR/MWAIT instruction pair is to allow a
+         * logical processor to wait in a sleep state until a store to the
+         * armed address range occurs. Due to this erratum, stores to the
+         * armed address range may not trigger MWAIT to resume execution.
+         */
+        X86_MATCH_VFM(INTEL_ATOM_GOLDMONT, NULL),
+
+        /*
+         * ICX143: Under complex microarchitectural conditions, a monitor that
+         * is armed with the MWAIT instruction may not be triggered, leading
+         * to a processor hang.
+         */
+        X86_MATCH_VFM(INTEL_ICELAKE_X, NULL),
+
+        /*
+         * LNL030: P-cores may not exit power state Core C6 on monitor hit.
+         */
+        X86_MATCH_VFM(INTEL_LUNARLAKE_M, NULL),
         { }
     };
-#undef INTEL_FAM6_MODEL
 
     if ( boot_cpu_has(X86_FEATURE_MONITOR) && x86_match_cpu(models) )
     {
@@ -450,15 +436,15 @@ static void __init probe_mwait_errata(void)
  */
 static void Intel_errata_workarounds(struct cpuinfo_x86 *c)
 {
-	unsigned long lo, hi;
+	uint64_t val;
 
 	if ((c->x86 == 15) && (c->x86_model == 1) && (c->x86_mask == 1)) {
-		rdmsr (MSR_IA32_MISC_ENABLE, lo, hi);
-		if ((lo & (1<<9)) == 0) {
+		val = rdmsr(MSR_IA32_MISC_ENABLE);
+		if ((val & (1 << 9)) == 0) {
 			printk (KERN_INFO "CPU: C0 stepping P4 Xeon detected.\n");
 			printk (KERN_INFO "CPU: Disabling hardware prefetching (Errata 037)\n");
-			lo |= (1<<9);	/* Disable hw prefetching */
-			wrmsr (MSR_IA32_MISC_ENABLE, lo, hi);
+			val |= (1 << 9); /* Disable hw prefetching */
+			wrmsrns(MSR_IA32_MISC_ENABLE, val);
 		}
 	}
 
@@ -540,7 +526,7 @@ static void intel_log_freq(const struct cpuinfo_x86 *c)
             { 26667, 13333, 20000, 16667, 33333, 10000, 40000 };
 
     case 6:
-        if ( rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msrval) )
+        if ( rdmsr_safe(MSR_INTEL_PLATFORM_INFO, &msrval) )
             return;
         max_ratio = msrval >> 8;
         min_ratio = msrval >> 40;
@@ -560,7 +546,7 @@ static void intel_log_freq(const struct cpuinfo_x86 *c)
              */
             if ( min_ratio > max_ratio )
                 SWAP(min_ratio, max_ratio);
-            if ( rdmsr_safe(MSR_FSB_FREQ, msrval) ||
+            if ( rdmsr_safe(MSR_FSB_FREQ, &msrval) ||
                  (msrval &= 7) >= ARRAY_SIZE(core_factors) )
                 return;
             factor = core_factors[msrval];
@@ -578,7 +564,7 @@ static void intel_log_freq(const struct cpuinfo_x86 *c)
         break;
 
     case 0xf:
-        if ( rdmsr_safe(MSR_IA32_EBC_FREQUENCY_ID, msrval) )
+        if ( rdmsr_safe(MSR_IA32_EBC_FREQUENCY_ID, &msrval) )
             return;
         max_ratio = msrval >> 24;
         min_ratio = 0;
@@ -651,18 +637,13 @@ static void cf_check init_intel(struct cpuinfo_x86 *c)
 	/* Work around errata */
 	Intel_errata_workarounds(c);
 
-	if ((c->x86 == 0xf && c->x86_model >= 0x03) ||
-		(c->x86 == 0x6 && c->x86_model >= 0x0e))
-		__set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 	if (cpu_has(c, X86_FEATURE_ITSC)) {
 		__set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 		__set_bit(X86_FEATURE_NONSTOP_TSC, c->x86_capability);
 		__set_bit(X86_FEATURE_TSC_RELIABLE, c->x86_capability);
-	}
-	if ( opt_arat &&
-	     ( c->cpuid_level >= 0x00000006 ) &&
-	     ( cpuid_eax(0x00000006) & (1u<<2) ) )
-		__set_bit(X86_FEATURE_ARAT, c->x86_capability);
+	} else if ((c->vfm >= INTEL_P4_PRESCOTT && c->vfm <= INTEL_P4_CEDARMILL) ||
+	           (c->vfm >= INTEL_CORE_YONAH && c->vfm <= INTEL_IVYBRIDGE))
+		__set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 
 	if ((opt_cpu_info && !(c->apicid & (c->x86_num_siblings - 1))) ||
 	    c == &boot_cpu_data )
@@ -676,12 +657,20 @@ static void cf_check init_intel(struct cpuinfo_x86 *c)
 	 * latter is not impacted.  Hide CLWB to cause Xen to fall back to
 	 * using CLFLUSHOPT instead.
 	 */
-	if (c == &boot_cpu_data &&
-	    c->x86 == 6 && c->x86_model == INTEL_FAM6_SKYLAKE_X)
+	if (c == &boot_cpu_data && c->vfm == INTEL_SKYLAKE_X)
 		setup_clear_cpu_cap(X86_FEATURE_CLWB);
+
+	if (c == &boot_cpu_data && cpu_has(c, X86_FEATURE_ERMS))
+		setup_force_cpu_cap(X86_FEATURE_XEN_REP_MOVSB);
 }
 
 const struct cpu_dev __initconst_cf_clobber intel_cpu_dev = {
 	.c_early_init	= early_init_intel,
 	.c_init		= init_intel,
 };
+
+void __init intel_init_arat(void)
+{
+    if ( opt_arat && cpu_has_arat )
+        setup_force_cpu_cap(X86_FEATURE_XEN_ARAT);
+}

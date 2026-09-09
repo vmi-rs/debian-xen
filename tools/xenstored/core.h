@@ -19,7 +19,6 @@
 #ifndef _XENSTORED_CORE_H
 #define _XENSTORED_CORE_H
 
-#include <xenctrl.h>
 #include <xengnttab.h>
 
 #include <sys/types.h>
@@ -30,6 +29,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#include <xenevtchn.h>
 
 #include "xenstore_lib.h"
 #include "xenstore_state.h"
@@ -44,6 +44,11 @@
 #ifndef __MINIOS__
 #define NO_LIVE_UPDATE
 #endif
+#endif
+
+/* Live update in stubdom case needs kexec support. */
+#if defined(__MINIOS__) && !defined(CONFIG_KEXEC)
+#define NO_LIVE_UPDATE
 #endif
 
 /* DEFAULT_BUFFER_SIZE should be large enough for each errno string. */
@@ -360,7 +365,7 @@ do {						\
 		trace("tdb: " __VA_ARGS__);	\
 } while (0)
 
-extern int dom0_domid;
+extern int store_domid;
 extern int dom0_event;
 extern int priv_domid;
 extern domid_t stub_domid;
@@ -377,11 +382,9 @@ uint64_t get_now_msec(void);
 void *xenbus_map(void);
 void unmap_xenbus(void *interface);
 
-static inline int xenbus_master_domid(void) { return dom0_domid; }
-
 static inline bool domid_is_unprivileged(unsigned int domid)
 {
-	return domid != dom0_domid && domid != priv_domid;
+	return domid != priv_domid;
 }
 
 static inline bool domain_is_unprivileged(const struct connection *conn)
@@ -389,8 +392,10 @@ static inline bool domain_is_unprivileged(const struct connection *conn)
 	return conn && domid_is_unprivileged(conn->id);
 }
 
+extern xenevtchn_handle *xce_handle; /* in domain.c */
+
 /* Return the event channel used by xenbus. */
-evtchn_port_t get_xenbus_evtchn(void);
+evtchn_port_t get_domain_evtchn(unsigned int domid);
 void early_init(bool live_update, bool dofork, const char *pidfile);
 void late_init(bool live_update);
 
@@ -401,8 +406,11 @@ void handle_special_fds(void);
 int get_socket_fd(void);
 void set_socket_fd(int fd);
 
+xenevtchn_handle *evtchn_fdopen(int fd);
+int evtchn_rebind(int port);
+
 #ifdef __MINIOS__
-void mount_9pfs(void);
+void mount_9pfs(bool live_update);
 #endif
 
 const char *xenstore_rundir(void);

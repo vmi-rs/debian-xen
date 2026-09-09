@@ -19,8 +19,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <asm/alternative.h>
-
 /*
  * dcache_line_size - get the minimum D-cache line size from the CTR register.
  */
@@ -52,3 +50,24 @@ FUNC(__flush_dcache_area)
 	dsb	sy
 	ret
 END(__flush_dcache_area)
+
+/*
+ *	__invalidate_dcache_area(addr, size)
+ *
+ *	Ensure that the data held in the cache for the buffer is invalidated.
+ *
+ *	- addr    - start address of the buffer
+ *	- size    - size of the buffer
+ */
+FUNC(__invalidate_dcache_area)
+	dcache_line_size x2, x3
+	add	x1, x0, x1
+	sub	x3, x2, #1
+	bic	x0, x0, x3
+1:	dc	ivac, x0			/* invalidate D line / unified line */
+	add	x0, x0, x2
+	cmp	x0, x1
+	b.lo	1b
+	dsb	sy
+	ret
+END(__invalidate_dcache_area)

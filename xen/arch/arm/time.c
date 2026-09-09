@@ -8,26 +8,26 @@
  * Copyright (c) 2011 Citrix Systems.
  */
 
+#include <xen/acpi.h>
 #include <xen/console.h>
+#include <xen/cpu.h>
+#include <xen/delay.h>
 #include <xen/device_tree.h>
+#include <xen/event.h>
 #include <xen/init.h>
 #include <xen/irq.h>
-#include <xen/lib.h>
 #include <xen/mm.h>
-#include <xen/softirq.h>
-#include <xen/sched.h>
-#include <xen/time.h>
-#include <xen/delay.h>
-#include <xen/sched.h>
-#include <xen/event.h>
-#include <xen/acpi.h>
-#include <xen/cpu.h>
+#include <xen/muldiv64.h>
 #include <xen/notifier.h>
-#include <asm/system.h>
-#include <asm/time.h>
-#include <asm/vgic.h>
+#include <xen/sched.h>
+#include <xen/sched.h>
+#include <xen/softirq.h>
+#include <xen/time.h>
+
 #include <asm/cpufeature.h>
 #include <asm/platform.h>
+#include <asm/system.h>
+#include <asm/vgic.h>
 
 uint64_t __read_mostly boot_count;
 
@@ -44,16 +44,6 @@ unsigned int timer_get_irq(enum timer_ppi ppi)
     ASSERT(ppi >= TIMER_PHYS_SECURE_PPI && ppi < MAX_TIMER_PPI);
 
     return timer_irq[ppi];
-}
-
-/*static inline*/ s_time_t ticks_to_ns(uint64_t ticks)
-{
-    return muldiv64(ticks, SECONDS(1), 1000 * cpu_khz);
-}
-
-/*static inline*/ uint64_t ns_to_ticks(s_time_t ns)
-{
-    return muldiv64(ns, 1000 * cpu_khz, SECONDS(1));
 }
 
 static __initdata struct dt_device_node *timer;
@@ -303,9 +293,15 @@ static void check_timer_irq_cfg(unsigned int irq, const char *which)
            "WARNING: %s-timer IRQ%u is not level triggered.\n", which, irq);
 }
 
+static DEFINE_PER_CPU_READ_MOSTLY(struct irqaction, irq_hyp);
+static DEFINE_PER_CPU_READ_MOSTLY(struct irqaction, irq_virt);
+
 /* Set up the timer interrupt on this CPU */
 void init_timer_interrupt(void)
 {
+    struct irqaction *hyp_action = &this_cpu(irq_hyp);
+    struct irqaction *virt_action = &this_cpu(irq_virt);
+
     /* Sensible defaults */
     WRITE_SYSREG64(0, CNTVOFF_EL2);     /* No VM-specific offset */
     /* Do not let the VMs program the physical timer, only read the physical counter */
@@ -314,10 +310,17 @@ void init_timer_interrupt(void)
     WRITE_SYSREG(0, CNTHP_CTL_EL2);   /* Hypervisor's timer disabled */
     isb();
 
-    request_irq(timer_irq[TIMER_HYP_PPI], 0, htimer_interrupt,
-                "hyptimer", NULL);
-    request_irq(timer_irq[TIMER_VIRT_PPI], 0, vtimer_interrupt,
-                   "virtimer", NULL);
+    hyp_action->name = "hyptimer";
+    hyp_action->handler = htimer_interrupt;
+    hyp_action->dev_id = NULL;
+    hyp_action->free_on_release = 0;
+    setup_irq(timer_irq[TIMER_HYP_PPI], 0, hyp_action);
+
+    virt_action->name = "virtimer";
+    virt_action->handler = vtimer_interrupt;
+    virt_action->dev_id = NULL;
+    virt_action->free_on_release = 0;
+    setup_irq(timer_irq[TIMER_VIRT_PPI], 0, virt_action);
 
     check_timer_irq_cfg(timer_irq[TIMER_HYP_PPI], "hypervisor");
     check_timer_irq_cfg(timer_irq[TIMER_VIRT_PPI], "virtual");

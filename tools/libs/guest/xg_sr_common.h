@@ -5,8 +5,6 @@
 
 #include "xg_private.h"
 #include "xg_save_restore.h"
-#include "xc_bitops.h"
-
 #include "xg_sr_stream_format.h"
 
 /* String representation of Domain Header types. */
@@ -297,6 +295,9 @@ struct xc_sr_context
 
             /* Sender has invoked verify mode on the stream. */
             bool verify;
+
+            /* memflags to pass to xc_domain_populate_physmap{_exact}(). */
+            unsigned int memflags;
         } restore;
     };
 

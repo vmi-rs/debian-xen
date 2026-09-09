@@ -24,7 +24,7 @@
 #error "Unsupported architecture"
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /* Guest handles for primitive C types. */
 DEFINE_XEN_GUEST_HANDLE(char);
 __DEFINE_XEN_GUEST_HANDLE(uchar, unsigned char);
@@ -106,7 +106,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
 #define __HYPERVISOR_nmi_op               28
 #define __HYPERVISOR_sched_op             29
 #define __HYPERVISOR_callback_op          30
-#define __HYPERVISOR_xenoprof_op          31
+#define __HYPERVISOR_xenoprof_op          31 /* Dropped in Xen 4.22 */
 #define __HYPERVISOR_event_channel_op     32
 #define __HYPERVISOR_physdev_op           33
 #define __HYPERVISOR_hvm_op               34
@@ -159,25 +159,34 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
  *
  * Virtual interrupts that a guest OS may receive from Xen.
  *
- * In the side comments, 'V.' denotes a per-VCPU VIRQ while 'G.' denotes a
- * global VIRQ. The former can be bound once per VCPU and cannot be re-bound.
- * The latter can be allocated only once per guest: they must initially be
- * allocated to VCPU0 but can subsequently be re-bound.
+ * There are three types:
+ *
+ * 1. (V) Per-vcpu:
+ *    These can be bound once per vCPU, each using a different evtchn port.
+ *    An evtchn for one vCPU cannot be rebound to a different vCPU.
+ *
+ * 2. (D) Per-domain:
+ *    These can be bound once per domain.  They must be bound on vCPU 0 first,
+ *    but can be rebound to other vCPUs afterwards.
+ *
+ * 3. (G) Global:
+ *    Like per-domain, but can only be bound to a single domain at a time.
+ *    The owning domain must unbind before a new domain can bind.
  */
 /* ` enum virq { */
 #define VIRQ_TIMER      0  /* V. Timebase update, and/or requested timeout.  */
 #define VIRQ_DEBUG      1  /* V. Request guest to dump debug info.           */
-#define VIRQ_CONSOLE    2  /* G. (DOM0) Bytes received on emergency console. */
-#define VIRQ_DOM_EXC    3  /* G. (DOM0) Exceptional event for some domain.   */
-#define VIRQ_TBUF       4  /* G. (DOM0) Trace buffer has records available.  */
-#define VIRQ_DEBUGGER   6  /* G. (DOM0) A domain has paused for debugging.   */
+#define VIRQ_CONSOLE    2  /* G. Bytes received on emergency console.        */
+#define VIRQ_DOM_EXC    3  /* G. Exceptional event for some domain.          */
+#define VIRQ_TBUF       4  /* G. Trace buffer has records available.         */
+#define VIRQ_DEBUGGER   6  /* G. A domain has paused for debugging.          */
 #define VIRQ_XENOPROF   7  /* V. XenOprofile interrupt: new sample available */
-#define VIRQ_CON_RING   8  /* G. (DOM0) Bytes received on console            */
-#define VIRQ_PCPU_STATE 9  /* G. (DOM0) PCPU state changed                   */
-#define VIRQ_MEM_EVENT  10 /* G. (DOM0) A memory event has occurred          */
-#define VIRQ_ARGO       11 /* G. Argo interdomain message notification       */
-#define VIRQ_ENOMEM     12 /* G. (DOM0) Low on heap memory       */
-#define VIRQ_XENPMU     13 /* V.  PMC interrupt                              */
+#define VIRQ_CON_RING   8  /* G. Bytes received on console                   */
+#define VIRQ_PCPU_STATE 9  /* G. PCPU state changed                          */
+#define VIRQ_MEM_EVENT  10 /* G. A memory event has occurred                 */
+#define VIRQ_ARGO       11 /* D. Argo interdomain message notification       */
+#define VIRQ_ENOMEM     12 /* G. Low on heap memory                          */
+#define VIRQ_XENPMU     13 /* V. PMC interrupt                               */
 
 /* Architecture-specific VIRQ definitions. */
 #define VIRQ_ARCH_0    16
@@ -428,7 +437,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
 #define MMUEXT_UNMARK_SUPER     20
 /* ` } */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 struct mmuext_op {
     unsigned int cmd; /* => enum mmuext_cmd */
     union {
@@ -599,13 +608,20 @@ DEFINE_XEN_GUEST_HANDLE(mmuext_op_t);
 /* DOMID_INVALID is used to identify pages with unknown owner. */
 #define DOMID_INVALID        xen_mk_uint(0x7FF4)
 
+/*
+ * DOMID_ANY is used to signal no specific domain ID requested.
+ * Handler should pick a valid ID, or handle it as a wildcard value
+ * depending on the context.
+ */
+#define DOMID_ANY            xen_mk_uint(0x7FF5)
+
 /* Idle domain. */
 #define DOMID_IDLE           xen_mk_uint(0x7FFF)
 
 /* Mask for valid domain id values */
 #define DOMID_MASK           xen_mk_uint(0x7FFF)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 typedef uint16_t domid_t;
 
@@ -631,7 +647,11 @@ DEFINE_XEN_GUEST_HANDLE(mmu_update_t);
  */
 struct multicall_entry {
     xen_ulong_t op, result;
+#ifndef __XEN__
     xen_ulong_t args[6];
+#else /* Only 5 arguments are supported in reality. */
+    xen_ulong_t args[5], unused;
+#endif
 };
 typedef struct multicall_entry multicall_entry_t;
 DEFINE_XEN_GUEST_HANDLE(multicall_entry_t);
@@ -998,7 +1018,7 @@ typedef struct {
     XEN_DEFINE_UUID_(a, b, c, d, e1, e2, e3, e4, e5, e6)
 #endif /* __STDC_VERSION__ / __GNUC__ */
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 /* Default definitions for macros used by domctl/sysctl. */
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
@@ -1013,7 +1033,7 @@ typedef struct {
 #define XEN_GUEST_HANDLE_64(name) XEN_GUEST_HANDLE(name)
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 struct xenctl_bitmap {
     XEN_GUEST_HANDLE_64(uint8) bitmap;
     uint32_t nr_bits;

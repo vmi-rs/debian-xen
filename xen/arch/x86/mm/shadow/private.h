@@ -363,11 +363,11 @@ bool  shadow_hash_delete(struct domain *d,
                          unsigned long n, unsigned int t, mfn_t smfn);
 
 /* shadow promotion */
-void shadow_promote(struct domain *d, mfn_t gmfn, u32 type);
-void shadow_demote(struct domain *d, mfn_t gmfn, u32 type);
+void shadow_promote(struct domain *d, mfn_t gmfn, unsigned int type);
+void shadow_demote(struct domain *d, mfn_t gmfn, unsigned int type);
 
 /* Shadow page allocation functions */
-bool __must_check shadow_prealloc(struct domain *d, unsigned int shadow_type,
+bool __must_check shadow_prealloc(struct domain *d, unsigned int type,
                                   unsigned int count);
 mfn_t shadow_alloc(struct domain *d,
                     u32 shadow_type,
@@ -391,15 +391,15 @@ int sh_validate_guest_entry(struct vcpu *v, mfn_t gmfn, void *entry, u32 size);
  * Returns non-zero if we need to flush TLBs.
  * level and fault_addr desribe how we found this to be a pagetable;
  * level==0 means we have some other reason for revoking write access. */
-extern int sh_remove_write_access(struct domain *d, mfn_t readonly_mfn,
+extern int sh_remove_write_access(struct domain *d, mfn_t gmfn,
                                   unsigned int level,
                                   unsigned long fault_addr);
 #else
-static inline int sh_remove_write_access(struct domain *d, mfn_t readonly_mfn,
+static inline int sh_remove_write_access(struct domain *d, mfn_t gmfn,
                                          unsigned int level,
                                          unsigned long fault_addr)
 {
-    ASSERT(!shadow_mode_refcounts(d));
+    ASSERT(!paging_mode_refcounts(d));
     return 0;
 }
 #endif
@@ -416,7 +416,15 @@ mfn_t sh_make_monitor_table(const struct vcpu *v, unsigned int shadow_levels);
 void sh_destroy_monitor_table(const struct vcpu *v, mfn_t mmfn,
                               unsigned int shadow_levels);
 
-/* VRAM dirty tracking helpers. */
+/* VRAM dirty tracking support */
+struct sh_dirty_vram {
+    unsigned long begin_pfn;
+    unsigned long end_pfn;
+    paddr_t *sl1ma;
+    uint8_t *dirty_bitmap;
+    s_time_t last_dirty;
+};
+
 void shadow_vram_get_mfn(mfn_t mfn, unsigned int l1f,
                          mfn_t sl1mfn, const void *sl1e,
                          const struct domain *d);
@@ -431,6 +439,7 @@ int sh_unsync(struct vcpu *v, mfn_t gmfn);
 /* Pull an out-of-sync page back into sync. */
 void sh_resync(struct domain *d, mfn_t gmfn);
 
+void oos_hash_remove(struct domain *d, mfn_t gmfn);
 void oos_fixup_add(struct domain *d, mfn_t gmfn, mfn_t smfn, unsigned long off);
 
 /* Pull all out-of-sync shadows back into sync.  If skip != 0, we try
@@ -456,6 +465,7 @@ shadow_sync_other_vcpus(struct vcpu *v)
     sh_resync_all(v, 1 /* skip */, 0 /* this */, 1 /* others */);
 }
 
+void sh_oos_audit(struct domain *d);
 void oos_audit_hash_is_present(struct domain *d, mfn_t gmfn);
 mfn_t oos_snapshot_lookup(struct domain *d, mfn_t gmfn);
 
@@ -513,8 +523,8 @@ sh_mfn_is_a_page_table(mfn_t gmfn)
 
     page = mfn_to_page(gmfn);
     owner = page_get_owner(page);
-    if ( owner && shadow_mode_refcounts(owner)
-         && (page->count_info & PGC_shadowed_pt) )
+    if ( owner && paging_mode_refcounts(owner) &&
+         (page->count_info & PGC_shadowed_pt) )
         return 1;
 
     type_info = page->u.inuse.type_info & PGT_type_mask;
@@ -628,9 +638,9 @@ prev_pinned_shadow(struct page_info *page,
 }
 
 #define foreach_pinned_shadow(dom, pos, tmp)                    \
-    for ( pos = prev_pinned_shadow(NULL, (dom));                \
-          pos ? (tmp = prev_pinned_shadow(pos, (dom)), 1) : 0;  \
-          pos = tmp )
+    for ( (pos) = prev_pinned_shadow(NULL, dom);                \
+          (pos) ? ((tmp) = prev_pinned_shadow(pos, dom), 1) : 0;\
+          (pos) = (tmp) )
 
 /*
  * Pin a shadow page: take an extra refcount, set the pin bit,

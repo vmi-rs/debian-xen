@@ -6,6 +6,8 @@ cmd_objcopy_o_ihex = $(OBJCOPY) -I ihex -O binary $< $@
 $(obj)/%.o: $(src)/%.ihex FORCE
 	$(call if_changed,objcopy_o_ihex)
 
+# buildid.ihex is an empty COFF object.  It exists for the side effect it has
+# when linking into xen.efi, causing --build-id to attach a .buildid section.
 $(obj)/boot.init.o: $(obj)/buildid.o
 
 $(call cc-option-add,cflags-stack-boundary,CC,-mpreferred-stack-boundary=4)
@@ -15,5 +17,5 @@ obj-y := common-stub.o stub.o
 obj-$(XEN_BUILD_EFI) := $(filter-out %.init.o,$(EFIOBJ-y))
 obj-bin-$(XEN_BUILD_EFI) := $(filter %.init.o,$(EFIOBJ-y))
 obj-bin-y += mbi2.init.o
-extra-$(XEN_BUILD_EFI) += buildid.o relocs-dummy.o
+extra-$(XEN_BUILD_EFI) += buildid.o relocs-dummy.o relocs-empty.o
 nocov-$(XEN_BUILD_EFI) += stub.o

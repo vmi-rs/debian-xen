@@ -12,6 +12,8 @@
 #include <xen/tasklet.h>
 #include <asm/hvm/vpt.h>
 
+#include <public/hvm/save.h>
+
 #define vcpu_vlapic(x)   (&(x)->arch.hvm.vlapic)
 #define vlapic_vcpu(x)   (container_of((x), struct vcpu, arch.hvm.vlapic))
 #define const_vlapic_vcpu(x) (container_of((x), const struct vcpu, \
@@ -69,7 +71,6 @@ struct vlapic {
         bool                 hw, regs;
         uint32_t             id, ldr;
     }                        loaded;
-    spinlock_t               esr_lock;
     struct periodic_time     pt;
     s_time_t                 timer_last_update;
     struct page_info         *regs_page;

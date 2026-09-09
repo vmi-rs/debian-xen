@@ -2,23 +2,33 @@
 
 #include <xen/acpi.h>
 #include <xen/bug.h>
-#include <xen/bootfdt.h>
+#include <xen/bootinfo.h>
 #include <xen/compile.h>
+#include <xen/console.h>
 #include <xen/device_tree.h>
 #include <xen/init.h>
+#include <xen/irq.h>
 #include <xen/mm.h>
+#include <xen/serial.h>
 #include <xen/shutdown.h>
+#include <xen/smp.h>
+#include <xen/tasklet.h>
+#include <xen/timer.h>
 #include <xen/vmap.h>
 #include <xen/xvmalloc.h>
 
 #include <public/version.h>
 
+#include <asm/extable.h>
+#include <asm/cpufeature.h>
 #include <asm/early_printk.h>
 #include <asm/fixmap.h>
+#include <asm/intc.h>
+#include <asm/p2m.h>
 #include <asm/sbi.h>
 #include <asm/setup.h>
-#include <asm/smp.h>
 #include <asm/traps.h>
+#include <asm/vsbi.h>
 
 /* Xen stack for bringing up the first CPU. */
 unsigned char __initdata cpu0_boot_stack[STACK_SIZE]
@@ -70,7 +80,9 @@ void __init noreturn start_xen(unsigned long bootcpu_id,
 
     remove_identity_mapping();
 
-    set_processor_id(0);
+    smp_prepare_boot_cpu();
+
+    sort_exception_tables();
 
     set_cpuid_to_hartid(0, bootcpu_id);
 
@@ -103,6 +115,8 @@ void __init noreturn start_xen(unsigned long bootcpu_id,
 
     end_boot_allocator();
 
+    check_vsbi_ext_ranges();
+
     /*
      * The memory subsystem has been initialized, we can now switch from
      * early_boot -> boot.
@@ -122,6 +136,31 @@ void __init noreturn start_xen(unsigned long bootcpu_id,
         device_tree_flattened = NULL;
         panic("Booting using ACPI isn't supported\n");
     }
+
+    tasklet_subsys_init();
+
+    init_IRQ();
+
+    riscv_fill_hwcap();
+
+    init_csr_masks();
+
+    preinit_xen_time();
+
+    intc_preinit();
+
+    uart_init();
+    console_init_preirq();
+
+    intc_init();
+
+    timer_init();
+
+    local_irq_enable();
+
+    console_init_postirq();
+
+    guest_mm_init();
 
     printk("All set up\n");
 

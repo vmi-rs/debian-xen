@@ -79,7 +79,7 @@
 
 #define ARM_NCAPS           18
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -102,10 +102,10 @@ static inline bool cpus_have_cap(unsigned int num)
 #define cpus_have_const_cap(num) ({                 \
         register_t __ret;                           \
                                                     \
-        asm volatile (ALTERNATIVE("mov %0, #0",     \
-                                  "mov %0, #1",     \
-                                  num)              \
-                      : "=r" (__ret));              \
+        asm_inline volatile (                       \
+            ALTERNATIVE("mov %0, #0",               \
+                        "mov %0, #1", num)          \
+            : "=r" (__ret) );                       \
                                                     \
         unlikely(__ret);                            \
         })
@@ -248,6 +248,12 @@ struct cpuinfo_arm {
             unsigned long tgranule_16K:4;
             unsigned long tgranule_64K:4;
             unsigned long tgranule_4K:4;
+#ifdef CONFIG_MPU
+            unsigned long __res0:16;
+            unsigned long msa:4;
+            unsigned long msa_frac:4;
+            unsigned long __res1:8;
+#else
             unsigned long tgranule_16k_2:4;
             unsigned long tgranule_64k_2:4;
             unsigned long tgranule_4k_2:4;
@@ -255,6 +261,7 @@ struct cpuinfo_arm {
             unsigned long __res0:8;
             unsigned long fgt:4;
             unsigned long ecv:4;
+#endif
 
             /* MMFR1 */
             unsigned long hafdbs:4;
@@ -267,13 +274,13 @@ struct cpuinfo_arm {
             unsigned long xnx:4;
             unsigned long twed:4;
             unsigned long ets:4;
-            unsigned long __res1:4;
+            unsigned long __res2:4;
             unsigned long afp:4;
-            unsigned long __res2:12;
+            unsigned long __res3:12;
             unsigned long ecbhb:4;
 
             /* MMFR2 */
-            unsigned long __res3:64;
+            unsigned long __res4:64;
         };
     } mm64;
 
@@ -461,7 +468,7 @@ extern struct cpuinfo_arm cpu_data[];
 
 extern struct cpuinfo_arm domain_cpuinfo;
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif
 /*

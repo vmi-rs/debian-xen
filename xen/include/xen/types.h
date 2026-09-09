@@ -17,6 +17,7 @@ typedef __SIZE_TYPE__ size_t;
 typedef signed long ssize_t;
 
 typedef __PTRDIFF_TYPE__ ptrdiff_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
 
 /*
  * Users of this macro are expected to pass a positive value.
@@ -43,6 +44,7 @@ typedef __PTRDIFF_TYPE__ ptrdiff_t;
 #define UINT8_MAX       (255)
 #define UINT16_MAX      (65535)
 #define UINT32_MAX      (4294967295U)
+#define UINT64_MAX      (18446744073709551615ULL)
 
 #define INT_MAX         ((int)(~0U>>1))
 #define INT_MIN         (-INT_MAX - 1)
@@ -57,8 +59,6 @@ typedef uint32_t __le32;
 typedef uint32_t __be32;
 typedef uint64_t __le64;
 typedef uint64_t __be64;
-
-typedef unsigned int __attribute__((__mode__(__pointer__))) uintptr_t;
 
 #define test_and_set_bool(b)   xchg(&(b), true)
 #define test_and_clear_bool(b) xchg(&(b), false)

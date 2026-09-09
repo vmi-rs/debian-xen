@@ -648,6 +648,9 @@ int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
         .u.mem_sharing.p2mt = p2m_ram_shared,
     };
 
+    if ( !vm_event_is_enabled(current) )
+        return -EOPNOTSUPP;
+
     if ( (rc = __vm_event_claim_slot(
               d, d->vm_event_share, allow_sleep)) < 0 )
         return rc;
@@ -901,6 +904,7 @@ static int nominate_page(struct domain *d, gfn_t gfn,
     if ( !page || is_special_page(page) )
         goto out;
 
+#ifdef CONFIG_ALTP2M
     /* Check if there are mem_access/remapped altp2m entries for this page */
     if ( altp2m_active(d) )
     {
@@ -912,7 +916,7 @@ static int nominate_page(struct domain *d, gfn_t gfn,
 
         altp2m_list_lock(d);
 
-        for ( i = 0; i < MAX_ALTP2M; i++ )
+        for ( i = 0; i < d->nr_altp2m; i++ )
         {
             ap2m = d->arch.altp2m_p2m[i];
             if ( !ap2m )
@@ -929,6 +933,7 @@ static int nominate_page(struct domain *d, gfn_t gfn,
 
         altp2m_list_unlock(d);
     }
+#endif /* CONFIG_ALTP2M */
 
     /* Try to convert the mfn to the sharable type */
     ret = page_make_sharable(d, page, expected_refcnt, validate_only);
@@ -1886,7 +1891,9 @@ static int fork(struct domain *cd, struct domain *d)
         domain_pause(d);
         cd->max_pages = d->max_pages;
         *cd->arch.cpu_policy = *d->arch.cpu_policy;
+#ifdef CONFIG_VMTRACE
         cd->vmtrace_size = d->vmtrace_size;
+#endif
         cd->parent = d;
     }
 

@@ -15,14 +15,18 @@
  * Version 2.  See the file COPYING for more details.
  */
 
-#include <xen/types.h>
 #include <xen/domain_page.h>
 #include <xen/elfstructs.h>
 #include <xen/kexec.h>
+#include <xen/percpu.h>
+#include <xen/types.h>
+
 #include <asm/fixmap.h>
 #include <asm/hpet.h>
-#include <asm/page.h>
+#include <asm/idt.h>
 #include <asm/machine_kexec.h>
+#include <asm/msr.h>
+#include <asm/page.h>
 
 /*
  * Add a mapping for a page to the page tables used during kexec.
@@ -156,21 +160,24 @@ void machine_kexec(struct kexec_image *image)
      */
     local_irq_disable();
 
-    /* Now regular interrupts are disabled, we need to reduce the impact
-     * of interrupts not disabled by 'cli'.
-     *
-     * The NMI handlers have already been set up nmi_shootdown_cpus().  All
-     * pcpus other than us have the nmi_crash handler, while we have the nop
-     * handler.
-     *
+    /*
      * The MCE handlers touch extensive areas of Xen code and data.  At this
-     * point, there is nothing we can usefully do, so set the nop handler.
+     * point, there is nothing we can usefully do, so set the NOP handler even
+     * for parked CPUs.
      */
     for ( i = 0; i < nr_cpu_ids; i++ )
     {
-        if ( idt_tables[i] == NULL )
+        idt_entry_t *idt;
+
+        if ( __per_cpu_offset[i] == INVALID_PERCPU_AREA )
             continue;
-        _update_gate_addr_lower(&idt_tables[i][X86_EXC_MC], &trap_nop);
+
+        idt = per_cpu(idt, i);
+
+        if ( !idt )
+            continue;
+
+        _update_gate_addr_lower(&idt[X86_EXC_MC], &trap_nop);
     }
 
     /* Reset CPUID masking and faulting to the host's default. */

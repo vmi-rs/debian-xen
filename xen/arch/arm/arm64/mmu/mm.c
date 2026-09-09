@@ -6,8 +6,6 @@
 #include <xen/pfn.h>
 
 #include <asm/setup.h>
-#include <asm/static-memory.h>
-#include <asm/static-shmem.h>
 
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef virt_to_mfn
@@ -224,6 +222,9 @@ static void __init setup_directmap_mappings(unsigned long base_mfn,
          */
         directmap_virt_start = DIRECTMAP_VIRT_START +
             (base_mfn - mfn_gb) * PAGE_SIZE;
+
+        if ( (max_pdx - directmap_base_pdx) > (DIRECTMAP_SIZE >> PAGE_SHIFT) )
+            panic("Direct map is too small\n");
     }
 
     if ( base_mfn < mfn_x(directmap_mfn_start) )
@@ -237,33 +238,18 @@ static void __init setup_directmap_mappings(unsigned long base_mfn,
         panic("Unable to setup the directmap mappings.\n");
 }
 
-void __init setup_mm(void)
+void __init setup_mm_helper(void)
 {
     const struct membanks *banks = bootinfo_get_mem();
     paddr_t ram_start = INVALID_PADDR;
     paddr_t ram_end = 0;
-    paddr_t ram_size = 0;
     unsigned int i;
-
-    init_pdx();
-
-    /*
-     * We need some memory to allocate the page-tables used for the directmap
-     * mappings. But some regions may contain memory already allocated
-     * for other uses (e.g. modules, reserved-memory...).
-     *
-     * For simplicity, add all the free regions in the boot allocator.
-     */
-    populate_boot_allocator();
-
-    total_pages = 0;
 
     for ( i = 0; i < banks->nr_banks; i++ )
     {
         const struct membank *bank = &banks->bank[i];
         paddr_t bank_end = bank->start + bank->size;
 
-        ram_size = ram_size + bank->size;
         ram_start = min(ram_start, bank->start);
         ram_end = max(ram_end, bank_end);
 
@@ -271,17 +257,9 @@ void __init setup_mm(void)
                                  PFN_DOWN(bank->size));
     }
 
-    total_pages += ram_size >> PAGE_SHIFT;
-
     directmap_virt_end = XENHEAP_VIRT_START + ram_end - ram_start;
     directmap_mfn_start = maddr_to_mfn(ram_start);
     directmap_mfn_end = maddr_to_mfn(ram_end);
-
-    setup_frametable_mappings(ram_start, ram_end);
-    max_page = PFN_DOWN(ram_end);
-
-    init_staticmem_pages();
-    init_sharedmem_pages();
 }
 
 /*

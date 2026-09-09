@@ -569,8 +569,7 @@ static int __must_check iommu_flush_context_device(struct vtd_iommu *iommu,
 /* return value determine if we need a write buffer flush */
 int cf_check vtd_flush_iotlb_reg(
     struct vtd_iommu *iommu, uint16_t did, uint64_t addr,
-    unsigned int size_order, uint64_t type, bool flush_non_present_entry,
-    bool flush_dev_iotlb)
+    unsigned int size_order, uint64_t type, bool flush_non_present_entry)
 {
     int tlb_offset = ecap_iotlb_offset(iommu->ecap);
     uint64_t val = type | DMA_TLB_IVT;
@@ -627,8 +626,7 @@ int cf_check vtd_flush_iotlb_reg(
 }
 
 static int __must_check iommu_flush_iotlb_global(struct vtd_iommu *iommu,
-                                                 bool flush_non_present_entry,
-                                                 bool flush_dev_iotlb)
+                                                 bool flush_non_present_entry)
 {
     int status;
 
@@ -636,7 +634,7 @@ static int __must_check iommu_flush_iotlb_global(struct vtd_iommu *iommu,
     vtd_ops_preamble_quirk(iommu);
 
     status = iommu->flush.iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH,
-                                flush_non_present_entry, flush_dev_iotlb);
+                                flush_non_present_entry);
 
     /* undo platform specific errata workarounds */
     vtd_ops_postamble_quirk(iommu);
@@ -645,8 +643,7 @@ static int __must_check iommu_flush_iotlb_global(struct vtd_iommu *iommu,
 }
 
 static int __must_check iommu_flush_iotlb_dsi(struct vtd_iommu *iommu, u16 did,
-                                              bool flush_non_present_entry,
-                                              bool flush_dev_iotlb)
+                                              bool flush_non_present_entry)
 {
     int status;
 
@@ -654,7 +651,7 @@ static int __must_check iommu_flush_iotlb_dsi(struct vtd_iommu *iommu, u16 did,
     vtd_ops_preamble_quirk(iommu);
 
     status = iommu->flush.iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH,
-                                flush_non_present_entry, flush_dev_iotlb);
+                                flush_non_present_entry);
 
     /* undo platform specific errata workarounds */
     vtd_ops_postamble_quirk(iommu);
@@ -664,26 +661,23 @@ static int __must_check iommu_flush_iotlb_dsi(struct vtd_iommu *iommu, u16 did,
 
 static int __must_check iommu_flush_iotlb_psi(struct vtd_iommu *iommu, u16 did,
                                               u64 addr, unsigned int order,
-                                              bool flush_non_present_entry,
-                                              bool flush_dev_iotlb)
+                                              bool flush_non_present_entry)
 {
     int status;
 
     /* Fallback to domain selective flush if no PSI support */
     if ( !cap_pgsel_inv(iommu->cap) )
-        return iommu_flush_iotlb_dsi(iommu, did, flush_non_present_entry,
-                                     flush_dev_iotlb);
+        return iommu_flush_iotlb_dsi(iommu, did, flush_non_present_entry);
 
     /* Fallback to domain selective flush if size is too big */
     if ( order > cap_max_amask_val(iommu->cap) )
-        return iommu_flush_iotlb_dsi(iommu, did, flush_non_present_entry,
-                                     flush_dev_iotlb);
+        return iommu_flush_iotlb_dsi(iommu, did, flush_non_present_entry);
 
     /* apply platform specific errata workarounds */
     vtd_ops_preamble_quirk(iommu);
 
     status = iommu->flush.iotlb(iommu, did, addr, order, DMA_TLB_PSI_FLUSH,
-                                flush_non_present_entry, flush_dev_iotlb);
+                                flush_non_present_entry);
 
     /* undo platform specific errata workarounds */
     vtd_ops_postamble_quirk(iommu);
@@ -695,10 +689,10 @@ static int __must_check iommu_flush_all(void)
 {
     struct acpi_drhd_unit *drhd;
     struct vtd_iommu *iommu;
-    bool flush_dev_iotlb;
     int rc = 0;
 
-    flush_local(FLUSH_CACHE);
+    if ( iommu_non_coherent )
+        flush_local(FLUSH_CACHE_WRITEBACK);
 
     for_each_drhd_unit ( drhd )
     {
@@ -706,8 +700,7 @@ static int __must_check iommu_flush_all(void)
 
         iommu = drhd->iommu;
         context_rc = iommu_flush_context_global(iommu, 0);
-        flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
-        iotlb_rc = iommu_flush_iotlb_global(iommu, 0, flush_dev_iotlb);
+        iotlb_rc = iommu_flush_iotlb_global(iommu, 0);
 
         /*
          * The current logic for returns:
@@ -737,7 +730,6 @@ static int __must_check cf_check iommu_flush_iotlb(struct domain *d, dfn_t dfn,
     struct domain_iommu *hd = dom_iommu(d);
     struct acpi_drhd_unit *drhd;
     struct vtd_iommu *iommu;
-    bool flush_dev_iotlb;
     int iommu_domid;
     int ret = 0;
 
@@ -765,21 +757,18 @@ static int __must_check cf_check iommu_flush_iotlb(struct domain *d, dfn_t dfn,
         if ( !test_bit(iommu->index, hd->arch.vtd.iommu_bitmap) )
             continue;
 
-        flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
         iommu_domid = get_iommu_did(d->domain_id, iommu, !d->is_dying);
         if ( iommu_domid == -1 )
             continue;
 
         if ( !page_count || (page_count & (page_count - 1)) ||
              dfn_eq(dfn, INVALID_DFN) || !IS_ALIGNED(dfn_x(dfn), page_count) )
-            rc = iommu_flush_iotlb_dsi(iommu, iommu_domid,
-                                       0, flush_dev_iotlb);
+            rc = iommu_flush_iotlb_dsi(iommu, iommu_domid, 0);
         else
             rc = iommu_flush_iotlb_psi(iommu, iommu_domid,
                                        dfn_to_daddr(dfn),
                                        get_order_from_pages(page_count),
-                                       !(flush_flags & IOMMU_FLUSHF_modified),
-                                       flush_dev_iotlb);
+                                       !(flush_flags & IOMMU_FLUSHF_modified));
 
         if ( rc > 0 )
             iommu_flush_write_buffer(iommu);
@@ -1468,6 +1457,33 @@ static void __hwdom_init cf_check intel_iommu_hwdom_init(struct domain *d)
     }
 }
 
+static int ats_device(const struct pci_dev *pdev,
+                      const struct acpi_drhd_unit *drhd)
+{
+    unsigned int pos, expfl = 0;
+
+    if ( !ats_enabled || !iommu_qinval )
+        return 0;
+
+    if ( !ecap_queued_inval(drhd->iommu->ecap) ||
+         !ecap_dev_iotlb(drhd->iommu->ecap) )
+        return 0;
+
+    pos = pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_EXP);
+    if ( pos )
+        expfl = pci_conf_read16(pdev->sbdf, pos + PCI_EXP_FLAGS);
+
+    if ( MASK_EXTR(expfl, PCI_EXP_FLAGS_TYPE) != PCI_EXP_TYPE_RC_END &&
+         !acpi_find_matched_atsr_unit(pdev) )
+        return 0;
+
+    pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ATS);
+    if ( pos )
+        drhd->iommu->flush_dev_iotlb = true;
+
+    return pos;
+}
+
 /*
  * This function returns
  * - a negative errno value upon error,
@@ -1490,7 +1506,6 @@ int domain_context_mapping_one(
     uint16_t seg = iommu->drhd->segment, prev_did = 0;
     struct domain *prev_dom = NULL;
     int rc, ret;
-    bool flush_dev_iotlb;
 
     if ( QUARANTINE_SKIP(domain, pgd_maddr) )
         return 0;
@@ -1612,8 +1627,7 @@ int domain_context_mapping_one(
 
     rc = iommu_flush_context_device(iommu, prev_did, PCI_BDF(bus, devfn),
                                     DMA_CCMD_MASK_NOBIT, !prev_dom);
-    flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
-    ret = iommu_flush_iotlb_dsi(iommu, prev_did, !prev_dom, flush_dev_iotlb);
+    ret = iommu_flush_iotlb_dsi(iommu, prev_did, !prev_dom);
 
     /*
      * The current logic for returns:
@@ -1851,7 +1865,6 @@ int domain_context_unmap_one(
     struct context_entry *context, *context_entries;
     u64 maddr;
     int iommu_domid, rc, ret;
-    bool flush_dev_iotlb;
 
     ASSERT(pcidevs_locked());
     spin_lock(&iommu->lock);
@@ -1883,8 +1896,7 @@ int domain_context_unmap_one(
                                     PCI_BDF(bus, devfn),
                                     DMA_CCMD_MASK_NOBIT, 0);
 
-    flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
-    ret = iommu_flush_iotlb_dsi(iommu, iommu_domid, 0, flush_dev_iotlb);
+    ret = iommu_flush_iotlb_dsi(iommu, iommu_domid, 0);
 
     /*
      * The current logic for returns:
@@ -2296,7 +2308,7 @@ static bool __init vtd_ept_page_compatible(const struct vtd_iommu *iommu)
 
     /* EPT is not initialised yet, so we must check the capability in
      * the MSR explicitly rather than use cpu_has_vmx_ept_*() */
-    if ( rdmsr_safe(MSR_IA32_VMX_EPT_VPID_CAP, ept_cap) != 0 ) 
+    if ( rdmsr_safe(MSR_IA32_VMX_EPT_VPID_CAP, &ept_cap) != 0 )
         return false;
 
     return (ept_has_2mb(ept_cap) && opt_hap_2mb) <=

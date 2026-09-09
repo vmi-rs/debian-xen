@@ -30,9 +30,10 @@
 #include <xen/errno.h>
 #include <xen/param.h>
 #include <xen/sched.h>
-#include <acpi/cpufreq/cpufreq.h>
 
-struct acpi_cpufreq_data *cpufreq_drv_data[NR_CPUS];
+#include <asm/msr.h>
+
+#include <acpi/cpufreq/cpufreq.h>
 
 struct perf_pair {
     union {
@@ -77,7 +78,7 @@ unsigned int get_measured_perf(unsigned int cpu, unsigned int flag)
         return 0;
 
     policy = per_cpu(cpufreq_cpu_policy, cpu);
-    if ( !policy || !cpu_has_aperfmperf )
+    if ( !policy || !cpu_has_hw_feedback_cap )
         return 0;
 
     switch (flag)
@@ -128,12 +129,14 @@ static int __init cf_check cpufreq_driver_init(void)
 
     if ( cpufreq_controller == FREQCTL_xen )
     {
-        switch ( boot_cpu_data.x86_vendor )
+        unsigned int i;
+
+        ret = -ENOENT;
+
+        switch ( boot_cpu_data.vendor )
         {
         case X86_VENDOR_INTEL:
-            ret = -ENOENT;
-
-            for ( unsigned int i = 0; i < cpufreq_xen_cnt; i++ )
+            for ( i = 0; i < cpufreq_xen_cnt; i++ )
             {
                 switch ( cpufreq_xen_opts[i] )
                 {
@@ -148,18 +151,85 @@ static int __init cf_check cpufreq_driver_init(void)
                 case CPUFREQ_none:
                     ret = 0;
                     break;
+
+                default:
+                    printk(XENLOG_WARNING
+                           "Unsupported cpufreq driver for vendor Intel\n");
+                    break;
                 }
 
-                if ( ret != -ENODEV )
+                if ( !ret || ret == -EBUSY )
                     break;
             }
             break;
 
         case X86_VENDOR_AMD:
         case X86_VENDOR_HYGON:
-            ret = IS_ENABLED(CONFIG_AMD) ? powernow_register_driver() : -ENODEV;
+#ifdef CONFIG_AMD
+            for ( i = 0; i < cpufreq_xen_cnt; i++ )
+            {
+                switch ( cpufreq_xen_opts[i] )
+                {
+                case CPUFREQ_xen:
+                    ret = powernow_register_driver();
+                    break;
+
+                case CPUFREQ_amd_cppc:
+                    ret = amd_cppc_register_driver();
+                    break;
+
+                case CPUFREQ_none:
+                    ret = 0;
+                    break;
+
+                default:
+                    printk(XENLOG_WARNING
+                           "Unsupported cpufreq driver for vendor AMD or Hygon\n");
+                    break;
+                }
+
+                if ( !ret || ret == -EBUSY )
+                    break;
+            }
+#else
+            ret = -ENODEV;
+#endif /* CONFIG_AMD */
+            break;
+
+        default:
+            printk(XENLOG_ERR "Cpufreq: unsupported x86 vendor\n");
             break;
         }
+
+        /*
+         * After successful cpufreq driver registeration, XEN_PROCESSOR_PM_CPPC
+         * and XEN_PROCESSOR_PM_PX shall become exclusive flags.
+         */
+        if ( !ret )
+        {
+            ASSERT(i < cpufreq_xen_cnt);
+            switch ( cpufreq_xen_opts[i] )
+            {
+            case CPUFREQ_amd_cppc:
+                xen_processor_pmbits &= ~XEN_PROCESSOR_PM_PX;
+                break;
+
+            case CPUFREQ_hwp:
+            case CPUFREQ_xen:
+                xen_processor_pmbits &= ~XEN_PROCESSOR_PM_CPPC;
+                break;
+
+            default:
+                break;
+            }
+        }
+        else if ( ret != -EBUSY )
+            /*
+             * No cpufreq driver gets registered, clear both
+             * XEN_PROCESSOR_PM_CPPC and XEN_PROCESSOR_PM_PX
+             */
+             xen_processor_pmbits &= ~(XEN_PROCESSOR_PM_CPPC |
+                                       XEN_PROCESSOR_PM_PX);
     }
 
     return ret;
@@ -182,7 +252,7 @@ __initcall(cpufreq_driver_late_init);
 int cpufreq_cpu_init(unsigned int cpu)
 {
     /* Currently we only handle Intel, AMD and Hygon processor */
-    if ( boot_cpu_data.x86_vendor &
+    if ( boot_cpu_data.vendor &
          (X86_VENDOR_INTEL | X86_VENDOR_AMD | X86_VENDOR_HYGON) )
         return cpufreq_add_cpu(cpu);
 

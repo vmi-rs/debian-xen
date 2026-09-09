@@ -98,6 +98,11 @@ static inline unsigned long read_cr3(void)
     return cr3;
 }
 
+static inline void invlpg(const void *p)
+{
+    asm volatile ( "invlpg %0" :: "m" (*(const char *)p) : "memory" );
+}
+
 /* Write pagetable base and implicitly tick the tlbflush clock. */
 void switch_cr3_cr4(struct vcpu *v, unsigned long cr3, unsigned long cr4);
 
@@ -113,7 +118,7 @@ void switch_cr3_cr4(struct vcpu *v, unsigned long cr3, unsigned long cr4);
  /* Flush TLBs (or parts thereof) including global mappings */
 #define FLUSH_TLB_GLOBAL 0x200
  /* Flush data caches */
-#define FLUSH_CACHE      0x400
+#define FLUSH_CACHE_EVICT 0x400
  /* VA for the flush has a valid mapping */
 #define FLUSH_VA_VALID   0x800
  /* Flush CPU state */
@@ -135,6 +140,8 @@ void switch_cr3_cr4(struct vcpu *v, unsigned long cr3, unsigned long cr4);
 #else
 # define FLUSH_NO_ASSIST 0
 #endif
+ /* Write back data cache contents */
+#define FLUSH_CACHE_WRITEBACK  0x10000
 
 /* Flush local TLBs/caches. */
 unsigned int flush_area_local(const void *va, unsigned int flags);
@@ -182,21 +189,6 @@ void flush_area_mask(const cpumask_t *mask, const void *va,
 }
 
 static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache) {}
-static inline int invalidate_dcache_va_range(const void *p,
-                                             unsigned long size)
-{ return -EOPNOTSUPP; }
-static inline int clean_and_invalidate_dcache_va_range(const void *p,
-                                                       unsigned long size)
-{
-    unsigned int order = get_order_from_bytes(size);
-    /* sub-page granularity support needs to be added if necessary */
-    flush_area_local(p, FLUSH_CACHE|FLUSH_ORDER(order));
-    return 0;
-}
-static inline int clean_dcache_va_range(const void *p, unsigned long size)
-{
-    return clean_and_invalidate_dcache_va_range(p, size);
-}
 
 unsigned int guest_flush_tlb_flags(const struct domain *d);
 void guest_flush_tlb_mask(const struct domain *d, const cpumask_t *mask);

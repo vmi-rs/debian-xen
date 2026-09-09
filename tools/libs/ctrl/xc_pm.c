@@ -211,32 +211,35 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
 			 user_para->scaling_available_governors,
 			 user_para->gov_num * CPUFREQ_NAME_LEN * sizeof(char), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
-    bool has_num = user_para->cpu_num &&
-                     user_para->freq_num &&
-                     user_para->gov_num;
-
-    if ( has_num )
+    if ( (user_para->cpu_num && !user_para->affected_cpus) ||
+         (user_para->freq_num && !user_para->scaling_available_frequencies) ||
+         (user_para->gov_num && !user_para->scaling_available_governors) )
     {
-        if ( (!user_para->affected_cpus)                    ||
-             (!user_para->scaling_available_frequencies)    ||
-             (user_para->gov_num && !user_para->scaling_available_governors) )
-        {
-            errno = EINVAL;
-            return -1;
-        }
-        if ( xc_hypercall_bounce_pre(xch, affected_cpus) )
-            goto unlock_1;
-        if ( xc_hypercall_bounce_pre(xch, scaling_available_frequencies) )
-            goto unlock_2;
-        if ( user_para->gov_num &&
-             xc_hypercall_bounce_pre(xch, scaling_available_governors) )
-            goto unlock_3;
-
+        errno = EINVAL;
+        return -1;
+    }
+    if ( user_para->cpu_num )
+    {
+        ret = xc_hypercall_bounce_pre(xch, affected_cpus);
+        if ( ret )
+            return ret;
         set_xen_guest_handle(sys_para->affected_cpus, affected_cpus);
-        set_xen_guest_handle(sys_para->scaling_available_frequencies, scaling_available_frequencies);
-        if ( user_para->gov_num )
-            set_xen_guest_handle(sys_para->scaling_available_governors,
-                                 scaling_available_governors);
+    }
+    if ( user_para->freq_num )
+    {
+        ret = xc_hypercall_bounce_pre(xch, scaling_available_frequencies);
+        if ( ret )
+            goto unlock_2;
+        set_xen_guest_handle(sys_para->scaling_available_frequencies,
+                             scaling_available_frequencies);
+    }
+    if ( user_para->gov_num )
+    {
+        ret = xc_hypercall_bounce_pre(xch, scaling_available_governors);
+        if ( ret )
+            goto unlock_3;
+        set_xen_guest_handle(sys_para->scaling_available_governors,
+                             scaling_available_governors);
     }
 
     sysctl.cmd = XEN_SYSCTL_pm_op;
@@ -254,12 +257,9 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
             user_para->cpu_num  = sys_para->cpu_num;
             user_para->freq_num = sys_para->freq_num;
             user_para->gov_num  = sys_para->gov_num;
-            ret = -errno;
         }
 
-        if ( has_num )
-            goto unlock_4;
-        goto unlock_1;
+        goto unlock_4;
     }
     else
     {
@@ -274,35 +274,33 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
         /*
          * Copy to user_para no matter what cpufreq driver/governor.
          *
-         * First sanity check layout of the union subject to memcpy() below.
+         * First sanity check layout of the struct subject to memcpy() below.
          */
-        BUILD_BUG_ON(sizeof(user_para->u) != sizeof(sys_para->u));
+        BUILD_BUG_ON(sizeof(user_para->s) != sizeof(sys_para->s));
 
 #define CHK_FIELD(fld) \
-        BUILD_BUG_ON(offsetof(typeof(user_para->u), fld) != \
-                     offsetof(typeof(sys_para->u),  fld))
+        BUILD_BUG_ON(offsetof(typeof(user_para->s), fld) != \
+                     offsetof(typeof(sys_para->s),  fld))
 
-        CHK_FIELD(s.scaling_cur_freq);
-        CHK_FIELD(s.scaling_governor);
-        CHK_FIELD(s.scaling_max_freq);
-        CHK_FIELD(s.scaling_min_freq);
-        CHK_FIELD(s.u.userspace);
-        CHK_FIELD(s.u.ondemand);
-        CHK_FIELD(cppc_para);
+        CHK_FIELD(scaling_cur_freq);
+        CHK_FIELD(scaling_governor);
+        CHK_FIELD(scaling_max_freq);
+        CHK_FIELD(scaling_min_freq);
+        CHK_FIELD(u.userspace);
+        CHK_FIELD(u.ondemand);
 
 #undef CHK_FIELD
 
-        memcpy(&user_para->u, &sys_para->u, sizeof(sys_para->u));
+        memcpy(&user_para->s, &sys_para->s, sizeof(sys_para->s));
     }
 
 unlock_4:
-    if ( user_para->gov_num )
-        xc_hypercall_bounce_post(xch, scaling_available_governors);
+    xc_hypercall_bounce_post(xch, scaling_available_governors);
 unlock_3:
     xc_hypercall_bounce_post(xch, scaling_available_frequencies);
 unlock_2:
     xc_hypercall_bounce_post(xch, affected_cpus);
-unlock_1:
+
     return ret;
 }
 
@@ -364,6 +362,30 @@ int xc_set_cpufreq_cppc(xc_interface *xch, int cpuid,
 
     *set_cppc = sysctl.u.pm_op.u.set_cppc;
 
+    return ret;
+}
+
+int xc_get_cppc_para(xc_interface *xch, unsigned int cpuid,
+                     xc_cppc_para_t *cppc_para)
+{
+    int ret;
+    struct xen_sysctl sysctl = {};
+
+    if ( !xch  || !cppc_para )
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    sysctl.cmd = XEN_SYSCTL_pm_op;
+    sysctl.u.pm_op.cmd = GET_CPUFREQ_CPPC;
+    sysctl.u.pm_op.cpuid = cpuid;
+
+    ret = xc_sysctl(xch, &sysctl);
+    if ( ret )
+        return ret;
+
+    *cppc_para = sysctl.u.pm_op.u.get_cppc;
     return ret;
 }
 

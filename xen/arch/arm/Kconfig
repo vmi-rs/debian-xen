@@ -1,21 +1,26 @@
 config ARM_32
 	def_bool y
 	depends on "$(ARCH)" = "arm32"
-	select ARCH_MAP_DOMAIN_PAGE
+	select ARCH_MAP_DOMAIN_PAGE if MMU
 
 config ARM_64
 	def_bool y
 	depends on !ARM_32
 	select 64BIT
+	select HAS_DOMAIN_TYPE
 	select HAS_FAST_MULTIPLY
-	select HAS_LLC_COLORING if !NUMA
+	select HAS_VPCI_GUEST_SUPPORT if PCI_PASSTHROUGH
 
 config ARM
 	def_bool y
+	select DOMAIN_BUILD_HELPERS
 	select FUNCTION_ALIGNMENT_4B
 	select GENERIC_UART_INIT
 	select HAS_ALTERNATIVE if HAS_VMAP
-	select HAS_DEVICE_TREE
+	select HAS_DEVICE_TREE_DISCOVERY
+	select HAS_DOM0LESS
+	select HAS_GRANT_CACHE_FLUSH if GRANT_TABLE
+	select HAS_STACK_PROTECTOR
 	select HAS_UBSAN
 
 config ARCH_DEFCONFIG
@@ -24,7 +29,7 @@ config ARCH_DEFCONFIG
 	default "arch/arm/configs/arm64_defconfig" if ARM_64
 
 config XEN_START_ADDRESS
-	hex "Xen start address: keep default to use platform defined address"
+	hex "Xen start address"
 	default 0xFFFFFFFF
 	depends on MPU
 	help
@@ -59,7 +64,7 @@ config ARM_PA_BITS_32
 
 config ARM_PA_BITS_40
 	bool "40-bit"
-	depends on ARM_32
+	depends on ARM_32 && !MPU
 endchoice
 
 config PADDR_BITS
@@ -76,6 +81,8 @@ choice
 
 config MMU
 	bool "MMU"
+	select ARCH_PAGING_MEMPOOL
+	select HAS_LLC_COLORING if !NUMA && ARM_64
 	select HAS_PMAP
 	select HAS_VMAP
 	select HAS_PASSTHROUGH
@@ -85,6 +92,8 @@ config MMU
 
 config MPU
 	bool "MPU" if UNSUPPORTED
+	select ARCH_MAP_DOMAIN_PAGE
+	select STATIC_MEMORY
 	help
 	  Memory Protection Unit (MPU). Select if you plan to run Xen on ARMv8-R
 	  systems supporting EL2. (UNSUPPORTED)
@@ -102,7 +111,7 @@ config ACPI
 
 config ARM_EFI
 	bool "UEFI boot service support"
-	depends on ARM_64
+	depends on ARM_64 && !MPU
 	default y
 	help
 	  This option provides support for boot services through
@@ -117,23 +126,22 @@ config GICV2
 	  Driver for the ARM Generic Interrupt Controller v2.
 	  If unsure, say Y
 
-config DOM0LESS_BOOT
-	bool "Dom0less boot support" if EXPERT
-	default y
-	help
-	  Dom0less boot support enables Xen to create and start domU guests during
-	  Xen boot without the need of a control domain (Dom0), which could be
-	  present anyway.
-
 config GICV3
 	bool "GICv3 driver"
 	depends on !NEW_VGIC
-	default n if ARM_32
-	default y if ARM_64
+	default y if ARM_64 || MPU
 	help
 
 	  Driver for the ARM Generic Interrupt Controller v3.
 	  If unsure, use the default setting.
+
+config GICV3_ESPI
+	bool "Extended SPI range support"
+	depends on GICV3 && !NEW_VGIC
+	help
+	  Allow Xen and domains to use interrupt numbers from the extended SPI
+	  range, from 4096 to 5119. This feature is introduced in GICv3.1
+	  architecture.
 
 config HAS_ITS
         bool "GICv3 ITS MSI controller support (UNSUPPORTED)" if UNSUPPORTED
@@ -141,6 +149,7 @@ config HAS_ITS
 
 config OVERLAY_DTB
 	bool "DTB overlay support (UNSUPPORTED)" if UNSUPPORTED
+	depends on SYSCTL
 	help
 	  Dynamic addition/removal of Xen device tree nodes using a dtbo.
 
@@ -249,20 +258,6 @@ config ARM64_BTI
 
 source "arch/arm/tee/Kconfig"
 
-config STATIC_SHM
-	bool "Statically shared memory on a dom0less system" if UNSUPPORTED
-	depends on STATIC_MEMORY
-	help
-	  This option enables statically shared memory on a dom0less system.
-
-config STATIC_EVTCHN
-	bool "Static event channel support on a dom0less system"
-	depends on DOM0LESS_BOOT
-	default y
-	help
-	  This option enables establishing static event channel communication
-	  between domains on a dom0less system (domU-domU as well as domU-dom0).
-
 config PARTIAL_EMULATION
 	bool "Enable partial emulation of system/coprocessor registers"
 	default y
@@ -273,6 +268,12 @@ config PARTIAL_EMULATION
 	  result in unwanted/non-spec compliant behavior.
 
 source "arch/arm/firmware/Kconfig"
+
+config PCI_PASSTHROUGH
+	bool "PCI passthrough" if EXPERT
+	depends on ARM_64 && HAS_PASSTHROUGH
+	help
+	  This option enables PCI device passthrough
 
 endmenu
 

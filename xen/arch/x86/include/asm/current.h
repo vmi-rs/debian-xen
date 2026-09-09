@@ -9,7 +9,8 @@
 
 #include <xen/percpu.h>
 #include <xen/page-size.h>
-#include <public/xen.h>
+
+#include <asm/cpu-user-regs.h>
 
 /*
  * Xen's cpu stacks are 8 pages (8-page aligned), arranged as:
@@ -22,6 +23,9 @@
  * 2 - NMI IST stack
  * 1 - #MC IST stack
  * 0 - IST Shadow Stacks (4x 1k, read-only)
+ *
+ * In FRED mode, #DB and NMI do not need special stacks, so their IST stacks
+ * are unused.
  */
 
 /*
@@ -37,6 +41,8 @@ struct vcpu;
 
 struct cpu_info {
     struct cpu_user_regs guest_cpu_user_regs;
+    struct fred_info _fred; /* Only used when FRED is active. */
+
     unsigned int processor_id;
     unsigned int verw_sel;
     struct vcpu *current_vcpu;
@@ -82,7 +88,7 @@ static inline struct cpu_info *get_cpu_info_from_stack(unsigned long sp)
     return (struct cpu_info *)((sp | (STACK_SIZE - 1)) + 1) - 1;
 }
 
-static inline struct cpu_info *get_cpu_info(void)
+static inline attr_const struct cpu_info *get_cpu_info(void)
 {
 #ifdef __clang__
     /* Clang complains that sp in the else case is not initialised. */
@@ -105,12 +111,12 @@ static inline struct cpu_info *get_cpu_info(void)
 #define get_per_cpu_offset()  (get_cpu_info()->per_cpu_offset)
 
 /*
- * Get the bottom-of-stack, as stored in the per-CPU TSS. This actually points
- * into the middle of cpu_info.guest_cpu_user_regs, at the section that
- * precisely corresponds to a CPU trap frame.
+ * Get the bottom-of-stack, as stored in the per-CPU TSS. This points at the
+ * end of cpu_info.guest_cpu_user_regs, at the section that precisely
+ * corresponds to a CPU trap frame.
  */
 #define get_stack_bottom()                      \
-    ((unsigned long)&get_cpu_info()->guest_cpu_user_regs.es)
+    ((unsigned long)(&get_cpu_info()->guest_cpu_user_regs + 1))
 
 /*
  * Get the reasonable stack bounds for stack traces and stack dumps.  Stack
@@ -151,7 +157,9 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
     "rdsspd %[ssp];"                                            \
     "cmp $1, %[ssp];"                                           \
     "je .L_shstk_done.%=;" /* CET not active?  Skip. */         \
-    "mov $%c[skstk_base], %[val];"                              \
+    ALTERNATIVE("mov $%c[shstk_base], %[val];",                 \
+                "mov $%c[shstk_base] + 8, %[val];",             \
+                X86_FEATURE_XEN_FRED)                           \
     "and $%c[stack_mask], %[ssp];"                              \
     "sub %[ssp], %[val];"                                       \
     "shr $3, %[val];"                                           \
@@ -185,7 +193,7 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
               [ssp] "=&r" (tmp)                                         \
             : [stk] "r" (guest_cpu_user_regs()),                        \
               [fun] constr (fn),                                        \
-              [skstk_base] "i"                                          \
+              [shstk_base] "i"                                          \
               ((PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8),               \
               [stack_mask] "i" (STACK_SIZE - 1),                        \
               _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__,                \

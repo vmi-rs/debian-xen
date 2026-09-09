@@ -17,11 +17,12 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "private.h"
+
 #include <xen/iocap.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
-#include <xen/vpci.h>
 
 #include <xsm/xsm.h>
 
@@ -122,19 +123,6 @@ static void modify_decoding(const struct pci_dev *pdev, uint16_t cmd,
     bool map = cmd & PCI_COMMAND_MEMORY;
     unsigned int i;
 
-    /*
-     * Make sure there are no mappings in the MSIX MMIO areas, so that accesses
-     * can be trapped (and emulated) by Xen when the memory decoding bit is
-     * enabled.
-     *
-     * FIXME: punching holes after the p2m has been set up might be racy for
-     * DomU usage, needs to be revisited.
-     */
-#ifdef CONFIG_HAS_PCI_MSI
-    if ( map && !rom_only && vpci_make_msix_hole(pdev) )
-        return;
-#endif
-
     for ( i = 0; i < ARRAY_SIZE(header->bars); i++ )
     {
         struct vpci_bar *bar = &header->bars[i];
@@ -164,6 +152,19 @@ static void modify_decoding(const struct pci_dev *pdev, uint16_t cmd,
             bar->enabled = map;
     }
 
+    /*
+     * Make sure there are no mappings in the MSIX MMIO areas, so that accesses
+     * can be trapped (and emulated) by Xen when the memory decoding bit is
+     * enabled.
+     *
+     * FIXME: punching holes after the p2m has been set up might be racy for
+     * DomU usage, needs to be revisited.
+     */
+#ifdef CONFIG_HAS_PCI_MSI
+    if ( map && !rom_only && vpci_make_msix_hole(pdev) )
+        return;
+#endif
+
     if ( !rom_only )
     {
         pci_conf_write16(pdev->sbdf, PCI_COMMAND, cmd);
@@ -175,7 +176,7 @@ static void modify_decoding(const struct pci_dev *pdev, uint16_t cmd,
 
 bool vpci_process_pending(struct vcpu *v)
 {
-    struct pci_dev *pdev = v->vpci.pdev;
+    const struct pci_dev *pdev = v->vpci.pdev;
     struct vpci_header *header = NULL;
     unsigned int i;
 
@@ -283,8 +284,7 @@ static int __init apply_map(struct domain *d, const struct pci_dev *pdev,
     return rc;
 }
 
-static void defer_map(struct domain *d, struct pci_dev *pdev,
-                      uint16_t cmd, bool rom_only)
+static void defer_map(const struct pci_dev *pdev, uint16_t cmd, bool rom_only)
 {
     struct vcpu *curr = current;
 
@@ -308,7 +308,7 @@ static void defer_map(struct domain *d, struct pci_dev *pdev,
 static int modify_bars(const struct pci_dev *pdev, uint16_t cmd, bool rom_only)
 {
     struct vpci_header *header = &pdev->vpci->header;
-    struct pci_dev *tmp, *dev = NULL;
+    struct pci_dev *tmp;
     const struct domain *d;
     const struct vpci_msix *msix = pdev->vpci->msix;
     unsigned int i, j;
@@ -448,21 +448,13 @@ static int modify_bars(const struct pci_dev *pdev, uint16_t cmd, bool rom_only)
                  */
                 continue;
 
-            if ( tmp == pdev )
-            {
+            if ( tmp == pdev && !rom_only )
                 /*
-                 * Need to store the device so it's not constified and defer_map
-                 * can modify it in case of error.
+                 * If memory decoding is toggled avoid checking against the
+                 * same device, or else all regions will be removed from the
+                 * memory map in the unmap case.
                  */
-                dev = tmp;
-                if ( !rom_only )
-                    /*
-                     * If memory decoding is toggled avoid checking against the
-                     * same device, or else all regions will be removed from the
-                     * memory map in the unmap case.
-                     */
-                    continue;
-            }
+                continue;
 
             for ( i = 0; i < ARRAY_SIZE(tmp->vpci->header.bars); i++ )
             {
@@ -507,8 +499,6 @@ static int modify_bars(const struct pci_dev *pdev, uint16_t cmd, bool rom_only)
         d = dom_xen;
     }
 
-    ASSERT(dev);
-
     if ( system_state < SYS_STATE_active )
     {
         /*
@@ -523,7 +513,7 @@ static int modify_bars(const struct pci_dev *pdev, uint16_t cmd, bool rom_only)
         return apply_map(pdev->domain, pdev, cmd);
     }
 
-    defer_map(dev->domain, dev, cmd, rom_only);
+    defer_map(pdev, cmd, rom_only);
 
     return 0;
 }
@@ -754,7 +744,7 @@ static int bar_add_rangeset(const struct pci_dev *pdev, struct vpci_bar *bar,
     return !bar->mem ? -ENOMEM : 0;
 }
 
-static int cf_check init_header(struct pci_dev *pdev)
+int vpci_init_header(struct pci_dev *pdev)
 {
     uint16_t cmd;
     uint64_t addr, size;
@@ -762,7 +752,6 @@ static int cf_check init_header(struct pci_dev *pdev)
     struct vpci_header *header = &pdev->vpci->header;
     struct vpci_bar *bars = header->bars;
     int rc;
-    bool mask_cap_list = false;
     bool is_hwdom = is_hardware_domain(pdev->domain);
 
     ASSERT(rw_is_write_locked(&pdev->domain->pci_lock));
@@ -800,79 +789,6 @@ static int cf_check init_header(struct pci_dev *pdev)
                                            PCI_COMMAND_SERR |
                                            PCI_COMMAND_FAST_BACK,
                                 0);
-    if ( rc )
-        return rc;
-
-    if ( !is_hwdom )
-    {
-        if ( pci_conf_read16(pdev->sbdf, PCI_STATUS) & PCI_STATUS_CAP_LIST )
-        {
-            /* Only expose capabilities to the guest that vPCI can handle. */
-            unsigned int next, ttl = 48;
-            static const unsigned int supported_caps[] = {
-                PCI_CAP_ID_MSI,
-                PCI_CAP_ID_MSIX,
-            };
-
-            next = pci_find_next_cap_ttl(pdev->sbdf, PCI_CAPABILITY_LIST,
-                                         supported_caps,
-                                         ARRAY_SIZE(supported_caps), &ttl);
-
-            rc = vpci_add_register(pdev->vpci, vpci_read_val, NULL,
-                                   PCI_CAPABILITY_LIST, 1,
-                                   (void *)(uintptr_t)next);
-            if ( rc )
-                return rc;
-
-            next &= ~3;
-
-            if ( !next )
-                /*
-                 * If we don't have any supported capabilities to expose to the
-                 * guest, mask the PCI_STATUS_CAP_LIST bit in the status
-                 * register.
-                 */
-                mask_cap_list = true;
-
-            while ( next && ttl )
-            {
-                unsigned int pos = next;
-
-                next = pci_find_next_cap_ttl(pdev->sbdf,
-                                             pos + PCI_CAP_LIST_NEXT,
-                                             supported_caps,
-                                             ARRAY_SIZE(supported_caps), &ttl);
-
-                rc = vpci_add_register(pdev->vpci, vpci_hw_read8, NULL,
-                                       pos + PCI_CAP_LIST_ID, 1, NULL);
-                if ( rc )
-                    return rc;
-
-                rc = vpci_add_register(pdev->vpci, vpci_read_val, NULL,
-                                       pos + PCI_CAP_LIST_NEXT, 1,
-                                       (void *)(uintptr_t)next);
-                if ( rc )
-                    return rc;
-
-                next &= ~3;
-            }
-        }
-
-        /* Extended capabilities read as zero, write ignore */
-        rc = vpci_add_register(pdev->vpci, vpci_read_val, NULL, 0x100, 4,
-                               (void *)0);
-        if ( rc )
-            return rc;
-    }
-
-    /* Utilize rsvdp_mask to hide PCI_STATUS_CAP_LIST from the guest. */
-    rc = vpci_add_register_mask(pdev->vpci, vpci_hw_read16, vpci_hw_write16,
-                                PCI_STATUS, 2, NULL,
-                                PCI_STATUS_RO_MASK &
-                                    ~(mask_cap_list ? PCI_STATUS_CAP_LIST : 0),
-                                PCI_STATUS_RW1C_MASK,
-                                mask_cap_list ? PCI_STATUS_CAP_LIST : 0,
-                                PCI_STATUS_RSVDZ_MASK);
     if ( rc )
         return rc;
 
@@ -1016,7 +932,6 @@ static int cf_check init_header(struct pci_dev *pdev)
     pci_conf_write16(pdev->sbdf, PCI_COMMAND, cmd);
     return rc;
 }
-REGISTER_VPCI_INIT(init_header, VPCI_PRIORITY_HIGH);
 
 /*
  * Local variables:

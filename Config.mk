@@ -125,8 +125,8 @@ define cc-ver-check-closure
     endif
 endef
 
-# Require GCC v4.1+
-check-$(gcc) = $(call cc-ver-check,CC,0x040100,"Xen requires at least gcc-4.1")
+# Require GCC v5 as the project global baseline
+check-$(gcc) = $(call cc-ver-check,CC,0x050000,"Xen requires at least GCC 5")
 $(eval $(check-y))
 
 ld-ver-build-id = $(shell $(1) --build-id 2>&1 | \
@@ -149,12 +149,6 @@ else
 date = $(shell LC_ALL=C date $(1))
 endif
 
-define buildmakevars2shellvars
-    export PREFIX="$(prefix)";                                            \
-    export XEN_SCRIPT_DIR="$(XEN_SCRIPT_DIR)";                            \
-    export XEN_ROOT="$(XEN_ROOT)"
-endef
-
 #
 # Compare $(1) and $(2) and replace $(2) with $(1) if they differ
 #
@@ -165,18 +159,19 @@ define move-if-changed
 	if ! cmp -s $(1) $(2); then mv -f $(1) $(2); else rm -f $(1); fi
 endef
 
-BUILD_MAKE_VARS := sbindir bindir LIBEXEC LIBEXEC_BIN libdir SHAREDIR \
-                   XENFIRMWAREDIR XEN_CONFIG_DIR XEN_SCRIPT_DIR XEN_LOCK_DIR \
-                   XEN_RUN_DIR XEN_PAGING_DIR XEN_DUMP_DIR XEN_LOG_DIR \
-                   XEN_LIB_DIR XEN_RUN_STORED
+PATH_FILES := Paths.mk
+INC_FILES = $(foreach f, $(PATH_FILES), $(XEN_ROOT)/config/$(f))
 
-buildmakevars2file = $(eval $(call buildmakevars2file-closure,$(1)))
-define buildmakevars2file-closure
-    $(1): .phony
-	rm -f $(1).tmp; \
-	$(foreach var, $(BUILD_MAKE_VARS), \
-	          echo "$(var)=\"$($(var))\"" >>$(1).tmp;) \
-	$(call move-if-changed,$(1).tmp,$(1))
+ifndef XEN_FULLVERSION
+-include $(INC_FILES)
+endif
+
+BUILD_MAKE_VARS = $(foreach f, $(PATH_FILES), $(shell awk '$$2 == ":=" { print $$1; }' $(XEN_ROOT)/config/$(f).in))
+
+# Replace @xxx@ markers in $(1).in with $(xxx) variable contents, write to $(1)
+define apply-build-vars
+ $(1): $(1).in $$(INC_FILES)
+	sed $$(foreach v, $$(BUILD_MAKE_VARS), -e 's#@$$(v)@#$$($$(v))#g') <$$< >$$@
 endef
 
 CFLAGS += -fno-strict-aliasing
@@ -198,7 +193,7 @@ endif
 APPEND_LDFLAGS += $(foreach i, $(APPEND_LIB), -L$(i))
 APPEND_CFLAGS += $(foreach i, $(APPEND_INCLUDES), -I$(i))
 
-EMBEDDED_EXTRA_CFLAGS := -fno-pie -fno-stack-protector
+EMBEDDED_EXTRA_CFLAGS := -fno-pie
 EMBEDDED_EXTRA_CFLAGS += -fno-exceptions -fno-asynchronous-unwind-tables
 
 XEN_EXTFILES_URL ?= https://xenbits.xen.org/xen-extfiles
@@ -208,48 +203,26 @@ XEN_EXTFILES_URL ?= https://xenbits.xen.org/xen-extfiles
 
 # Where to look for inlined subtrees (for example, from a tarball)
 QEMU_UPSTREAM_INTREE ?= $(XEN_ROOT)/tools/qemu-xen
-QEMU_TRADITIONAL_INTREE ?= $(XEN_ROOT)/tools/qemu-xen-traditional
 
 
 # Handle legacy options
 ifneq (,$(SEABIOS_UPSTREAM_TAG))
 SEABIOS_UPSTREAM_REVISION ?= $(SEABIOS_UPSTREAM_TAG)
 endif
-ifneq (,$(QEMU_REMOTE))
-QEMU_TRADITIONAL_URL ?= $(QEMU_REMOTE)
-endif
-ifneq (,$(CONFIG_QEMU))
-QEMU_TRADITIONAL_LOC ?= $(CONFIG_QEMU)
-endif
-ifneq (,$(QEMU_TAG))
-QEMU_TRADITIONAL_REVISION ?= $(QEMU_TAG)
-endif
 
 OVMF_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/ovmf.git
 OVMF_UPSTREAM_REVISION ?= ba91d0292e593df8528b66f99c1b0b14fadc8e16
 
 QEMU_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/qemu-xen.git
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.20.1
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.22.0
 
 MINIOS_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/mini-os.git
-MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.20.0
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.22.0
 
 SEABIOS_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/seabios.git
-SEABIOS_UPSTREAM_REVISION ?= rel-1.16.3
+SEABIOS_UPSTREAM_REVISION ?= rel-1.17.0
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
-
-
-QEMU_TRADITIONAL_URL ?= https://xenbits.xen.org/git-http/qemu-xen-traditional.git
-QEMU_TRADITIONAL_REVISION ?= xen-4.20.0
-
-# Specify which qemu-dm to use. This may be `ioemu' to use the old
-# Mercurial in-tree version, or a local directory, or a git URL.
-# QEMU_UPSTREAM_LOC ?= `pwd`/$(XEN_ROOT)/../qemu-xen.git
-
-# Defaults for subtree locations
-QEMU_TRADITIONAL_LOC ?= $(call or,$(wildcard $(QEMU_TRADITIONAL_INTREE)),\
-                                  $(QEMU_TRADITIONAL_URL))
 
 QEMU_UPSTREAM_LOC ?= $(call or,$(wildcard $(QEMU_UPSTREAM_INTREE)),\
                                $(QEMU_UPSTREAM_URL))

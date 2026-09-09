@@ -136,11 +136,16 @@ typedef unsigned int p2m_query_t;
 #endif
 
 /* Shared types */
+#ifdef CONFIG_MEM_SHARING
 /* XXX: Sharable types could include p2m_ram_ro too, but we would need to
  * reinit the type correctly after fault */
 #define P2M_SHARABLE_TYPES (p2m_to_mask(p2m_ram_rw) \
                             | p2m_to_mask(p2m_ram_logdirty) )
 #define P2M_SHARED_TYPES   (p2m_to_mask(p2m_ram_shared))
+#else
+/* P2M_SHARABLE_TYPES deliberately not provided. */
+#define P2M_SHARED_TYPES 0
+#endif
 
 /* Types established/cleaned up via special accessors. */
 #define P2M_SPECIAL_TYPES (P2M_GRANT_TYPES | \
@@ -168,8 +173,8 @@ typedef unsigned int p2m_query_t;
 /* Grant types are *not* considered valid, because they can be
    unmapped at any time and, unless you happen to be the shadow or p2m
    implementations, there's no way of synchronising against that. */
-#define p2m_is_valid(_t) (p2m_to_mask(_t) & (P2M_RAM_TYPES | P2M_MMIO_TYPES))
-#define p2m_has_emt(_t)  (p2m_to_mask(_t) & (P2M_RAM_TYPES | p2m_to_mask(p2m_mmio_direct)))
+#define p2m_is_valid(_t)    (p2m_to_mask(_t) & \
+                             (P2M_RAM_TYPES | p2m_to_mask(p2m_mmio_direct)))
 #define p2m_is_pageable(_t) (p2m_to_mask(_t) & P2M_PAGEABLE_TYPES)
 #define p2m_is_paging(_t)   (p2m_to_mask(_t) & P2M_PAGING_TYPES)
 #define p2m_is_paged(_t)    (p2m_to_mask(_t) & P2M_PAGED_TYPES)
@@ -432,7 +437,7 @@ static inline bool p2m_is_nestedp2m(const struct p2m_domain *p2m)
 
 static inline bool p2m_is_altp2m(const struct p2m_domain *p2m)
 {
-    return p2m->p2m_class == p2m_alternate;
+    return IS_ENABLED(CONFIG_ALTP2M) && p2m->p2m_class == p2m_alternate;
 }
 
 #ifdef CONFIG_HVM
@@ -695,7 +700,7 @@ void p2m_pod_dump_data(struct domain *d);
 #ifdef CONFIG_HVM
 
 /* Report a change affecting memory types. */
-void p2m_memory_type_changed(struct domain *d);
+bool p2m_memory_type_changed(struct domain *d);
 
 /* Called by p2m code when demand-populating a PoD page */
 bool
@@ -768,7 +773,7 @@ static inline int relinquish_p2m_mapping(struct domain *d)
  */
 
 /* Modify p2m table for shared gfn */
-int set_shared_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn);
+int set_shared_p2m_entry(struct domain *d, unsigned long gfn_l, mfn_t mfn);
 
 /* Tell xenpaging to drop a paged out frame */
 void p2m_mem_paging_drop_page(struct domain *d, gfn_t gfn, p2m_type_t p2mt);
@@ -801,12 +806,8 @@ static inline void p2m_pt_init(struct p2m_domain *p2m) {}
 void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
                      p2m_query_t q, uint32_t *pfec);
 
-#if P2M_AUDIT
-extern void audit_p2m(struct domain *d,
-                      uint64_t *orphans,
-                      uint64_t *m2p_bad,
-                      uint64_t *p2m_bad);
-#endif /* P2M_AUDIT */
+void audit_p2m(struct domain *d, uint64_t *orphans,
+               uint64_t *m2p_bad, uint64_t *p2m_bad);
 
 /* Printouts */
 #define P2M_PRINTK(f, a...)                                \
@@ -884,6 +885,8 @@ void shadow_p2m_init(struct p2m_domain *p2m);
 void cf_check nestedp2m_write_p2m_entry_post(
     struct p2m_domain *p2m, unsigned int oflags);
 
+#ifdef CONFIG_ALTP2M
+
 /*
  * Alternate p2m: shadow p2m tables used for alternate memory views
  */
@@ -896,7 +899,7 @@ static inline struct p2m_domain *p2m_get_altp2m(struct vcpu *v)
     if ( index == INVALID_ALTP2M )
         return NULL;
 
-    BUG_ON(index >= MAX_ALTP2M);
+    BUG_ON(index >= v->domain->nr_altp2m);
 
     return v->domain->arch.altp2m_p2m[index];
 }
@@ -906,7 +909,7 @@ static inline bool p2m_set_altp2m(struct vcpu *v, unsigned int idx)
 {
     struct p2m_domain *orig;
 
-    BUG_ON(idx >= MAX_ALTP2M);
+    BUG_ON(idx >= v->domain->nr_altp2m);
 
     if ( idx == vcpu_altp2m(v).p2midx )
         return false;
@@ -927,11 +930,6 @@ bool p2m_switch_vcpu_altp2m_by_id(struct vcpu *v, unsigned int idx);
 /* Flush all the alternate p2m's for a domain */
 void p2m_flush_altp2m(struct domain *d);
 
-/* Alternate p2m paging */
-bool p2m_altp2m_get_or_propagate(struct p2m_domain *ap2m, unsigned long gfn_l,
-                                 mfn_t *mfn, p2m_type_t *p2mt,
-                                 p2m_access_t *p2ma, unsigned int *page_order);
-
 /* Make a specific alternate p2m valid */
 int p2m_init_altp2m_by_id(struct domain *d, unsigned int idx);
 
@@ -949,24 +947,30 @@ int p2m_switch_domain_altp2m_by_id(struct domain *d, unsigned int idx);
 int p2m_change_altp2m_gfn(struct domain *d, unsigned int idx,
                           gfn_t old_gfn, gfn_t new_gfn);
 
+/* Set a specific p2m view visibility */
+int p2m_set_altp2m_view_visibility(struct domain *d, unsigned int altp2m_idx,
+                                   uint8_t visible);
+
+#else /* !CONFIG_ALTP2M */
+struct p2m_domain *p2m_get_altp2m(struct vcpu *v);
+bool p2m_set_altp2m(struct vcpu *v, unsigned int idx);
+#endif /* CONFIG_ALTP2M */
+
+/*
+ * Common alternate p2m declarations that need to be visible
+ * regardless of CONFIG_ALTP2M
+ */
+
+/* Alternate p2m paging */
+bool p2m_altp2m_get_or_propagate(struct p2m_domain *ap2m, unsigned long gfn_l,
+                                 mfn_t *mfn, p2m_type_t *p2mt,
+                                 p2m_access_t *p2ma, unsigned int *page_order);
+                                 
 /* Propagate a host p2m change to all alternate p2m's */
 int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
                                 mfn_t mfn, unsigned int page_order,
                                 p2m_type_t p2mt, p2m_access_t p2ma);
-
-/* Set a specific p2m view visibility */
-int p2m_set_altp2m_view_visibility(struct domain *d, unsigned int altp2m_idx,
-                                   uint8_t visible);
-#else /* !CONFIG_HVM */
-struct p2m_domain *p2m_get_altp2m(struct vcpu *v);
 #endif /* CONFIG_HVM */
-
-#ifdef CONFIG_ALTP2M
-/* Check to see if vcpu should be switched to a different p2m. */
-void p2m_altp2m_check(struct vcpu *v, uint16_t idx);
-#else
-static inline void p2m_altp2m_check(struct vcpu *v, uint16_t idx) {}
-#endif
 
 /* p2m access to IOMMU flags */
 static inline unsigned int p2m_access_to_iommu_flags(p2m_access_t p2ma)
@@ -1062,7 +1066,7 @@ static inline int p2m_entry_modify(struct p2m_domain *p2m, p2m_type_t nt,
         if ( !mfn_valid(nfn) || p2m != p2m_get_hostp2m(p2m->domain) )
         {
             ASSERT_UNREACHABLE();
-            return -EINVAL;
+            return -EILSEQ;
         }
 
         if ( !page_get_owner_and_reference(mfn_to_page(nfn)) )
@@ -1084,14 +1088,26 @@ static inline int p2m_entry_modify(struct p2m_domain *p2m, p2m_type_t nt,
         break;
 
     case p2m_map_foreign:
-        if ( !mfn_valid(ofn) || p2m != p2m_get_hostp2m(p2m->domain) )
+    {
+        struct page_info *pg = mfn_valid(ofn) ? mfn_to_page(ofn) : NULL;
+        unsigned long ci = pg ? ACCESS_ONCE(pg->count_info) : 0;
+
+        if ( !pg || p2m != p2m_get_hostp2m(p2m->domain) ||
+             /*
+              * Rely on the caller also holding a reference to the page, so
+              * that the put_page() below doesn't cause the page to be
+              * freed, as it still has to be removed from the p2m.
+              */
+             (ci & PGC_count_mask) <= (ci & PGC_allocated ? 2 : 1) ||
+             !p2m->nr_foreign )
         {
             ASSERT_UNREACHABLE();
-            return -EINVAL;
+            return -EILSEQ;
         }
-        put_page(mfn_to_page(ofn));
+        put_page(pg);
         p2m->nr_foreign--;
         break;
+    }
 
     default:
         break;
@@ -1101,6 +1117,10 @@ static inline int p2m_entry_modify(struct p2m_domain *p2m, p2m_type_t nt,
 }
 
 #endif /* CONFIG_HVM */
+
+/* Get the dirty bitmap for a specific range of pfns */
+void p2m_log_dirty_range(struct domain *d, unsigned long begin_pfn,
+                         unsigned long nr, uint8_t *dirty_bitmap);
 
 #endif /* _XEN_ASM_X86_P2M_H */
 

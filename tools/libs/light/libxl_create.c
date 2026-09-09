@@ -99,35 +99,14 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         b_info->device_model_ssidref = SECINITSID_DOMDM;
 
     if (!b_info->device_model_version) {
-        if (b_info->type == LIBXL_DOMAIN_TYPE_HVM) {
-            if (libxl_defbool_val(b_info->device_model_stubdomain)) {
-                b_info->device_model_version =
-                    LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL;
-            } else {
-                b_info->device_model_version = LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN;
-            }
-        } else {
-            b_info->device_model_version =
-                LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN;
-        }
-        if (b_info->device_model_version
-                == LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN) {
-            const char *dm;
+        const char *dm;
 
-            dm = libxl__domain_device_model(gc, b_info);
-            rc = access(dm, X_OK);
-            if (rc < 0) {
-                /* qemu-xen unavailable, use qemu-xen-traditional */
-                if (errno == ENOENT) {
-                    LOGE(INFO, "qemu-xen is unavailable"
-                         ", using qemu-xen-traditional instead");
-                    b_info->device_model_version =
-                        LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL;
-                } else {
-                    LOGE(ERROR, "qemu-xen access error");
-                    return ERROR_FAIL;
-                }
-            }
+        b_info->device_model_version = LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN;
+        dm = libxl__domain_device_model(gc, b_info);
+        rc = access(dm, X_OK);
+        if (rc < 0) {
+            LOGE(INFO, "qemu-xen is unavailable");
+            b_info->device_model_version = LIBXL_DEVICE_MODEL_VERSION_UNKNOWN;
         }
     }
 
@@ -137,8 +116,6 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
     if (b_info->type == LIBXL_DOMAIN_TYPE_HVM) {
         if (!b_info->u.hvm.bios)
             switch (b_info->device_model_version) {
-            case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-                b_info->u.hvm.bios = LIBXL_BIOS_TYPE_ROMBIOS; break;
             case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
                 b_info->u.hvm.bios = LIBXL_BIOS_TYPE_SEABIOS; break;
             default:
@@ -148,12 +125,6 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
 
         /* Enforce BIOS<->Device Model version relationship */
         switch (b_info->device_model_version) {
-        case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-            if (b_info->u.hvm.bios != LIBXL_BIOS_TYPE_ROMBIOS) {
-                LOG(ERROR, "qemu-xen-traditional requires bios=rombios.");
-                return ERROR_INVAL;
-            }
-            break;
         case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
             if (b_info->u.hvm.bios == LIBXL_BIOS_TYPE_ROMBIOS) {
                 LOG(ERROR, "qemu-xen does not support bios=rombios.");
@@ -176,10 +147,6 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         libxl_defbool_val(b_info->device_model_stubdomain)) {
         if (!b_info->stubdomain_kernel) {
             switch (b_info->device_model_version) {
-                case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-                    b_info->stubdomain_kernel =
-                        libxl__abs_path(NOGC, "ioemu-stubdom.gz", libxl__xenfirmwaredir_path());
-                    break;
                 case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
                     b_info->stubdomain_kernel =
                         libxl__abs_path(NOGC,
@@ -192,8 +159,6 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         }
         if (!b_info->stubdomain_ramdisk) {
             switch (b_info->device_model_version) {
-                case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-                    break;
                 case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
                     b_info->stubdomain_ramdisk =
                         libxl__abs_path(NOGC,
@@ -299,33 +264,6 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
             b_info->u.hvm.hdtype = LIBXL_HDTYPE_IDE;
 
         switch (b_info->device_model_version) {
-        case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-            switch (b_info->u.hvm.vga.kind) {
-            case LIBXL_VGA_INTERFACE_TYPE_NONE:
-                if (b_info->video_memkb == LIBXL_MEMKB_DEFAULT)
-                    b_info->video_memkb = 0;
-                break;
-            case LIBXL_VGA_INTERFACE_TYPE_QXL:
-                LOG(ERROR,"qemu upstream required for qxl vga");
-                return ERROR_INVAL;
-                break;
-            case LIBXL_VGA_INTERFACE_TYPE_STD:
-                if (b_info->video_memkb == LIBXL_MEMKB_DEFAULT)
-                    b_info->video_memkb = 8 * 1024;
-                if (b_info->video_memkb < 8 * 1024) {
-                    LOG(ERROR, "videoram must be at least 8 MB for STDVGA on QEMU_XEN_TRADITIONAL");
-                    return ERROR_INVAL;
-                }
-                break;
-            case LIBXL_VGA_INTERFACE_TYPE_CIRRUS:
-            default:
-                if (b_info->video_memkb == LIBXL_MEMKB_DEFAULT)
-                    b_info->video_memkb = 4 * 1024;
-                if (b_info->video_memkb != 4 * 1024)
-                    LOG(WARN, "ignoring videoram other than 4 MB for CIRRUS on QEMU_XEN_TRADITIONAL");
-                break;
-            }
-            break;
         case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
         default:
             switch (b_info->u.hvm.vga.kind) {
@@ -375,6 +313,7 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         libxl_defbool_setdefault(&b_info->u.hvm.usb,                false);
         libxl_defbool_setdefault(&b_info->u.hvm.vkb_device,         true);
         libxl_defbool_setdefault(&b_info->u.hvm.xen_platform_pci,   true);
+        libxl_defbool_setdefault(&b_info->u.hvm.xen_platform_pci_bar_uc, true);
         libxl_defbool_setdefault(&b_info->u.hvm.pirq,               false);
 
         libxl_defbool_setdefault(&b_info->u.hvm.spice.enable, false);
@@ -480,6 +419,16 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         LOG(ERROR, "max grant version %d out of range",
             b_info->max_grant_version);
         return -ERROR_INVAL;
+    }
+
+    if (b_info->altp2m_count == LIBXL_ALTP2M_COUNT_DEFAULT) {
+        if (b_info->type == LIBXL_DOMAIN_TYPE_HVM &&
+            (libxl_defbool_val(b_info->u.hvm.altp2m) ||
+            b_info->altp2m != LIBXL_ALTP2M_MODE_DISABLED))
+            /* Reflect the default legacy count */
+            b_info->altp2m_count = 10;
+        else
+            b_info->altp2m_count = 0;
     }
 
     /* Assume that providing a bootloader user implies enabling restrict. */
@@ -647,7 +596,11 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
             .max_grant_frames = b_info->max_grant_frames,
             .max_maptrack_frames = b_info->max_maptrack_frames,
             .grant_opts = XEN_DOMCTL_GRANT_version(b_info->max_grant_version),
-            .vmtrace_size = ROUNDUP(b_info->vmtrace_buf_kb << 10, XC_PAGE_SHIFT),
+            .altp2m = {
+                .opts = 0, /* .opts will be set below */
+                .nr = b_info->altp2m_count,
+            },
+            .vmtrace_size = ROUNDUP(b_info->vmtrace_buf_kb << 10, XC_PAGE_SIZE),
             .cpupool_id = info->poolid,
         };
 
@@ -667,6 +620,9 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
         if (libxl_defbool_val(b_info->vpmu))
             create.flags |= XEN_DOMCTL_CDF_vpmu;
 
+        if (libxl_defbool_val(b_info->trap_unmapped_accesses))
+            create.flags |= XEN_DOMCTL_CDF_trap_unmapped_accesses;
+
         assert(info->passthrough != LIBXL_PASSTHROUGH_DEFAULT);
         LOG(DETAIL, "passthrough: %s",
             libxl_passthrough_to_string(info->passthrough));
@@ -680,17 +636,17 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
         LOG(DETAIL, "altp2m: %s", libxl_altp2m_mode_to_string(b_info->altp2m));
         switch(b_info->altp2m) {
         case LIBXL_ALTP2M_MODE_MIXED:
-            create.altp2m_opts |=
+            create.altp2m.opts |=
                 XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_mixed);
             break;
 
         case LIBXL_ALTP2M_MODE_EXTERNAL:
-            create.altp2m_opts |=
+            create.altp2m.opts |=
                 XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_external);
             break;
 
         case LIBXL_ALTP2M_MODE_LIMITED:
-            create.altp2m_opts |=
+            create.altp2m.opts |=
                 XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_limited);
             break;
 
@@ -725,8 +681,10 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
                     continue;
 
                 local_domid = v;
+            } else if (libxl_domid_valid_guest(info->domid)) {
+                local_domid = info->domid;
             } else {
-                local_domid = info->domid; /* May not be valid */
+                local_domid = DOMID_ANY;
             }
 
             ret = xc_domain_create(ctx->xch, &local_domid, &create);
@@ -747,19 +705,21 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
             /* A new domain now exists */
             *domid = local_domid;
 
-            ret = xc_domain_set_llc_colors(ctx->xch, local_domid,
-                                           b_info->llc_colors,
-                                           b_info->num_llc_colors);
-            if (ret < 0) {
-                if (errno == EOPNOTSUPP) {
-                    if (b_info->num_llc_colors > 0) {
+            /*
+             * If Cache Coloring is wanted for the guest, it must be
+             * communicated to Xen prior to allocating guest memory.
+             */
+            if (b_info->num_llc_colors) {
+                ret = xc_domain_set_llc_colors(ctx->xch, local_domid,
+                                               b_info->llc_colors,
+                                               b_info->num_llc_colors);
+                if (ret < 0) {
+                    if (errno == EOPNOTSUPP) {
                         LOGED(ERROR, local_domid,
-                            "LLC coloring not enabled in the hypervisor");
-                        rc = ERROR_FAIL;
-                        goto out;
+                              "LLC coloring not enabled in the hypervisor");
+                    } else {
+                        LOGED(ERROR, local_domid, "LLC colors allocation failed");
                     }
-                } else {
-                    LOGED(ERROR, local_domid, "LLC colors allocation failed");
                     rc = ERROR_FAIL;
                     goto out;
                 }

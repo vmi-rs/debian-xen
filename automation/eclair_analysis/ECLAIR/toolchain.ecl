@@ -15,6 +15,7 @@
     __alignof__, __alignof: see Sections \"6.48 Alternate Keywords\" and \"6.44 Determining the Alignment of Functions, Types or Variables\" of "GCC_MANUAL".
     asm, __asm__: see Sections \"6.48 Alternate Keywords\" and \"6.47 How to Use Inline Assembly Language in C Code\" of "GCC_MANUAL".
     __attribute__: see Section \"6.39 Attribute Syntax\" of "GCC_MANUAL".
+    __auto_type: see Section \"6.7 Referring to a Type with typeof\" of "GCC_MANUAL".
     __builtin_offsetof: see Section \"6.53 Support for offsetof\" of "GCC_MANUAL".
     __builtin_types_compatible_p: see Section \"6.59 Other Built-in Functions Provided by GCC\" of "GCC_MANUAL".
     __builtin_va_arg: non-documented GCC extension.
@@ -26,6 +27,7 @@
 -name_selector+={alignof, "^(__alignof__|__alignof)$"}
 -name_selector+={asm, "^(__asm__|asm)$"}
 -name_selector+={attribute, "^__attribute__$"}
+-name_selector+={auto_type, "^__auto_type$"}
 -name_selector+={builtin_offsetof, "^__builtin_offsetof$"}
 -name_selector+={builtin_types_p, "^__builtin_types_compatible_p$"}
 -name_selector+={builtin_va_arg, "^__builtin_va_arg$"}
@@ -39,6 +41,7 @@
 "alignof||
 asm||
 attribute||
+auto_type||
 builtin_offsetof||
 builtin_types_p||
 builtin_va_arg||
@@ -108,7 +111,13 @@ volatile"
 -config=STD.funojptr,behavior+={c99,GCC_X86_64,specified}
 -doc_end
 
+-doc_begin="See section \"6.3 Labels as Values\" of "GCC_MANUAL"."
+-config=STD.adrslabl,behavior={c99,GCC_ARM64,specified}
+-config=STD.adrslabl,behavior={c99,GCC_X86_64,specified}
+-doc_end
+
 -doc_begin="
+    ext_auto_type: see Section \"6.7 Referring to a Type with typeof\" of "GCC_MANUAL".
     ext_c_missing_varargs_arg: see Section \"6.21 Macros with a Variable Number of Arguments\" of "GCC_MANUAL".
     ext_enum_value_not_int: non-documented GCC extension.
     ext_flexible_array_in_array: see Section \"6.18 Arrays of Length Zero\" of "GCC_MANUAL".
@@ -121,6 +130,7 @@ volatile"
     ext_return_has_void_expr: see the documentation for -Wreturn-type in Section \"3.8 Options to Request or Suppress Warnings\" of "GCC_MANUAL".
     ext_sizeof_alignof_void_type: see Section \"6.24 Arithmetic on void- and Function-Pointers\" of "GCC_MANUAL".
 "
+-name_selector+={ext_auto_type, "^ext_auto_type$"}
 -name_selector+={ext_c_missing_varargs_arg, "^ext_c_missing_varargs_arg$"}
 -name_selector+={ext_enum_value_not_int, "^ext_enum_value_not_int$"}
 -name_selector+={ext_flexible_array_in_array, "^ext_flexible_array_in_array$"}
@@ -134,7 +144,8 @@ volatile"
 -name_selector+={ext_sizeof_alignof_void_type, "^ext_sizeof_alignof_void_type$"}
 
 -config=STD.diag,behavior+={c99,GCC_ARM64,
-"ext_c_missing_varargs_arg||
+"ext_auto_type||
+ext_c_missing_varargs_arg||
 ext_forward_ref_enum_def||
 ext_gnu_array_range||
 ext_gnu_statement_expr_macro||
@@ -144,7 +155,8 @@ ext_return_has_void_expr||
 ext_sizeof_alignof_void_type"
 }
 -config=STD.diag,behavior+={c99,GCC_X86_64,
-"ext_c_missing_varargs_arg||
+"ext_auto_type||
+ext_c_missing_varargs_arg||
 ext_enum_value_not_int||
 ext_flexible_array_in_array||
 ext_flexible_array_in_struct||
@@ -205,6 +217,7 @@ ext_sizeof_alignof_void_type"
 
 -doc_begin="See Section \"1.1 Character sets\" of "CPP_MANUAL".  We assume the locale is not restricting any UTF-8 characters being part of the source character set."
 -config=STD.charset,behavior={c99, GCC_ARM64, "utf8"}
+-config=STD.charset,behavior={c99, GCC_X86_64, "utf8"}
 -doc_end
 
 -doc_begin="See Section \"4.3 Identifiers\" of "GCC_MANUAL"."
@@ -325,4 +338,9 @@ ext_sizeof_alignof_void_type"
 
 -doc_begin="See Section \"4.13 Preprocessing Directives\" of "GCC_MANUAL" and Section \"11.1 Implementation-defined behavior\" of "CPP_MANUAL"."
 -config=STD.inclexpd,behavior={c99, GCC_X86_64, "specified"}
+-doc_end
+
+-doc_begin="See Section \"6.65 Binary Constants using the '0b' Prefix\" of "GCC_MANUAL"."
+-config=STD.ltrlbin,behavior={c99, GCC_ARM64, "specified"}
+-config=STD.ltrlbin,behavior={c99, GCC_X86_64, "specified"}
 -doc_end

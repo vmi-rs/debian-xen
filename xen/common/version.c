@@ -94,18 +94,20 @@ const char *xen_build_info(void)
     return build_info;
 }
 
-static const void *build_id_p __read_mostly;
-static unsigned int build_id_len __read_mostly;
+const void *__ro_after_init xen_build_id;
+unsigned int __ro_after_init xen_build_id_len;
 
-int xen_build_id(const void **p, unsigned int *len)
+void print_version(void)
 {
-    if ( !build_id_len )
-        return -ENODATA;
+    printk("Xen version %d.%d%s (%s@%s) (%s) %s %s\n",
+           xen_major_version(), xen_minor_version(), xen_extra_version(),
+           xen_compile_by(), xen_compile_domain(), xen_compiler(),
+           xen_build_info(), xen_compile_date());
 
-    *len = build_id_len;
-    *p = build_id_p;
+    printk("Latest ChangeSet: %s\n", xen_changeset());
 
-    return 0;
+    if ( xen_build_id_len )
+        printk("build-id: %*phN\n", xen_build_id_len, xen_build_id);
 }
 
 #ifdef BUILD_ID
@@ -180,11 +182,14 @@ void __init xen_build_init(void)
 
     sz = (uintptr_t)__note_gnu_build_id_end - (uintptr_t)n;
 
-    rc = xen_build_id_check(n, sz, &build_id_p, &build_id_len);
+    rc = xen_build_id_check(n, sz, &xen_build_id, &xen_build_id_len);
 
 #ifdef CONFIG_X86
-    /* Alternatively we may have a CodeView record from an EFI build. */
-    if ( rc && efi_enabled(EFI_LOADER) )
+    /*
+     * xen.efi built with a new enough toolchain will have a CodeView record,
+     * not an ELF note.
+     */
+    if ( rc )
     {
         const struct pe_external_debug_directory *dir = (const void *)n;
 
@@ -203,17 +208,34 @@ void __init xen_build_init(void)
 
             if ( info->cv_signature == CVINFO_PDB70_CVSIGNATURE )
             {
-                build_id_p = info->signature;
-                build_id_len = sizeof(info->signature);
+                xen_build_id = info->signature;
+                xen_build_id_len = sizeof(info->signature);
                 rc = 0;
             }
         }
     }
 #endif /* CONFIG_X86 */
-    if ( !rc )
-        printk(XENLOG_INFO "build-id: %*phN\n", build_id_len, build_id_p);
 }
 #endif /* BUILD_ID */
+
+/*
+ * This assertion checks compatibility between 'unsigned long', 'void *',
+ * and function pointers. This is true for most supported architectures,
+ * including X86 (x86_64) and ARM (arm, aarch64).
+ *
+ * For more context on architecture-specific preprocessor guards, see
+ * docs/misc/C-language-toolchain.rst.
+ *
+ * If porting Xen to a new architecture where this compatibility does not hold,
+ * exclude that architecture from these checks and provide suitable commentary
+ * and/or alternative checks as appropriate.
+ */
+static void __init __maybe_unused build_assertions(void)
+{
+    BUILD_BUG_ON(sizeof(unsigned long) != sizeof(void (*)(void)));
+    BUILD_BUG_ON(sizeof(void *) != sizeof(void (*)(void)));
+}
+
 /*
  * Local variables:
  * mode: C

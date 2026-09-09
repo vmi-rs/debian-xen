@@ -582,6 +582,7 @@ int hvm_set_mem_pinned_cacheattr(struct domain *d, uint64_t gfn_start,
 {
     struct hvm_mem_pinned_cacheattr_range *range, *newr;
     unsigned int nr = 0;
+    bool flush = false;
     int rc = 1;
 
     if ( !is_hvm_domain(d) )
@@ -605,31 +606,34 @@ int hvm_set_mem_pinned_cacheattr(struct domain *d, uint64_t gfn_start,
 
                 type = range->type;
                 call_rcu(&range->rcu, free_pinned_cacheattr_entry);
-                p2m_memory_type_changed(d);
                 switch ( type )
                 {
-                case X86_MT_UCM:
+                case X86_MT_WB:
+                case X86_MT_WP:
+                case X86_MT_WT:
                     /*
-                     * For EPT we can also avoid the flush in this case;
-                     * see epte_get_entry_emt().
+                     * Flush since we don't know what the cachability is going
+                     * to be.
                      */
-                    if ( hap_enabled(d) && cpu_has_vmx )
-                case X86_MT_UC:
-                        break;
-                    /* fall through */
-                default:
-                    flush_all(FLUSH_CACHE);
+                    flush = true;
                     break;
                 }
-                return 0;
+                rc = 0;
+                goto finish;
             }
         domain_unlock(d);
         return -ENOENT;
 
     case X86_MT_UCM:
     case X86_MT_UC:
-    case X86_MT_WB:
     case X86_MT_WC:
+        if ( !is_iommu_enabled(d) && !cache_flush_permitted(d) )
+            return -EPERM;
+        /* Flush since we don't know what the cachability was. */
+        flush = true;
+        break;
+
+    case X86_MT_WB:
     case X86_MT_WP:
     case X86_MT_WT:
         break;
@@ -682,9 +686,11 @@ int hvm_set_mem_pinned_cacheattr(struct domain *d, uint64_t gfn_start,
 
     xfree(newr);
 
-    p2m_memory_type_changed(d);
-    if ( type != X86_MT_WB )
-        flush_all(FLUSH_CACHE);
+ finish:
+    if ( flush )
+        memory_type_changed(d);
+    else if ( d->vcpu && d->vcpu[0] )
+        p2m_memory_type_changed(d);
 
     return rc;
 }
@@ -782,11 +788,24 @@ HVM_REGISTER_SAVE_RESTORE(MTRR, hvm_save_mtrr_msr, NULL, hvm_load_mtrr_msr, 1,
 
 void memory_type_changed(struct domain *d)
 {
-    if ( (is_iommu_enabled(d) || cache_flush_permitted(d)) &&
-         d->vcpu && d->vcpu[0] )
+    if ( cache_flush_permitted(d) &&
+         d->vcpu && d->vcpu[0] && p2m_memory_type_changed(d) &&
+         /*
+          * Do the p2m type-change, but skip the cache flush if the domain is
+          * not yet running.  The check for creation_finished must strictly be
+          * done after the call to p2m_memory_type_changed().
+          */
+         d->creation_finished &&
+         /*
+          * The cache flush should be done if either: CPU doesn't have
+          * self-snoop in which case there could be aliases left in the cache,
+          * or (some) IOMMUs cannot force all DMA device accesses to be
+          * snooped.
+          */
+         (!boot_cpu_has(X86_FEATURE_XEN_SELFSNOOP) ||
+          (is_iommu_enabled(d) && !iommu_snoop)) )
     {
-        p2m_memory_type_changed(d);
-        flush_all(FLUSH_CACHE);
+        flush_all(FLUSH_CACHE_EVICT);
     }
 }
 

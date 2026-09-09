@@ -192,10 +192,6 @@ hvm_emulate_write(enum x86_segment seg,
     if ( rc || !bytes )
         return rc;
 
-    /* Unaligned writes are only acceptable on HVM */
-    if ( (addr & (bytes - 1)) && !is_hvm_vcpu(v)  )
-        return X86EMUL_UNHANDLEABLE;
-
     ptr = sh_emulate_map_dest(v, addr, bytes, sh_ctxt);
     if ( IS_ERR(ptr) )
         return ~PTR_ERR(ptr);
@@ -211,9 +207,11 @@ hvm_emulate_write(enum x86_segment seg,
     default: memcpy(ptr, p_data, bytes);                break;
     }
 
+#ifdef CONFIG_TRACEBUFFER
     if ( tb_init_done )
         v->arch.paging.mode->shadow.trace_emul_write_val(ptr, addr,
                                                          p_data, bytes);
+#endif
 
     sh_emulate_unmap_dest(v, ptr, bytes, sh_ctxt);
     shadow_audit_tables(v);
@@ -246,10 +244,6 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
     if ( rc )
         return rc;
 
-    /* Unaligned writes are only acceptable on HVM */
-    if ( (addr & (bytes - 1)) && !is_hvm_vcpu(v)  )
-        return X86EMUL_UNHANDLEABLE;
-
     ptr = sh_emulate_map_dest(v, addr, bytes, sh_ctxt);
     if ( IS_ERR(ptr) )
         return ~PTR_ERR(ptr);
@@ -268,6 +262,7 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
     default:
         SHADOW_PRINTK("cmpxchg size %u is not supported\n", bytes);
         prev = ~old;
+        break;
     }
 
     if ( prev != old )
@@ -463,8 +458,7 @@ static void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
 
 #ifndef NDEBUG
     /* We don't emulate user-mode writes to page tables. */
-    if ( is_hvm_domain(d) ? hvm_get_cpl(v) == 3
-                          : !guest_kernel_mode(v, guest_cpu_user_regs()) )
+    if ( hvm_get_cpl(v) == 3 )
     {
         gdprintk(XENLOG_DEBUG, "User-mode write to pagetable reached "
                  "emulate_map_dest(). This should never happen!\n");
@@ -492,15 +486,6 @@ static void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
         /* Whole write fits on a single page. */
         sh_ctxt->mfn[1] = INVALID_MFN;
         map = map_domain_page(sh_ctxt->mfn[0]) + (vaddr & ~PAGE_MASK);
-    }
-    else if ( !is_hvm_domain(d) )
-    {
-        /*
-         * Cross-page emulated writes are only supported for HVM guests;
-         * PV guests ought to know better.
-         */
-        put_page(mfn_to_page(sh_ctxt->mfn[0]));
-        return MAPPING_UNHANDLEABLE;
     }
     else
     {
@@ -662,6 +647,7 @@ static void sh_emulate_unmap_dest(struct vcpu *v, void *addr,
     {
         /* Writes with this alignment constraint can't possibly cross pages. */
         ASSERT(!mfn_valid(sh_ctxt->mfn[1]));
+        paging_mark_dirty(v->domain, sh_ctxt->mfn[0]);
     }
     else
 #endif /* SHADOW_OPTIMIZATIONS & SHOPT_SKIP_VERIFY */
@@ -679,12 +665,10 @@ static void sh_emulate_unmap_dest(struct vcpu *v, void *addr,
             validate_guest_pt_write(v, sh_ctxt->mfn[1], addr + b1, b2);
     }
 
-    paging_mark_dirty(v->domain, sh_ctxt->mfn[0]);
     put_page(mfn_to_page(sh_ctxt->mfn[0]));
 
     if ( unlikely(mfn_valid(sh_ctxt->mfn[1])) )
     {
-        paging_mark_dirty(v->domain, sh_ctxt->mfn[1]);
         put_page(mfn_to_page(sh_ctxt->mfn[1]));
         vunmap((void *)((unsigned long)addr & PAGE_MASK));
     }
@@ -763,7 +747,7 @@ mfn_t sh_make_monitor_table(const struct vcpu *v, unsigned int shadow_levels)
     ASSERT(!pagetable_get_pfn(v->arch.hvm.monitor_table));
 
     /* Guarantee we can get the memory we need */
-    if ( !shadow_prealloc(d, SH_type_monitor_table, CONFIG_PAGING_LEVELS) )
+    if ( !shadow_prealloc(d, SH_type_monitor_table, shadow_levels < 4 ? 3 : 1) )
         return INVALID_MFN;
 
     m4mfn = shadow_alloc(d, SH_type_monitor_table, 0);
@@ -1019,7 +1003,6 @@ int shadow_track_dirty_vram(struct domain *d,
     int rc = 0;
     unsigned long end_pfn = begin_pfn + nr_frames;
     unsigned int dirty_size = DIV_ROUND_UP(nr_frames, BITS_PER_BYTE);
-    int flush_tlb = 0;
     unsigned long i;
     p2m_type_t t;
     struct sh_dirty_vram *dirty_vram;
@@ -1033,7 +1016,7 @@ int shadow_track_dirty_vram(struct domain *d,
     p2m_lock(p2m_get_hostp2m(d));
     paging_lock(d);
 
-    dirty_vram = d->arch.hvm.dirty_vram;
+    dirty_vram = d->arch.hvm.dirty_vram.sh;
 
     if ( dirty_vram && (!nr_frames ||
              ( begin_pfn != dirty_vram->begin_pfn
@@ -1043,8 +1026,8 @@ int shadow_track_dirty_vram(struct domain *d,
         gdprintk(XENLOG_INFO, "stopping tracking VRAM %lx - %lx\n", dirty_vram->begin_pfn, dirty_vram->end_pfn);
         xfree(dirty_vram->sl1ma);
         xfree(dirty_vram->dirty_bitmap);
-        xfree(dirty_vram);
-        dirty_vram = d->arch.hvm.dirty_vram = NULL;
+        d->arch.hvm.dirty_vram.sh = NULL;
+        XFREE(dirty_vram);
     }
 
     if ( !nr_frames )
@@ -1075,7 +1058,7 @@ int shadow_track_dirty_vram(struct domain *d,
             goto out;
         dirty_vram->begin_pfn = begin_pfn;
         dirty_vram->end_pfn = end_pfn;
-        d->arch.hvm.dirty_vram = dirty_vram;
+        d->arch.hvm.dirty_vram.sh = dirty_vram;
 
         if ( (dirty_vram->sl1ma = xmalloc_array(paddr_t, nr_frames)) == NULL )
             goto out_dirty_vram;
@@ -1084,18 +1067,18 @@ int shadow_track_dirty_vram(struct domain *d,
         if ( (dirty_vram->dirty_bitmap = xzalloc_array(uint8_t, dirty_size)) == NULL )
             goto out_sl1ma;
 
-        dirty_vram->last_dirty = NOW();
+        dirty_vram->last_dirty = -1;
 
         /* Tell the caller that this time we could not track dirty bits. */
         rc = -ENODATA;
     }
-    else if ( dirty_vram->last_dirty == -1 )
-        /* still completely clean, just copy our empty bitmap */
-        memcpy(dirty_bitmap, dirty_vram->dirty_bitmap, dirty_size);
-    else
+    /* Nothing to do when the bitmap is still completely clean. */
+    else if ( dirty_vram->last_dirty != -1 )
     {
         mfn_t map_mfn = INVALID_MFN;
         void *map_sl1p = NULL;
+        bool any_dirty = false, flush_tlb = false;
+        s_time_t now;
 
         /* Iterate over VRAM to track dirty bits. */
         for ( i = 0; i < nr_frames; i++ )
@@ -1155,7 +1138,7 @@ int shadow_track_dirty_vram(struct domain *d,
                              * _PAGE_ACCESSED set by another processor.
                              */
                             l1e_remove_flags(*sl1e, _PAGE_DIRTY);
-                            flush_tlb = 1;
+                            flush_tlb = true;
                         }
                     }
                     break;
@@ -1171,16 +1154,20 @@ int shadow_track_dirty_vram(struct domain *d,
             if ( dirty )
             {
                 dirty_vram->dirty_bitmap[i / 8] |= 1 << (i % 8);
-                dirty_vram->last_dirty = NOW();
+                any_dirty = true;
             }
         }
+
+        now = NOW();
+        if ( any_dirty )
+            dirty_vram->last_dirty = now;
 
         if ( map_sl1p )
             unmap_domain_page(map_sl1p);
 
         memcpy(dirty_bitmap, dirty_vram->dirty_bitmap, dirty_size);
         memset(dirty_vram->dirty_bitmap, 0, dirty_size);
-        if ( dirty_vram->last_dirty + SECONDS(2) < NOW() )
+        if ( dirty_vram->last_dirty + SECONDS(2) < now )
         {
             /*
              * Was clean for more than two seconds, try to disable guest
@@ -1194,16 +1181,17 @@ int shadow_track_dirty_vram(struct domain *d,
             }
             dirty_vram->last_dirty = -1;
         }
+
+        if ( flush_tlb )
+            guest_flush_tlb_mask(d, d->dirty_cpumask);
     }
-    if ( flush_tlb )
-        guest_flush_tlb_mask(d, d->dirty_cpumask);
     goto out;
 
  out_sl1ma:
     xfree(dirty_vram->sl1ma);
  out_dirty_vram:
-    xfree(dirty_vram);
-    dirty_vram = d->arch.hvm.dirty_vram = NULL;
+    d->arch.hvm.dirty_vram.sh = NULL;
+    XFREE(dirty_vram);
 
  out:
     paging_unlock(d);
@@ -1213,11 +1201,12 @@ int shadow_track_dirty_vram(struct domain *d,
         paging_lock(d);
         for ( i = 0; i < dirty_size; i++ )
             dirty_vram->dirty_bitmap[i] |= dirty_bitmap[i];
+        dirty_vram->last_dirty = NOW();
         paging_unlock(d);
         rc = -EFAULT;
     }
-    vfree(dirty_bitmap);
     p2m_unlock(p2m_get_hostp2m(d));
+    vfree(dirty_bitmap);
     return rc;
 }
 
@@ -1226,7 +1215,7 @@ void shadow_vram_get_mfn(mfn_t mfn, unsigned int l1f,
                          const struct domain *d)
 {
     unsigned long gfn;
-    struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram;
+    struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram.sh;
 
     ASSERT(is_hvm_domain(d));
 
@@ -1256,7 +1245,7 @@ void shadow_vram_put_mfn(mfn_t mfn, unsigned int l1f,
                          const struct domain *d)
 {
     unsigned long gfn;
-    struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram;
+    struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram.sh;
 
     ASSERT(is_hvm_domain(d));
 

@@ -272,7 +272,7 @@
 #define PCI_AGP_VERSION		2	/* BCD version number */
 #define PCI_AGP_RFU		3	/* Rest of capability flags */
 #define PCI_AGP_STATUS		4	/* Status register */
-#define  PCI_AGP_STATUS_RQ_MASK	0xff000000	/* Maximum number of requests - 1 */
+#define  PCI_AGP_STATUS_RQ_MASK	0xff000000U /* Maximum number of requests - 1 */
 #define  PCI_AGP_STATUS_SBA	0x0200	/* Sideband addressing supported */
 #define  PCI_AGP_STATUS_64BIT	0x0020	/* 64-bit addressing supported */
 #define  PCI_AGP_STATUS_FW	0x0010	/* FW transfers supported */
@@ -280,7 +280,7 @@
 #define  PCI_AGP_STATUS_RATE2	0x0002	/* 2x transfer rate supported */
 #define  PCI_AGP_STATUS_RATE1	0x0001	/* 1x transfer rate supported */
 #define PCI_AGP_COMMAND		8	/* Control register */
-#define  PCI_AGP_COMMAND_RQ_MASK 0xff000000  /* Master: Maximum number of requests */
+#define  PCI_AGP_COMMAND_RQ_MASK 0xff000000U /* Master: Maximum number of requests */
 #define  PCI_AGP_COMMAND_SBA	0x0200	/* Sideband addressing enabled */
 #define  PCI_AGP_COMMAND_AGP	0x0100	/* Allow processing of AGP transactions */
 #define  PCI_AGP_COMMAND_64BIT	0x0020 	/* Allow processing of 64-bit addresses */
@@ -381,7 +381,7 @@
 #define  PCI_X_STATUS_MAX_CUM	0x1c000000	/* Designed Max Cumulative Read Size */
 #define  PCI_X_STATUS_SPL_ERR	0x20000000	/* Rcvd Split Completion Error Msg */
 #define  PCI_X_STATUS_266MHZ	0x40000000	/* 266 MHz capable */
-#define  PCI_X_STATUS_533MHZ	0x80000000	/* 533 MHz capable */
+#define  PCI_X_STATUS_533MHZ	0x80000000U	/* 533 MHz capable */
 
 /* PCI Express capability registers */
 
@@ -448,7 +448,10 @@
 /* Extended Capabilities (PCI-X 2.0 and Express) */
 #define PCI_EXT_CAP_ID(header)		((header) & 0x0000ffff)
 #define PCI_EXT_CAP_VER(header)		(((header) >> 16) & 0xf)
-#define PCI_EXT_CAP_NEXT(header)	(((header) >> 20) & 0xffc)
+#define PCI_EXT_CAP_NEXT_MASK		0xfff00000U
+/* Bottom two bits of next capability position are reserved. */
+#define PCI_EXT_CAP_NEXT(header) \
+    (MASK_EXTR(header, PCI_EXT_CAP_NEXT_MASK) & 0xffcU)
 
 #define PCI_EXT_CAP_ID_ERR	1
 #define PCI_EXT_CAP_ID_VC	2
@@ -459,6 +462,7 @@
 #define PCI_EXT_CAP_ID_ARI	14
 #define PCI_EXT_CAP_ID_ATS	15
 #define PCI_EXT_CAP_ID_SRIOV	16
+#define PCI_EXT_CAP_ID_REBAR	21	/* Resizable BAR */
 
 /* Advanced Error Reporting */
 #define PCI_ERR_UNCOR_STATUS	4	/* Uncorrectable Error Status */
@@ -541,6 +545,19 @@
 #define  PCI_VNDR_HEADER_REV(x)	(((x) >> 16) & 0xf)
 #define  PCI_VNDR_HEADER_LEN(x)	(((x) >> 20) & 0xfff)
 
+/* Resizable BARs */
+#define PCI_REBAR_CAP(n)	(4 + 8 * (n))	/* capability register */
+#define  PCI_REBAR_CAP_SIZES_MASK	0xFFFFFFF0U	/* supported BAR sizes in CAP */
+#define PCI_REBAR_CTRL(n)	(8 + 8 * (n))	/* control register */
+#define  PCI_REBAR_CTRL_BAR_IDX		0x00000007	/* BAR index */
+#define  PCI_REBAR_CTRL_NBAR_MASK	0x000000E0	/* # of resizable BARs */
+#define  PCI_REBAR_CTRL_BAR_SIZE	0x00003F00	/* BAR size */
+#define  PCI_REBAR_CTRL_SIZES_MASK	0xFFFF0000U	/* supported BAR sizes in CTRL */
+
+#define PCI_REBAR_CTRL_SIZE_BIAS	20
+#define PCI_REBAR_CTRL_SIZE(v) \
+    (1ULL << (MASK_EXTR(v, PCI_REBAR_CTRL_BAR_SIZE) + PCI_REBAR_CTRL_SIZE_BIAS))
+
 /*
  * Hypertransport sub capability types
  *
@@ -565,7 +582,7 @@
 #define  HT_MSI_FLAGS_FIXED	0x2		/* Fixed mapping only */
 #define  HT_MSI_FIXED_ADDR	0x00000000FEE00000ULL	/* Fixed addr */
 #define  HT_MSI_ADDR_LO		0x04		/* Offset to low addr bits */
-#define  HT_MSI_ADDR_LO_MASK	0xFFF00000	/* Low address bit mask */
+#define  HT_MSI_ADDR_LO_MASK	0xFFF00000U	/* Low address bit mask */
 #define  HT_MSI_ADDR_HI		0x08		/* Offset to high addr bits */
 #define HT_CAPTYPE_DIRECT_ROUTE	0xB0	/* Direct routing configuration */
 #define HT_CAPTYPE_VCSET	0xB8	/* Virtual Channel configuration */

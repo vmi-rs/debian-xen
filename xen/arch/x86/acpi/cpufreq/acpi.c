@@ -11,10 +11,13 @@
  *      porting acpi-cpufreq.c from Linux 2.6.23 to Xen hypervisor
  */
 
-#include <xen/errno.h>
 #include <xen/delay.h>
+#include <xen/errno.h>
 #include <xen/param.h>
-#include <xen/types.h>
+#include <xen/smp.h>
+
+#include <asm/msr.h>
+#include <asm/processor.h>
 
 #include <acpi/acpi.h>
 #include <acpi/cpufreq/cpufreq.h>
@@ -171,17 +174,18 @@ static u32 get_cur_val(const cpumask_t *mask)
         return 0;
 
     policy = per_cpu(cpufreq_cpu_policy, cpu);
-    if (!policy || !cpufreq_drv_data[policy->cpu])
+    if ( !policy )
         return 0;
 
-    switch (cpufreq_drv_data[policy->cpu]->arch_cpu_flags) {
+    switch ( policy->drv_data.acpi.arch_cpu_flags )
+    {
     case SYSTEM_INTEL_MSR_CAPABLE:
         cmd.type = SYSTEM_INTEL_MSR_CAPABLE;
         cmd.addr.msr.reg = MSR_IA32_PERF_STATUS;
         break;
     case SYSTEM_IO_CAPABLE:
         cmd.type = SYSTEM_IO_CAPABLE;
-        perf = cpufreq_drv_data[policy->cpu]->acpi_data;
+        perf = policy->drv_data.acpi.acpi_data;
         cmd.addr.io.port = perf->control_register.address;
         cmd.addr.io.bit_width = perf->control_register.bit_width;
         break;
@@ -207,9 +211,8 @@ static unsigned int cf_check get_cur_freq_on_cpu(unsigned int cpu)
     if (!policy)
         return 0;
 
-    data = cpufreq_drv_data[policy->cpu];
-    if (unlikely(data == NULL ||
-        data->acpi_data == NULL || data->freq_table == NULL))
+    data = &policy->drv_data.acpi;
+    if ( !data->acpi_data || !data->freq_table )
         return 0;
 
     return extract_freq(get_cur_val(cpumask_of(cpu)), data);
@@ -217,14 +220,11 @@ static unsigned int cf_check get_cur_freq_on_cpu(unsigned int cpu)
 
 void intel_feature_detect(struct cpufreq_policy *policy)
 {
-    unsigned int eax;
-
-    eax = cpuid_eax(6);
-    if (eax & 0x2) {
+    if ( cpu_has_turbo_boost )
+    {
         policy->turbo = CPUFREQ_TURBO_ENABLED;
-        if (cpufreq_verbose)
-            printk(XENLOG_INFO "CPU%u: Turbo Mode detected and enabled\n",
-                   smp_processor_id());
+        if ( cpufreq_verbose )
+            printk_once(XENLOG_INFO "Turbo Mode detected and enabled\n");
     }
 }
 
@@ -252,7 +252,7 @@ static int cf_check acpi_cpufreq_target(
     struct cpufreq_policy *policy,
     unsigned int target_freq, unsigned int relation)
 {
-    struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
+    struct acpi_cpufreq_data *data = &policy->drv_data.acpi;
     struct processor_performance *perf;
     struct cpufreq_freqs freqs;
     cpumask_t online_policy_cpus;
@@ -262,10 +262,8 @@ static int cf_check acpi_cpufreq_target(
     unsigned int j;
     int result = 0;
 
-    if (unlikely(data == NULL ||
-        data->acpi_data == NULL || data->freq_table == NULL)) {
+    if ( !data->acpi_data || !data->freq_table )
         return -ENODEV;
-    }
 
     if (policy->turbo == CPUFREQ_TURBO_DISABLED)
         if (target_freq > policy->cpuinfo.second_max_freq)
@@ -331,11 +329,9 @@ static int cf_check acpi_cpufreq_target(
 
 static int cf_check acpi_cpufreq_verify(struct cpufreq_policy *policy)
 {
-    struct acpi_cpufreq_data *data;
     struct processor_performance *perf;
 
-    if (!policy || !(data = cpufreq_drv_data[policy->cpu]) ||
-        !processor_pminfo[policy->cpu])
+    if ( !policy || !processor_pminfo[policy->cpu] )
         return -EINVAL;
 
     perf = &processor_pminfo[policy->cpu]->perf;
@@ -343,7 +339,8 @@ static int cf_check acpi_cpufreq_verify(struct cpufreq_policy *policy)
     cpufreq_verify_within_limits(policy, 0,
         perf->states[perf->platform_limit].core_frequency * 1000);
 
-    return cpufreq_frequency_table_verify(policy, data->freq_table);
+    return cpufreq_frequency_table_verify(policy,
+                                          policy->drv_data.acpi.freq_table);
 }
 
 static unsigned long
@@ -379,16 +376,10 @@ static int cf_check acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
     unsigned int i;
     unsigned int valid_states = 0;
     unsigned int cpu = policy->cpu;
-    struct acpi_cpufreq_data *data;
+    struct acpi_cpufreq_data *data = &policy->drv_data.acpi;
     unsigned int result = 0;
     struct cpuinfo_x86 *c = &cpu_data[policy->cpu];
     struct processor_performance *perf;
-
-    data = xzalloc(struct acpi_cpufreq_data);
-    if (!data)
-        return -ENOMEM;
-
-    cpufreq_drv_data[cpu] = data;
 
     data->acpi_data = &processor_pminfo[cpu]->perf;
 
@@ -406,23 +397,18 @@ static int cf_check acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
         if (cpufreq_verbose)
             printk("xen_pminfo: @acpi_cpufreq_cpu_init,"
                    "HARDWARE addr space\n");
-        if (!cpu_has(c, X86_FEATURE_EIST)) {
-            result = -ENODEV;
-            goto err_unreg;
-        }
+        if ( !cpu_has(c, X86_FEATURE_EIST) )
+            return -ENODEV;
         data->arch_cpu_flags = SYSTEM_INTEL_MSR_CAPABLE;
         break;
     default:
-        result = -ENODEV;
-        goto err_unreg;
+        return -ENODEV;
     }
 
     data->freq_table = xmalloc_array(struct cpufreq_frequency_table,
                                     (perf->state_count+1));
-    if (!data->freq_table) {
-        result = -ENOMEM;
-        goto err_unreg;
-    }
+    if ( !data->freq_table )
+        return -ENOMEM;
 
     /* detect transition latency */
     policy->cpuinfo.transition_latency = 0;
@@ -468,7 +454,7 @@ static int cf_check acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 
     /* Check for APERF/MPERF support in hardware
      * also check for boost support */
-    if (c->x86_vendor == X86_VENDOR_INTEL && c->cpuid_level >= 6)
+    if (c->vendor == X86_VENDOR_INTEL && c->cpuid_level >= 6)
         on_selected_cpus(cpumask_of(cpu), feature_detect, policy, 1);
 
     /*
@@ -480,23 +466,14 @@ static int cf_check acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
     return result;
 
 err_freqfree:
-    xfree(data->freq_table);
-err_unreg:
-    xfree(data);
-    cpufreq_drv_data[cpu] = NULL;
+    XFREE(data->freq_table);
 
     return result;
 }
 
 static int cf_check acpi_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
-    struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
-
-    if (data) {
-        cpufreq_drv_data[policy->cpu] = NULL;
-        xfree(data->freq_table);
-        xfree(data);
-    }
+    XFREE(policy->drv_data.acpi.freq_table);
 
     return 0;
 }

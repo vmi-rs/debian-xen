@@ -10,12 +10,13 @@
 #include <xen/sched.h>
 #include <xen/xvmalloc.h>
 
+#include <asm/asm_defns.h>
 #include <asm/cpu-policy.h>
 #include <asm/current.h>
-#include <asm/processor.h>
 #include <asm/i387.h>
+#include <asm/msr.h>
+#include <asm/processor.h>
 #include <asm/xstate.h>
-#include <asm/asm_defns.h>
 
 /*
  * Maximum size (in byte) of the XSAVE/XRSTOR save area required by all
@@ -40,21 +41,22 @@ static DEFINE_PER_CPU(uint64_t, xcr0);
 /* Because XCR0 is cached for each CPU, xsetbv() is not exposed. Users should 
  * use set_xcr0() instead.
  */
-static inline bool xsetbv(u32 index, u64 xfeatures)
+static inline bool xsetbv(uint32_t xcr, uint64_t val)
 {
-    u32 hi = xfeatures >> 32;
-    u32 lo = (u32)xfeatures;
+    uint32_t hi = val >> 32, lo = val;
 
-    asm volatile ( "1: .byte 0x0f,0x01,0xd1\n"
-                   "3:                     \n"
-                   ".section .fixup,\"ax\" \n"
-                   "2: xor %0,%0           \n"
-                   "   jmp 3b              \n"
-                   ".previous              \n"
-                   _ASM_EXTABLE(1b, 2b)
-                   : "+a" (lo)
-                   : "c" (index), "d" (hi));
-    return lo != 0;
+    asm_inline goto (
+        "1: xsetbv\n\t"
+        _ASM_EXTABLE(1b, %l[fault])
+        :
+        : "a" (lo), "c" (xcr), "d" (hi)
+        :
+        : fault );
+
+    return true;
+
+ fault:
+    return false;
 }
 
 bool set_xcr0(u64 xfeatures)
@@ -177,7 +179,7 @@ static void setup_xstate_comp(uint16_t *comp_offsets,
  */
 void expand_xsave_states(const struct vcpu *v, void *dest, unsigned int size)
 {
-    const struct xsave_struct *xstate = v->arch.xsave_area;
+    const struct xsave_struct *xstate = VCPU_MAP_XSAVE_AREA(v);
     const void *src;
     uint16_t comp_offsets[sizeof(xfeature_mask)*8];
     u64 xstate_bv = xstate->xsave_hdr.xstate_bv;
@@ -191,7 +193,7 @@ void expand_xsave_states(const struct vcpu *v, void *dest, unsigned int size)
     if ( !(xstate->xsave_hdr.xcomp_bv & XSTATE_COMPACTION_ENABLED) )
     {
         memcpy(dest, xstate, size);
-        return;
+        goto out;
     }
 
     ASSERT(xsave_area_compressed(xstate));
@@ -228,6 +230,9 @@ void expand_xsave_states(const struct vcpu *v, void *dest, unsigned int size)
 
         valid &= ~feature;
     }
+
+ out:
+    VCPU_UNMAP_XSAVE_AREA(v, xstate);
 }
 
 /*
@@ -242,7 +247,7 @@ void expand_xsave_states(const struct vcpu *v, void *dest, unsigned int size)
  */
 void compress_xsave_states(struct vcpu *v, const void *src, unsigned int size)
 {
-    struct xsave_struct *xstate = v->arch.xsave_area;
+    struct xsave_struct *xstate = VCPU_MAP_XSAVE_AREA(v);
     void *dest;
     uint16_t comp_offsets[sizeof(xfeature_mask)*8];
     u64 xstate_bv, valid;
@@ -256,7 +261,7 @@ void compress_xsave_states(struct vcpu *v, const void *src, unsigned int size)
     if ( !(v->arch.xcr0_accum & XSTATE_XSAVES_ONLY) )
     {
         memcpy(xstate, src, size);
-        return;
+        goto out;
     }
 
     /*
@@ -294,6 +299,9 @@ void compress_xsave_states(struct vcpu *v, const void *src, unsigned int size)
 
         valid &= ~feature;
     }
+
+ out:
+    VCPU_UNMAP_XSAVE_AREA(v, xstate);
 }
 
 void xsave(struct vcpu *v, uint64_t mask)
@@ -994,25 +1002,17 @@ int handle_xsetbv(u32 index, u64 new_bv)
     curr->arch.xcr0 = new_bv;
     curr->arch.xcr0_accum |= new_bv;
 
-    if ( new_bv & XSTATE_NONLAZY )
-        curr->arch.nonlazy_xstate_used = 1;
-
-    mask &= curr->fpu_dirtied ? ~XSTATE_FP_SSE : XSTATE_NONLAZY;
+    mask &= ~XSTATE_FP_SSE;
     if ( mask )
     {
         unsigned long cr0 = read_cr0();
+        /* Has a fastpath for `current`, so there's no actual map */
+        struct xsave_struct *xsave_area = VCPU_MAP_XSAVE_AREA(curr);
 
         clts();
-        if ( curr->fpu_dirtied )
-            asm ( "stmxcsr %0" : "=m" (curr->arch.xsave_area->fpu_sse.mxcsr) );
-        else if ( xstate_all(curr) )
-        {
-            /* See the comment in i387.c:vcpu_restore_fpu_eager(). */
-            mask |= XSTATE_LAZY;
-            curr->fpu_initialised = 1;
-            curr->fpu_dirtied = 1;
-            cr0 &= ~X86_CR0_TS;
-        }
+
+        asm ( "stmxcsr %0" : "=m" (xsave_area->fpu_sse.mxcsr) );
+        VCPU_UNMAP_XSAVE_AREA(curr, xsave_area);
         xrstor(curr, mask);
         if ( cr0 & X86_CR0_TS )
             write_cr0(cr0);
@@ -1059,7 +1059,7 @@ void xstate_set_init(uint64_t mask)
     unsigned long cr0 = read_cr0();
     unsigned long xcr0 = this_cpu(xcr0);
     struct vcpu *v = idle_vcpu[smp_processor_id()];
-    struct xsave_struct *xstate = v->arch.xsave_area;
+    struct xsave_struct *xstate;
 
     if ( ~xfeature_mask & mask )
     {
@@ -1072,8 +1072,10 @@ void xstate_set_init(uint64_t mask)
 
     clts();
 
+    xstate = VCPU_MAP_XSAVE_AREA(v);
     memset(&xstate->xsave_hdr, 0, sizeof(xstate->xsave_hdr));
     xrstor(v, mask);
+    VCPU_UNMAP_XSAVE_AREA(v, xstate);
 
     if ( cr0 & X86_CR0_TS )
         write_cr0(cr0);

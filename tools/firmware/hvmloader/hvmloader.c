@@ -224,7 +224,7 @@ static void apic_setup(void)
 
     /* 8259A ExtInts are delivered through IOAPIC pin 0 (Virtual Wire Mode). */
     ioapic_write(0x10, APIC_DM_EXTINT);
-    ioapic_write(0x11, SET_APIC_ID(LAPIC_ID(0)));
+    ioapic_write(0x11, SET_APIC_ID(cpu_to_apicid[0]));
 }
 
 struct bios_info {
@@ -341,10 +341,16 @@ int main(void)
 
     printf("CPU speed is %u MHz\n", get_cpu_mhz());
 
-    apic_setup();
+    /*
+     * PCI setup must be done before SMP initialization, as the later also does
+     * the MTRR setup and so the size of the PCI MMIO windows must be known at
+     * that point.
+     */
     pci_setup();
 
     smp_initialise();
+
+    apic_setup();
 
     perform_tests();
 

@@ -6,7 +6,7 @@
 
 #define ARM_CB_PATCH ARM_NCAPS
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/types.h>
 #include <xen/stringify.h>
@@ -206,12 +206,12 @@ alternative_endif
 #define _ALTERNATIVE_CFG(insn1, insn2, cap, cfg, ...)	\
 	alternative_insn insn1, insn2, cap, IS_ENABLED(cfg)
 
-#endif  /*  __ASSEMBLY__  */
+#endif  /*  __ASSEMBLER__  */
 
 /*
- * Usage: asm(ALTERNATIVE(oldinstr, newinstr, feature));
+ * Usage: asm_inline (ALTERNATIVE(oldinstr, newinstr, feature));
  *
- * Usage: asm(ALTERNATIVE(oldinstr, newinstr, feature, CONFIG_FOO));
+ * Usage: asm_inline (ALTERNATIVE(oldinstr, newinstr, feature, CONFIG_FOO));
  * N.B. If CONFIG_FOO is specified, but not selected, the whole block
  *      will be omitted, including oldinstr.
  */

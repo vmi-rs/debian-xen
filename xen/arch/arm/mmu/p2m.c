@@ -178,19 +178,6 @@ void p2m_dump_info(struct domain *d)
     p2m_read_unlock(p2m);
 }
 
-void dump_p2m_lookup(struct domain *d, paddr_t addr)
-{
-    struct p2m_domain *p2m = p2m_get_hostp2m(d);
-
-    printk("dom%d IPA 0x%"PRIpaddr"\n", d->domain_id, addr);
-
-    printk("P2M @ %p mfn:%#"PRI_mfn"\n",
-           p2m->root, mfn_x(page_to_mfn(p2m->root)));
-
-    dump_pt_walk(page_to_maddr(p2m->root), addr,
-                 P2M_ROOT_LEVEL, P2M_ROOT_PAGES);
-}
-
 /*
  * p2m_save_state and p2m_restore_state work in pair to workaround
  * ARM64_WORKAROUND_AT_SPECULATE. p2m_save_state will set-up VTTBR to
@@ -228,7 +215,8 @@ void p2m_restore_state(struct vcpu *n)
      * registers associated to EL1/EL0 translations regime have been
      * synchronized.
      */
-    asm volatile(ALTERNATIVE("nop", "isb", ARM64_WORKAROUND_AT_SPECULATE));
+    asm_inline volatile (
+        ALTERNATIVE("nop", "isb", ARM64_WORKAROUND_AT_SPECULATE) );
     WRITE_SYSREG64(p2m->vttbr, VTTBR_EL2);
 
     last_vcpu_ran = &p2m->last_vcpu_ran[smp_processor_id()];
@@ -1290,7 +1278,7 @@ static void p2m_invalidate_root(struct p2m_domain *p2m)
 
     p2m_write_lock(p2m);
 
-    for ( i = 0; i < P2M_ROOT_LEVEL; i++ )
+    for ( i = 0; i < P2M_ROOT_PAGES; i++ )
         p2m_invalidate_table(p2m, page_to_mfn(p2m->root + i));
 
     p2m_write_unlock(p2m);

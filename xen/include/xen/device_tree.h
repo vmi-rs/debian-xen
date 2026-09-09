@@ -10,7 +10,8 @@
 #ifndef __XEN_DEVICE_TREE_H__
 #define __XEN_DEVICE_TREE_H__
 
-#include <asm/byteorder.h>
+#include <xen/byteorder.h>
+
 #include <asm/device.h>
 #include <public/xen.h>
 #include <public/device_tree_defs.h>
@@ -20,8 +21,6 @@
 #include <xen/types.h>
 #include <xen/list.h>
 #include <xen/rwlock.h>
-
-#define DEVICE_TREE_MAX_DEPTH 16
 
 /*
  * Struct used for matching a device
@@ -81,16 +80,9 @@ struct dt_property {
 struct dt_device_node {
     const char *name;
     const char *type;
-    dt_phandle phandle;
     char *full_name;
+    dt_phandle phandle;
     domid_t used_by; /* By default it's used by dom0 */
-
-    struct dt_property *properties;
-    struct dt_device_node *parent;
-    struct dt_device_node *child;
-    struct dt_device_node *sibling;
-    struct dt_device_node *next; /* TODO: Remove it. Only use to know the last children */
-    struct dt_device_node *allnext;
 
     /* IOMMU specific fields */
     bool is_protected;
@@ -99,6 +91,13 @@ struct dt_device_node {
     /* HACK: Remove this if there is a need of space */
     bool static_evtchn_created;
 #endif
+
+    struct dt_property *properties;
+    struct dt_device_node *parent;
+    struct dt_device_node *child;
+    struct dt_device_node *sibling;
+    struct dt_device_node *next; /* TODO: Remove it. Only use to know the last children */
+    struct dt_device_node *allnext;
 
     /*
      * The main purpose of this list is to link the structure in the list
@@ -109,9 +108,12 @@ struct dt_device_node {
      */
     struct list_head domain_list;
 
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
     struct device dev;
+#endif /* CONFIG_HAS_DEVICE_TREE_DISCOVERY */
 };
 
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 #define dt_to_dev(dt_node)  (&(dt_node)->dev)
 
 static inline struct dt_device_node *dev_to_dt(struct device *dev)
@@ -120,6 +122,7 @@ static inline struct dt_device_node *dev_to_dt(struct device *dev)
 
     return container_of(dev, struct dt_device_node, dev);
 }
+#endif /* CONFIG_HAS_DEVICE_TREE_DISCOVERY */
 
 #define MAX_PHANDLE_ARGS 16
 struct dt_phandle_args {
@@ -163,16 +166,7 @@ struct dt_raw_irq {
     u32 specifier[DT_MAX_IRQ_SPEC];
 };
 
-typedef int (*device_tree_node_func)(const void *fdt,
-                                     int node, const char *name, int depth,
-                                     u32 address_cells, u32 size_cells,
-                                     void *data);
-
 extern const void *device_tree_flattened;
-
-int device_tree_for_each_node(const void *fdt, int node,
-                              device_tree_node_func func,
-                              void *data);
 
 /**
  * dt_unflatten_host_device_tree - Unflatten the host device tree
@@ -244,10 +238,6 @@ void intc_dt_preinit(void);
 #define dt_node_cmp(s1, s2) strcasecmp((s1), (s2))
 #define dt_compat_cmp(s1, s2) strcasecmp((s1), (s2))
 
-/* Default #address and #size cells */
-#define DT_ROOT_NODE_ADDR_CELLS_DEFAULT 2
-#define DT_ROOT_NODE_SIZE_CELLS_DEFAULT 1
-
 #define dt_for_each_property_node(dn, pp)                   \
     for ( pp = (dn)->properties; (pp) != NULL; pp = (pp)->next )
 
@@ -256,43 +246,6 @@ void intc_dt_preinit(void);
 
 #define dt_for_each_child_node(dt, dn)                      \
     for ( dn = (dt)->child; (dn) != NULL; dn = (dn)->sibling )
-
-/* Helper to read a big number; size is in cells (not bytes) */
-static inline u64 dt_read_number(const __be32 *cell, int size)
-{
-    u64 r = 0;
-
-    while ( size-- )
-        r = (r << 32) | be32_to_cpu(*(cell++));
-    return r;
-}
-
-/* Wrapper for dt_read_number() to return paddr_t (instead of uint64_t) */
-static inline paddr_t dt_read_paddr(const __be32 *cell, int size)
-{
-    uint64_t dt_r;
-    paddr_t r;
-
-    /*
-     * dt_read_number will return uint64_t whereas paddr_t may not be 64-bit.
-     * Thus, there is an implicit cast from uint64_t to paddr_t.
-     */
-    dt_r = dt_read_number(cell, size);
-
-    if ( dt_r != (paddr_t)dt_r )
-    {
-        printk("Physical address greater than max width supported\n");
-        WARN();
-    }
-
-    /*
-     * Xen will truncate the address/size if it is greater than the maximum
-     * supported width and it will give an appropriate warning.
-     */
-    r = dt_r;
-
-    return r;
-}
 
 /* Helper to convert a number of cells to bytes */
 static inline int dt_cells_to_size(int size)
@@ -304,14 +257,6 @@ static inline int dt_cells_to_size(int size)
 static inline int dt_size_to_cells(int bytes)
 {
     return (bytes / sizeof(u32));
-}
-
-static inline u64 dt_next_cell(int s, const __be32 **cellp)
-{
-    const __be32 *p = *cellp;
-
-    *cellp = p + s;
-    return dt_read_number(p, s);
 }
 
 static inline const char *dt_node_full_name(const struct dt_device_node *np)
@@ -945,6 +890,29 @@ int dt_count_phandle_with_args(const struct dt_device_node *np,
  * a negative value if the required property is not found.
  */
 int dt_get_pci_domain_nr(struct dt_device_node *node);
+
+/**
+ * dt_map_id - Translate an ID through a downstream mapping.
+ * @np: root complex device node.
+ * @id: device ID to map.
+ * @map_name: property name of the map to use.
+ * @map_mask_name: optional property name of the mask to use.
+ * @target: optional pointer to a target device node.
+ * @id_out: optional pointer to receive the translated ID.
+ *
+ * Given a device ID, look up the appropriate implementation-defined
+ * platform ID and/or the target device which receives transactions on that
+ * ID, as per the "iommu-map" and "msi-map" bindings. Either of @target or
+ * @id_out may be NULL if only the other is required. If @target points to
+ * a non-NULL device node pointer, only entries targeting that node will be
+ * matched; if it points to a NULL value, it will receive the device node of
+ * the first matching target phandle, with a reference held.
+ *
+ * Return: 0 on success or a standard error code on failure.
+ */
+int dt_map_id(const struct dt_device_node *np, uint32_t id,
+              const char *map_name, const char *map_mask_name,
+              struct dt_device_node **target, uint32_t *id_out);
 
 struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle);
 

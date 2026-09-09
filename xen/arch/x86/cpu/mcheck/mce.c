@@ -79,7 +79,8 @@ static int __init cf_check mce_set_verbosity(const char *str)
 custom_param("mce_verbosity", mce_set_verbosity);
 
 /* Handle unconfigured int18 (should never happen) */
-static void cf_check unexpected_machine_check(const struct cpu_user_regs *regs)
+static void noreturn cf_check
+unexpected_machine_check(const struct cpu_user_regs *regs)
 {
     console_force_unlock();
     printk("Unexpected Machine Check Exception\n");
@@ -634,15 +635,12 @@ static void set_poll_bankmask(struct cpuinfo_x86 *c)
 }
 
 /* The perbank ctl/status init is platform specific because of AMD's quirk */
-static int mca_cap_init(void)
+static int mca_cap_init(bool bsp)
 {
     uint64_t msr_content;
     unsigned int nr, cpu = smp_processor_id();
 
     rdmsrl(MSR_IA32_MCG_CAP, msr_content);
-
-    if ( msr_content & MCG_CTL_P ) /* Control register present ? */
-        wrmsrl(MSR_IA32_MCG_CTL, 0xffffffffffffffffULL);
 
     per_cpu(nr_mce_banks, cpu) = nr = MASK_EXTR(msr_content, MCG_CAP_COUNT);
 
@@ -654,8 +652,11 @@ static int mca_cap_init(void)
         return -ENODEV;
     }
 
+    if ( !bsp && !mca_allbanks )
+        return -ENODATA;
+
     /* mcabanks_alloc depends on nr_mce_banks */
-    if ( !mca_allbanks || nr > mca_allbanks->num )
+    if ( bsp || nr > mca_allbanks->num )
     {
         unsigned int i;
         struct mca_banks *all = mcabanks_alloc(nr);
@@ -666,6 +667,9 @@ static int mca_cap_init(void)
             mcabanks_set(i, all);
         mcabanks_free(xchg(&mca_allbanks, all));
     }
+
+    if ( msr_content & MCG_CTL_P ) /* Control register present ? */
+        wrmsrl(MSR_IA32_MCG_CTL, ~0ULL);
 
     return 0;
 }
@@ -751,7 +755,7 @@ void mcheck_init(struct cpuinfo_x86 *c, bool bsp)
     }
 
     /*Hardware Enable */
-    if ( mca_cap_init() )
+    if ( mca_cap_init(bsp) )
         return;
 
     if ( !bsp )
@@ -773,13 +777,7 @@ void mcheck_init(struct cpuinfo_x86 *c, bool bsp)
 
 #ifdef CONFIG_INTEL
     case X86_VENDOR_INTEL:
-        switch ( c->x86 )
-        {
-        case 6:
-        case 15:
-            inited = intel_mcheck_init(c, bsp);
-            break;
-        }
+        inited = intel_mcheck_init(c, bsp);
         break;
 #endif
 
@@ -1017,21 +1015,14 @@ void x86_mc_get_cpu_info(unsigned cpu, uint32_t *chipid, uint16_t *coreid,
                          unsigned *ncores, unsigned *ncores_active,
                          unsigned *nthreads)
 {
-    struct cpuinfo_x86 *c;
+    const struct cpuinfo_x86 *c = &cpu_data[cpu];
 
     *apicid = cpu_physical_id(cpu);
-    c = &cpu_data[cpu];
     if ( c->apicid == BAD_APICID )
     {
         *chipid = cpu;
         *coreid = 0;
         *threadid = 0;
-        if ( ncores != NULL )
-            *ncores = 1;
-        if ( ncores_active != NULL )
-            *ncores_active = 1;
-        if ( nthreads != NULL )
-            *nthreads = 1;
     }
     else
     {
@@ -1041,13 +1032,16 @@ void x86_mc_get_cpu_info(unsigned cpu, uint32_t *chipid, uint16_t *coreid,
         else
             *coreid = 0;
         *threadid = c->apicid & ((1 << (c->x86_num_siblings - 1)) - 1);
-        if ( ncores != NULL )
-            *ncores = c->x86_max_cores;
-        if ( ncores_active != NULL )
-            *ncores_active = c->booted_cores;
-        if ( nthreads != NULL )
-            *nthreads = c->x86_num_siblings;
     }
+
+    if ( ncores )
+        *ncores = c->x86_max_cores ?: 1;
+
+    if ( ncores_active )
+        *ncores_active = c->booted_cores ?: 1;
+
+    if ( nthreads )
+        *nthreads = c->x86_num_siblings ?: 1;
 }
 
 #define INTPOSE_NENT 50
@@ -1270,7 +1264,8 @@ static void cf_check __maybe_unused x86_mc_mceinject(void *data)
 
 #if BITS_PER_LONG == 64
 
-#define ID2COOKIE(id) ((mctelem_cookie_t)(id))
+/* Two layers of casting to cover Misra C:2012 rule 11.2. */
+#define ID2COOKIE(id) ((mctelem_cookie_t)(void *)(id))
 #define COOKIE2ID(c) ((uint64_t)(c))
 
 #elif defined(BITS_PER_LONG)

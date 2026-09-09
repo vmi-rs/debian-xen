@@ -11,8 +11,13 @@ all:
 run: $(TARGET)
 	./$(TARGET)
 
+# Add the core emulator to the build
+vpath x86_emulate/%.c $(XEN_ROOT)/xen/arch/x86
+vpath x86_emulate/%.h $(XEN_ROOT)/xen/arch/x86
+HOSTCFLAGS += -iquote $(XEN_ROOT)/xen/arch/x86
+
 # Add libx86 to the build
-vpath %.c $(XEN_ROOT)/xen/lib/x86
+vpath %.c $(XEN_ROOT)/xen/arch/x86/lib/cpu-policy
 
 CFLAGS += $(CFLAGS_xeninclude)
 
@@ -267,8 +272,15 @@ clean:
 .PHONY: distclean
 distclean: clean
 
-.PHONY: install uninstall
-install uninstall:
+.PHONY: install
+install: all
+	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC)/tests
+	$(if $(TARGET-y),$(INSTALL_PROG) $(TARGET-y) $(DESTDIR)$(LIBEXEC)/tests)
+
+.PHONY: uninstall
+uninstall:
+	$(RM) -- $(addprefix $(DESTDIR)$(LIBEXEC)/tests/,$(TARGET-y))
+
 
 .PHONY: run32 clean32
 ifeq ($(XEN_COMPILE_ARCH),x86_64)
@@ -280,15 +292,16 @@ else
 run32 clean32: %32: %
 endif
 
-.PHONY: x86_emulate
 x86_emulate:
 	mkdir -p $@
-	ln -sf $(XEN_ROOT)/xen/arch/x86/$@/*.[ch] $@/
-
-x86_emulate/%: x86_emulate ;
 
 HOSTCFLAGS-x86_64 := -fno-PIE
 $(call cc-option-add,HOSTCFLAGS-x86_64,HOSTCC,-no-pie)
+
+# clang's integrated as does not support some mnemonics:
+#  https://github.com/llvm/llvm-project/issues/183635
+$(call cc-option-add,HOSTCFLAGS-x86_64,HOSTCC,-no-integrated-as)
+
 HOSTCFLAGS += $(CFLAGS_xeninclude) -I. $(HOSTCFLAGS-$(XEN_COMPILE_ARCH))
 
 x86.h := $(addprefix $(XEN_ROOT)/tools/include/xen/asm/,\
@@ -300,6 +313,8 @@ x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h x86_emulate/private.h $
 $(OBJS): %.o: %.c $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -c -g -o $@ $<
 
+$(filter x86_emulate/%.o,$(OBJS)): x86_emulate
+
 x86-emulate.o: x86_emulate/x86_emulate.c
 x86-emulate.o x86_emulate/%.o: HOSTCFLAGS += -D__XEN_TOOLS__
 
@@ -307,5 +322,12 @@ x86-emulate.o x86_emulate/%.o: HOSTCFLAGS += -D__XEN_TOOLS__
 # gcc's, we need to keep it from re-ordering top-level constructs.
 $(call cc-option-add,HOSTCFLAGS-toplevel,HOSTCC,-fno-toplevel-reorder)
 test_x86_emulator.o: HOSTCFLAGS += $(HOSTCFLAGS-toplevel)
+
+# When unrolling loops, compilers may duplicate inline assembly. put_insn()
+# emits labels, which may not be emitted multiple times.
+# The default HOSTCFLAGS from $(XEN_ROOT)/Config.mk would set a non-zero
+# optimisation level.
+# Until a better solution is found: reduce optimizations in the test runner.
+test_x86_emulator.o: HOSTCFLAGS += -Og
 
 test_x86_emulator.o: $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))

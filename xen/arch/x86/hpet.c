@@ -23,7 +23,6 @@
 #include <asm/irq-vectors.h>
 #include <asm/msi.h>
 
-#define MAX_DELTA_NS MILLISECS(10*1000)
 #define MIN_DELTA_NS MICROSECS(20)
 
 #define HPET_EVT_USED_BIT    0
@@ -40,7 +39,7 @@ struct hpet_event_channel
     s_time_t      next_event;
     cpumask_var_t cpumask;
     spinlock_t    lock;
-    void          (*event_handler)(struct hpet_event_channel *ch);
+    bool          event_handler;
 
     unsigned int idx;   /* physical channel idx */
     unsigned int cpu;   /* msi target */
@@ -124,7 +123,7 @@ static inline unsigned long ns2ticks(unsigned long nsec, int shift,
     return (unsigned long) tmp;
 }
 
-static int hpet_next_event(unsigned long delta, int timer)
+static int hpet_next_event(unsigned long delta, unsigned int timer)
 {
     uint32_t cnt, cmp;
     unsigned long flags;
@@ -147,12 +146,12 @@ static int reprogram_hpet_evt_channel(
     int64_t delta;
     int ret;
 
-    if ( (ch->flags & HPET_EVT_DISABLE) || (expire == 0) )
+    if ( ch->flags & HPET_EVT_DISABLE )
         return 0;
 
-    if ( unlikely(expire < 0) )
+    if ( unlikely(expire <= 0) )
     {
-        printk(KERN_DEBUG "reprogram: expire <= 0\n");
+        ASSERT_UNREACHABLE();
         return -ETIME;
     }
 
@@ -162,23 +161,21 @@ static int reprogram_hpet_evt_channel(
 
     ch->next_event = expire;
 
-    if ( expire == STIME_MAX )
-    {
-        /* We assume it will take a long time for the timer to wrap. */
-        hpet_write32(0, HPET_Tn_CMP(ch->idx));
-        return 0;
-    }
+    ASSERT(expire != STIME_MAX);
 
-    delta = min_t(int64_t, delta, MAX_DELTA_NS);
     delta = max_t(int64_t, delta, MIN_DELTA_NS);
     delta = ns2ticks(delta, ch->shift, ch->mult);
 
-    ret = hpet_next_event(delta, ch->idx);
-    while ( ret && force )
+    if ( delta > UINT32_MAX )
     {
-        delta += delta;
-        ret = hpet_next_event(delta, ch->idx);
+        hpet_write32(hpet_read32(HPET_COUNTER), HPET_Tn_CMP(ch->idx));
+        return 0;
     }
+
+    do {
+        ret = hpet_next_event(delta, ch->idx);
+        delta += delta;
+    } while ( ret && force );
 
     return ret;
 }
@@ -194,7 +191,7 @@ static void evt_do_broadcast(cpumask_t *mask)
        cpumask_raise_softirq(mask, TIMER_SOFTIRQ);
 }
 
-static void cf_check handle_hpet_broadcast(struct hpet_event_channel *ch)
+static void handle_hpet_broadcast(struct hpet_event_channel *ch)
 {
     cpumask_t *scratch = this_cpu(hpet_scratch_cpumask);
     s_time_t now, next_event;
@@ -250,7 +247,7 @@ static void cf_check hpet_interrupt_handler(int irq, void *data)
         return;
     }
 
-    ch->event_handler(ch);
+    handle_hpet_broadcast(ch);
 }
 
 static void hpet_enable_channel(struct hpet_event_channel *ch)
@@ -287,8 +284,12 @@ static int hpet_msi_write(struct hpet_event_channel *ch, struct msi_msg *msg)
     {
         int rc = iommu_update_ire_from_msi(&ch->msi, msg);
 
-        if ( rc )
+        if ( rc < 0 )
             return rc;
+        /*
+         * Always propagate writes, to avoid having to pass a flag for handling
+         * a forceful write in the resume from suspension case.
+         */
     }
 
     hpet_write32(msg->data, HPET_Tn_ROUTE(ch->idx));
@@ -298,22 +299,6 @@ static int hpet_msi_write(struct hpet_event_channel *ch, struct msi_msg *msg)
 }
 
 #define hpet_msi_shutdown hpet_msi_mask
-
-static void cf_check hpet_msi_set_affinity(
-    struct irq_desc *desc, const cpumask_t *mask)
-{
-    struct hpet_event_channel *ch = desc->action->dev_id;
-    struct msi_msg msg = ch->msi.msg;
-
-    /* This really is only for dump_irqs(). */
-    cpumask_copy(desc->arch.cpu_mask, mask);
-
-    msg.dest32 = cpu_mask_to_apicid(mask);
-    msg.address_lo &= ~MSI_ADDR_DEST_ID_MASK;
-    msg.address_lo |= MSI_ADDR_DEST_ID(msg.dest32);
-    if ( msg.dest32 != ch->msi.msg.dest32 )
-        hpet_msi_write(ch, &msg);
-}
 
 /*
  * IRQ Chip for MSI HPET Devices,
@@ -326,7 +311,6 @@ static hw_irq_controller hpet_msi_type = {
     .disable    = hpet_msi_mask,
     .ack        = irq_actor_none,
     .end        = end_nonmaskable_irq,
-    .set_affinity   = hpet_msi_set_affinity,
 };
 
 static int __hpet_setup_msi_irq(struct irq_desc *desc)
@@ -653,7 +637,7 @@ void __init hpet_broadcast_init(void)
         hpet_events[i].next_event = STIME_MAX;
         spin_lock_init(&hpet_events[i].lock);
         smp_wmb();
-        hpet_events[i].event_handler = handle_hpet_broadcast;
+        hpet_events[i].event_handler = true;
 
         hpet_events[i].msi.msi_attrib.maskbit = 1;
         hpet_events[i].msi.msi_attrib.pos = MSI_TYPE_HPET;
@@ -731,7 +715,7 @@ void hpet_disable_legacy_broadcast(void)
 
     spin_lock_irqsave(&hpet_events->lock, flags);
 
-    hpet_events->flags |= HPET_EVT_DISABLE;
+    set_bit(HPET_EVT_DISABLE_BIT, &hpet_events->flags);
 
     /* disable HPET T0 */
     cfg = hpet_read32(HPET_Tn_CFG(0));
@@ -810,13 +794,15 @@ int hpet_broadcast_is_available(void)
 
 int hpet_legacy_irq_tick(void)
 {
-    this_cpu(irq_count)--;
-
     if ( !hpet_events ||
          (hpet_events->flags & (HPET_EVT_DISABLE|HPET_EVT_LEGACY)) !=
          HPET_EVT_LEGACY )
         return 0;
-    hpet_events->event_handler(hpet_events);
+
+    this_cpu(irq_count)--;
+
+    handle_hpet_broadcast(hpet_events);
+
     return 1;
 }
 

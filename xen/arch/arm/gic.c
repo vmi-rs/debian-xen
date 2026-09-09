@@ -111,7 +111,8 @@ static void gic_set_irq_priority(struct irq_desc *desc, unsigned int priority)
 void gic_route_irq_to_xen(struct irq_desc *desc, unsigned int priority)
 {
     ASSERT(priority <= 0xff);     /* Only 8 bits of priority */
-    ASSERT(desc->irq < gic_number_lines());/* Can't route interrupts that don't exist */
+    /* Can't route interrupts that don't exist */
+    ASSERT(gic_is_valid_line(desc->irq));
     ASSERT(test_bit(_IRQ_DISABLED, &desc->status));
     ASSERT(spin_is_locked(&desc->lock));
 
@@ -133,8 +134,7 @@ int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
 
     ASSERT(spin_is_locked(&desc->lock));
     /* Caller has already checked that the IRQ is an SPI */
-    ASSERT(virq >= 32);
-    ASSERT(virq < vgic_num_irqs(d));
+    ASSERT(vgic_is_spi(d, virq));
     ASSERT(!is_lpi(virq));
 
     ret = vgic_connect_hw_irq(d, NULL, virq, desc, true);
@@ -251,6 +251,9 @@ void __init gic_init(void)
         panic("Failed to initialize the GIC drivers\n");
     /* Clear LR mask for cpu0 */
     clear_cpu_lr_mask();
+
+    if ( gic_number_lines() > VGIC_MAX_IRQS )
+        printk(XENLOG_WARNING "Maximum number of vGIC IRQs exceeded\n");
 }
 
 void send_SGI_mask(const cpumask_t *cpumask, enum gic_sgi sgi)
@@ -339,7 +342,7 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
         /* Reading IRQ will ACK it */
         irq = gic_hw_ops->read_irq();
 
-        if ( likely(irq >= GIC_SGI_STATIC_MAX && irq < 1020) )
+        if ( likely(irq >= GIC_SGI_STATIC_MAX && irq < 1020) || is_espi(irq) )
         {
             isb();
             do_IRQ(regs, irq, is_fiq);
@@ -383,10 +386,17 @@ void gic_dump_info(struct vcpu *v)
     gic_hw_ops->dump_state(v);
 }
 
+static DEFINE_PER_CPU_READ_MOSTLY(struct irqaction, irq_maintenance);
+
 void init_maintenance_interrupt(void)
 {
-    request_irq(gic_hw_ops->info->maintenance_irq, 0, maintenance_interrupt,
-                "irq-maintenance", NULL);
+    struct irqaction *maintenance = &this_cpu(irq_maintenance);
+
+    maintenance->name = "irq-maintenance";
+    maintenance->handler = maintenance_interrupt;
+    maintenance->dev_id = NULL;
+    maintenance->free_on_release = 0;
+    setup_irq(gic_hw_ops->info->maintenance_irq, 0, maintenance);
 }
 
 int gic_make_hwdom_dt_node(const struct domain *d,

@@ -6,6 +6,7 @@
 #include <xen/irq.h>
 #include <xen/sections.h>
 #include <xen/time.h>
+#include <xen/xvmalloc.h>
 
 DEFINE_XEN_GUEST_HANDLE(CHAR16);
 
@@ -33,6 +34,7 @@ void efi_rs_leave(struct efi_rs_state *state);
 
 #ifndef CONFIG_ARM
 # include <asm/i387.h>
+# include <asm/msr.h>
 # include <asm/xstate.h>
 # include <public/platform.h>
 #endif
@@ -40,6 +42,7 @@ void efi_rs_leave(struct efi_rs_state *state);
 unsigned int __read_mostly efi_num_ct;
 const EFI_CONFIGURATION_TABLE *__read_mostly efi_ct;
 
+bool __ro_after_init efi_secure_boot;
 unsigned int __read_mostly efi_version;
 unsigned int __read_mostly efi_fw_revision;
 const CHAR16 *__read_mostly efi_fw_vendor;
@@ -95,7 +98,8 @@ struct efi_rs_state efi_rs_enter(void)
      */
     sync_local_execstate();
     state.cr3 = read_cr3();
-    save_fpu_enable();
+    if ( !is_idle_vcpu(current) )
+        vcpu_save_fpu(current);
     asm volatile ( "fnclex; fldcw %0" :: "m" (fcw) );
     asm volatile ( "ldmxcsr %0" :: "m" (mxcsr) );
 
@@ -156,7 +160,8 @@ void efi_rs_leave(struct efi_rs_state *state)
     }
     irq_exit();
     spin_unlock(&efi_rs_lock);
-    vcpu_restore_fpu_nonlazy(curr, true);
+    if ( !is_idle_vcpu(curr) )
+        vcpu_restore_fpu(curr);
 }
 
 unsigned long efi_get_time(void)
@@ -178,19 +183,6 @@ unsigned long efi_get_time(void)
 
     return mktime(time.Year, time.Month, time.Day,
                   time.Hour, time.Minute, time.Second);
-}
-
-void efi_halt_system(void)
-{
-    EFI_STATUS status;
-    struct efi_rs_state state = efi_rs_enter();
-
-    if ( !state.cr3 )
-        return;
-    status = efi_rs->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
-    efi_rs_leave(&state);
-
-    printk(XENLOG_WARNING "EFI: could not halt system (%#lx)\n", status);
 }
 
 void efi_reset_system(bool warm)
@@ -495,23 +487,23 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         len = gwstrlen(guest_handle_cast(op->u.get_variable.name, CHAR16));
         if ( len < 0 )
             return len;
-        name = xmalloc_array(CHAR16, ++len);
+        name = xvmalloc_array(CHAR16, ++len);
         if ( !name )
            return -ENOMEM;
         if ( __copy_from_guest(name, op->u.get_variable.name, len) ||
              wmemchr(name, 0, len) != name + len - 1 )
         {
-            xfree(name);
+            xvfree(name);
             return -EIO;
         }
 
         size = op->u.get_variable.size;
         if ( size )
         {
-            data = xmalloc_bytes(size);
+            data = xvmalloc_array(unsigned char, size);
             if ( !data )
             {
-                xfree(name);
+                xvfree(name);
                 return -ENOMEM;
             }
         }
@@ -534,8 +526,8 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         else
             rc = -EOPNOTSUPP;
 
-        xfree(data);
-        xfree(name);
+        xvfree(data);
+        xvfree(name);
     }
     break;
 
@@ -548,17 +540,17 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         len = gwstrlen(guest_handle_cast(op->u.set_variable.name, CHAR16));
         if ( len < 0 )
             return len;
-        name = xmalloc_array(CHAR16, ++len);
+        name = xvmalloc_array(CHAR16, ++len);
         if ( !name )
            return -ENOMEM;
         if ( __copy_from_guest(name, op->u.set_variable.name, len) ||
              wmemchr(name, 0, len) != name + len - 1 )
         {
-            xfree(name);
+            xvfree(name);
             return -EIO;
         }
 
-        data = xmalloc_bytes(op->u.set_variable.size);
+        data = xvmalloc_array(unsigned char, op->u.set_variable.size);
         if ( !data )
             rc = -ENOMEM;
         else if ( copy_from_guest(data, op->u.set_variable.data,
@@ -576,8 +568,8 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             efi_rs_leave(&state);
         }
 
-        xfree(data);
-        xfree(name);
+        xvfree(data);
+        xvfree(name);
     }
     break;
 
@@ -593,13 +585,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             return -EINVAL;
 
         size = op->u.get_next_variable_name.size;
-        name.raw = xzalloc_bytes(size);
+        name.raw = xvzalloc_array(unsigned char, size);
         if ( !name.raw )
             return -ENOMEM;
         if ( copy_from_guest(name.raw, op->u.get_next_variable_name.name,
                              size) )
         {
-            xfree(name.raw);
+            xvfree(name.raw);
             return -EFAULT;
         }
 
@@ -624,7 +616,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         else
             rc = -EOPNOTSUPP;
 
-        xfree(name.raw);
+        xvfree(name.raw);
     }
     break;
 

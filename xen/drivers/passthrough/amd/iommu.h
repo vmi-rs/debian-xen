@@ -77,8 +77,8 @@ struct amd_iommu {
     struct list_head list;
     spinlock_t lock; /* protect iommu */
 
-    u16 seg;
-    u16 bdf;
+    pci_sbdf_t sbdf;
+
     struct msi_desc msi;
 
     u16 cap_offset;
@@ -240,7 +240,7 @@ void amd_iommu_flush_intremap(struct amd_iommu *iommu, uint16_t bdf);
 void amd_iommu_flush_all_caches(struct amd_iommu *iommu);
 
 /* find iommu for bdf */
-struct amd_iommu *find_iommu_for_device(int seg, int bdf);
+struct amd_iommu *find_iommu_for_device(pci_sbdf_t sbdf);
 
 /* interrupt remapping */
 bool cf_check iov_supports_xt(void);
@@ -262,7 +262,7 @@ int cf_check amd_setup_hpet_msi(struct msi_desc *msi_desc);
 void cf_check amd_iommu_dump_intremap_tables(unsigned char key);
 
 extern struct ioapic_sbdf {
-    u16 bdf, seg;
+    pci_sbdf_t sbdf;
     u8 id;
     bool cmdline;
     u16 *pin_2_idx;
@@ -273,7 +273,8 @@ unsigned int ioapic_id_to_index(unsigned int apic_id);
 unsigned int get_next_ioapic_sbdf_index(void);
 
 extern struct hpet_sbdf {
-    u16 bdf, seg, id;
+    pci_sbdf_t sbdf;
+    uint16_t id;
     enum {
         HPET_NONE,
         HPET_CMDL,

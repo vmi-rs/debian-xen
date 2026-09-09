@@ -23,25 +23,17 @@ void __update_guest_eip(struct cpu_user_regs *regs, unsigned int inst_len);
 
 static inline void svm_vmload_pa(paddr_t vmcb)
 {
-    asm volatile (
-        ".byte 0x0f,0x01,0xda" /* vmload */
-        : : "a" (vmcb) : "memory" );
+    asm volatile ( "vmload" :: "a" (vmcb) : "memory" );
 }
 
 static inline void svm_vmsave_pa(paddr_t vmcb)
 {
-    asm volatile (
-        ".byte 0x0f,0x01,0xdb" /* vmsave */
-        : : "a" (vmcb) : "memory" );
+    asm volatile ( "vmsave" :: "a" (vmcb) : "memory" );
 }
 
 static inline void svm_invlpga(unsigned long linear, uint32_t asid)
 {
-    asm volatile (
-        ".byte 0x0f,0x01,0xdf"
-        : /* output */
-        : /* input */
-        "a" (linear), "c" (asid) );
+    asm volatile ( "invlpga" :: "a" (linear), "c" (asid) );
 }
 
 /*
@@ -85,6 +77,23 @@ unsigned int svm_get_task_switch_insn_len(void);
 #define NPT_PFEC_with_gla      (1UL<<_NPT_PFEC_with_gla)
 #define _NPT_PFEC_in_gpt       33
 #define NPT_PFEC_in_gpt        (1UL<<_NPT_PFEC_in_gpt)
+
+/*
+ * VMRUN doesn't switch fs/gs/tr/ldtr and SHADOWGS/SYSCALL/SYSENTER state.
+ * Therefore, guest state is in the hardware registers when servicing a
+ * VMExit.
+ *
+ * Immediately after a VMExit, the vmcb is stale, and needs to be brought
+ * into sync by VMSAVE.  If state in the vmcb is modified, a VMLOAD is
+ * needed before the following VMRUN.
+ */
+enum vmcb_sync_state {
+    vmcb_in_sync,
+    vmcb_needs_vmsave,    /* VMCB out of sync (VMSAVE needed)? */
+    vmcb_needs_vmload,    /* VMCB dirty (VMLOAD needed)? */
+};
+
+void svm_sync_vmcb(struct vcpu *v, enum vmcb_sync_state new_state);
 
 #endif /* __X86_HVM_SVM_SVM_PRIV_H__ */
 

@@ -124,8 +124,10 @@ void __init pv_shim_fixup_e820(void)
     ASSERT(i < ARRAY_SIZE(reserved_pages));     \
     reserved_pages[i++].mfn = pfn;              \
 })
+    /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
     MARK_PARAM_RAM(HVM_PARAM_STORE_PFN);
     if ( !pv_console )
+        /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
         MARK_PARAM_RAM(HVM_PARAM_CONSOLE_PFN);
 #undef MARK_PARAM_RAM
 }
@@ -207,10 +209,14 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
         evtchn_reserve(d, param);                                              \
     }                                                                          \
 })
+    /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
     SET_AND_MAP_PARAM(HVM_PARAM_STORE_PFN, si->store_mfn, store_va);
+    /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
     SET_AND_MAP_PARAM(HVM_PARAM_STORE_EVTCHN, si->store_evtchn, 0);
+    /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
     SET_AND_MAP_PARAM(HVM_PARAM_CONSOLE_EVTCHN, si->console.domU.evtchn, 0);
     if ( !pv_console )
+        /* SAF-6-safe Rule 20.12 expansion of macros HVM_PARAM_*. */
         SET_AND_MAP_PARAM(HVM_PARAM_CONSOLE_PFN, si->console.domU.mfn,
                           console_va);
 #undef SET_AND_MAP_PARAM
@@ -238,6 +244,8 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
      * guest from depleting the shim memory pool.
      */
     d->max_pages = domain_tot_pages(d);
+
+    d->console->input_allowed = true;
 }
 
 static void write_start_info(struct domain *d)
@@ -603,8 +611,7 @@ long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         if ( pv_console && send.port == pv_console_evtchn() )
         {
-            consoled_guest_rx();
-            rc = 0;
+            rc = consoled_guest_rx();
         }
         else
             rc = xen_hypercall_event_channel_op(EVTCHNOP_send, &send);
@@ -1016,12 +1023,9 @@ void pv_shim_offline_memory(unsigned int nr, unsigned int order)
     }
 }
 
-domid_t get_initial_domain_id(void)
+domid_t pv_shim_get_initial_domain_id(void)
 {
     uint32_t eax, ebx, ecx, edx;
-
-    if ( !pv_shim )
-        return 0;
 
     cpuid(xen_cpuid_base + 4, &eax, &ebx, &ecx, &edx);
 

@@ -1,4 +1,4 @@
-/* This file is legitimately included multiple times. */
+/* This file is intended to be included multiple times. */
 /*#ifndef __XEN_PERFC_DEFN_H__*/
 /*#define __XEN_PERFC_DEFN_H__*/
 
@@ -7,7 +7,7 @@ PERFCOUNTER_ARRAY(exceptions,           "exceptions", 32)
 #ifdef CONFIG_HVM
 
 #define VMX_PERF_EXIT_REASON_SIZE 76
-#define VMEXIT_NPF_PERFC 143
+#define VMEXIT_NPF_PERFC 166
 #define SVM_PERF_EXIT_REASON_SIZE (VMEXIT_NPF_PERFC + 1)
 PERFCOUNTER_ARRAY(vmexits,              "vmexits",
                   MAX(VMX_PERF_EXIT_REASON_SIZE, SVM_PERF_EXIT_REASON_SIZE))

@@ -45,7 +45,8 @@ static DEFINE_SPINLOCK(wc_lock);
 struct tm gmtime(unsigned long t)
 {
     struct tm tbuf;
-    long days, rem;
+    unsigned long days;
+    unsigned int rem;
     int y;
     const unsigned short int *ip;
 
@@ -70,21 +71,15 @@ struct tm gmtime(unsigned long t)
     tbuf.tm_sec = rem % 60;
     /* January 1, 1970 was a Thursday.  */
     tbuf.tm_wday = (4 + days) % 7;
-    if ( tbuf.tm_wday < 0 )
-        tbuf.tm_wday += 7;
     while ( days >= (rem = __isleap(y) ? 366 : 365) )
     {
         ++y;
         days -= rem;
     }
-    while ( days < 0 )
-    {
-        --y;
-        days += __isleap(y) ? 366 : 365;
-    }
     tbuf.tm_year = y - 1900;
     tbuf.tm_yday = days;
-    ip = (const unsigned short int *)__mon_lengths[__isleap(y)];
+    /* SAF-14-safe use boolean as an array index */
+    ip = __mon_lengths[__isleap(y)];
     for ( y = 0; days >= ip[y]; ++y )
         days -= ip[y];
     tbuf.tm_mon = y;

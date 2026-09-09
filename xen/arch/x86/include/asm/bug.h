@@ -19,12 +19,12 @@
  *  ...
  */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
-#define BUG_INSTR       "ud2"
+#define BUG_INSTR       ".byte 0xd6" /* UDB, requiring gas 2.46 */
 #define BUG_ASM_CONST   "c"
 
-#else  /* !__ASSEMBLY__ */
+#else  /* !__ASSEMBLER__ */
 
 /*
  * Construct a bugframe, suitable for using in assembly code.  Should always
@@ -37,7 +37,7 @@
         .error "Invalid BUGFRAME index"
     .endif
 
-    .L\@ud: ud2a
+    .L\@ud: .byte 0xd6 /* UDB, requiring gas 2.46 */
 
     .pushsection .rodata.str1, "aMS", @progbits, 1
          .L\@s1: .asciz "\file_str"
@@ -66,6 +66,6 @@
 #define ASSERT_FAILED(msg)                                      \
      BUG_FRAME BUGFRAME_assert, __LINE__, __FILE__, 1, msg
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __X86_BUG_H__ */

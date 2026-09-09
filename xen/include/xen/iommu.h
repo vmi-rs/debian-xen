@@ -53,7 +53,9 @@ static inline bool dfn_eq(dfn_t x, dfn_t y)
 extern bool iommu_enable, iommu_enabled;
 extern bool force_iommu, iommu_verbose;
 /* Boolean except for the specific purposes of drivers/passthrough/iommu.c. */
+#ifdef CONFIG_HAS_PCI
 extern uint8_t iommu_quarantine;
+#endif /* CONFIG_HAS_PCI */
 #else
 #define iommu_enabled false
 #endif
@@ -110,6 +112,8 @@ extern int8_t iommu_hwdom_reserved;
 
 extern unsigned int iommu_dev_iotlb_timeout;
 
+#ifdef CONFIG_HAS_PASSTHROUGH
+
 int iommu_setup(void);
 int iommu_hardware_setup(void);
 
@@ -121,6 +125,28 @@ void arch_iommu_domain_destroy(struct domain *d);
 int arch_iommu_domain_init(struct domain *d);
 void arch_iommu_check_autotranslated_hwdom(struct domain *d);
 void arch_iommu_hwdom_init(struct domain *d);
+
+#else
+
+static inline int iommu_setup(void)
+{
+    return -ENODEV;
+}
+
+static inline int iommu_domain_init(struct domain *d, unsigned int opts)
+{
+    /*
+     * Return as the real iommu_domain_init() would: Success when
+     * !is_iommu_enabled(), following from !iommu_enabled when !HAS_PASSTHROUGH
+     */
+    return 0;
+}
+
+static inline void iommu_hwdom_init(struct domain *d) {}
+
+static inline void iommu_domain_destroy(struct domain *d) {}
+
+#endif /* HAS_PASSTHROUGH */
 
 /*
  * The following flags are passed to map (applicable ones also to unmap)
@@ -206,8 +232,10 @@ struct msi_msg;
 #define PT_IRQ_TIME_OUT MILLISECS(8)
 #endif /* HAS_PCI */
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
 #include <xen/device_tree.h>
+
+#ifdef CONFIG_HAS_PASSTHROUGH
 
 int iommu_assign_dt_device(struct domain *d, struct dt_device_node *dev);
 int iommu_deassign_dt_device(struct domain *d, struct dt_device_node *dev);
@@ -215,7 +243,8 @@ int iommu_dt_domain_init(struct domain *d);
 int iommu_release_dt_devices(struct domain *d);
 
 /*
- * Helper to add master device to the IOMMU using generic IOMMU DT bindings.
+ * Helpers to add master device to the IOMMU using generic (PCI-)IOMMU
+ * DT bindings.
  *
  * Return values:
  *  0 : device is protected by an IOMMU
@@ -224,6 +253,19 @@ int iommu_release_dt_devices(struct domain *d);
  *      (IOMMU is not enabled/present or device is not connected to it).
  */
 int iommu_add_dt_device(struct dt_device_node *np);
+
+/*
+ * Fills out the device's IOMMU fwspec with IOMMU ids from the DT.
+ * Ids are specified in the iommu-map property in the host bridge node.
+ * More information on the iommu-map property format can be found in
+ * Documentation/devicetree/bindings/pci/pci-iommu.txt from Linux.
+ *
+ * Return values:
+ *  0 : iommu_fwspec is filled out successfully.
+ * <0 : error while filling out the iommu_fwspec.
+ * >0 : IOMMU is not enabled/present or device is not connected to it.
+ */
+int iommu_add_dt_pci_sideband_ids(struct pci_dev *pdev);
 
 int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
                        XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
@@ -238,7 +280,36 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
  */
 int iommu_remove_dt_device(struct dt_device_node *np);
 
-#endif /* HAS_DEVICE_TREE */
+#else
+
+static inline int iommu_assign_dt_device(struct domain *d,
+                                         struct dt_device_node *dev)
+{
+    return -EINVAL;
+}
+
+static inline int iommu_add_dt_device(struct dt_device_node *np)
+{
+    /*
+     * !HAS_PASSTHROUGH => !iommu_enabled (see the non-stub
+     * iommu_add_dt_device())
+     */
+    return 1;
+}
+
+static inline int iommu_release_dt_devices(struct domain *d)
+{
+    return 0;
+}
+
+static inline int iommu_add_dt_pci_sideband_ids(struct pci_dev *pdev)
+{
+    return -EOPNOTSUPP;
+}
+
+#endif /* HAS_PASSTHROUGH */
+
+#endif /* HAS_DEVICE_TREE_DISCOVERY */
 
 struct page_info;
 
@@ -305,7 +376,7 @@ struct iommu_ops {
     int (*get_reserved_device_memory)(iommu_grdm_t *func, void *ctxt);
     void (*dump_page_tables)(struct domain *d);
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
     /*
      * All IOMMU drivers which support generic IOMMU DT bindings should use
      * this callback. This is a way for the framework to provide the driver
@@ -353,7 +424,7 @@ struct domain_iommu {
     /* iommu_ops */
     const struct iommu_ops *platform_ops;
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef CONFIG_HAS_DEVICE_TREE_DISCOVERY
     /* List of DT devices assigned to this domain */
     struct list_head dt_devices;
 #endif
@@ -383,17 +454,19 @@ struct domain_iommu {
 #define iommu_set_feature(d, f)   set_bit(f, dom_iommu(d)->features)
 #define iommu_clear_feature(d, f) clear_bit(f, dom_iommu(d)->features)
 
+#ifdef CONFIG_HAS_PASSTHROUGH
 /* Are we using the domain P2M table as its IOMMU pagetable? */
 #define iommu_use_hap_pt(d)       (IS_ENABLED(CONFIG_HVM) && \
                                    dom_iommu(d)->hap_pt_share)
 
 /* Does the IOMMU pagetable need to be kept synchronized with the P2M */
-#ifdef CONFIG_HAS_PASSTHROUGH
 #define need_iommu_pt_sync(d)     (dom_iommu(d)->need_sync)
 
 int iommu_do_domctl(struct xen_domctl *domctl, struct domain *d,
                     XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
 #else
+#define iommu_use_hap_pt(d)       ({ (void)(d); false; })
+
 #define need_iommu_pt_sync(d)     ({ (void)(d); false; })
 
 static inline int iommu_do_domctl(struct xen_domctl *domctl, struct domain *d,
@@ -429,12 +502,15 @@ void iommu_dev_iotlb_flush_timeout(struct domain *d, struct pci_dev *pdev);
  */
 DECLARE_PER_CPU(bool, iommu_dont_flush_iotlb);
 
-extern struct spinlock iommu_pt_cleanup_lock;
-extern struct page_list_head iommu_pt_cleanup_list;
-
 bool arch_iommu_use_permitted(const struct domain *d);
 
 #ifdef CONFIG_X86
+/*
+ * Return values:
+ *  - < 0 on error.
+ *  - 0 on success and no need to write msi_msg to the hardware.
+ *  - 1 on success and msi_msg must be propagated to the hardware.
+ */
 static inline int iommu_update_ire_from_msi(
     struct msi_desc *msi_desc, struct msi_msg *msg)
 {

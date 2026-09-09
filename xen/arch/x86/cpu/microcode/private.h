@@ -8,6 +8,9 @@
 /* Opaque.  Internals are vendor-specific. */
 struct microcode_patch;
 
+/* Aids dead-code elimination of the static hooks */
+#define MICROCODE_OP(x) (IS_ENABLED(CONFIG_MICROCODE_LOADING) ? (x) : NULL)
+
 struct microcode_ops {
     /*
      * Parse a microcode container.  Format is vendor-specific.
@@ -30,7 +33,7 @@ struct microcode_ops {
      * If one is not found, (nothing matches the current CPU), return NULL.
      * Also may return ERR_PTR(-err), e.g. bad container, out of memory.
      */
-    struct microcode_patch *(*cpu_request_microcode)(
+    struct microcode_patch *(*parse)(
         const void *buf, size_t size, bool make_copy);
 
     /*
@@ -43,8 +46,7 @@ struct microcode_ops {
      * Attempt to load the provided patch into the CPU.  Returns an error if
      * anything didn't go as expected.
      */
-    int (*apply_microcode)(const struct microcode_patch *patch,
-                           unsigned int flags);
+    int (*load)(const struct microcode_patch *patch, unsigned int flags);
 
     /*
      * Given a current patch, and a proposed new patch, order them based on revision.
@@ -76,8 +78,8 @@ extern bool opt_digest_check;
  *   - Loading available
  *
  * These are encoded by (not) filling in ops->collect_cpu_info (i.e. no
- * support available) and (not) ops->apply_microcode (i.e. read only).
- * Otherwise, all hooks must be filled in.
+ * support available) and (not) ops->load (i.e. read only).  Otherwise, all
+ * hooks must be filled in.
  */
 #ifdef CONFIG_AMD
 void ucode_probe_amd(struct microcode_ops *ops);

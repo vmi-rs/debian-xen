@@ -119,7 +119,7 @@ static void setup_generic_write(libxl__egc *egc,
                                 void *body,
                                 sws_record_done_cb cb)
 {
-    static const uint8_t zero_padding[1U << REC_ALIGN_ORDER] = { 0 };
+    static const uint8_t zero_padding[REC_ALIGN] = {};
 
     libxl__datacopier_state *dc = &stream->dc;
     int rc;
@@ -136,7 +136,7 @@ static void setup_generic_write(libxl__egc *egc,
         return;
     }
 
-    size_t padsz = ROUNDUP(hdr->length, REC_ALIGN_ORDER) - hdr->length;
+    size_t padsz = ROUNDUP(hdr->length, REC_ALIGN) - hdr->length;
     uint32_t length = hdr->length;
 
     /* Insert header */
@@ -252,10 +252,6 @@ void libxl__stream_write_start(libxl__egc *egc,
         stream->device_model_version =
             libxl__device_model_version_running(gc, dss->domid);
         switch (stream->device_model_version) {
-        case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
-            stream->emu_sub_hdr.id = EMULATOR_QEMU_TRADITIONAL;
-            break;
-
         case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
             stream->emu_sub_hdr.id = EMULATOR_QEMU_UPSTREAM;
             break;

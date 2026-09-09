@@ -1,7 +1,7 @@
 #ifndef __ASM_SMP_H
 #define __ASM_SMP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <xen/percpu.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
@@ -29,7 +29,6 @@ int cpu_up_send_sgi(int cpu);
 extern void init_secondary(void);
 
 extern void smp_init_cpus(void);
-extern void smp_clear_cpu_maps (void);
 extern unsigned int smp_get_max_cpus(void);
 
 #define cpu_physical_id(cpu) cpu_logical_map(cpu)

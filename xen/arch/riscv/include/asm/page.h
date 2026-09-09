@@ -3,16 +3,14 @@
 #ifndef ASM__RISCV__PAGE_H
 #define ASM__RISCV__PAGE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/bug.h>
 #include <xen/const.h>
-#include <xen/domain_page.h>
 #include <xen/errno.h>
 #include <xen/types.h>
 
 #include <asm/atomic.h>
-#include <asm/mm.h>
 #include <asm/page-bits.h>
 
 #define VPN_MASK                    (PAGETABLE_ENTRIES - 1UL)
@@ -37,6 +35,16 @@
 #define PTE_ACCESSED                BIT(6, UL)
 #define PTE_DIRTY                   BIT(7, UL)
 #define PTE_RSW                     (BIT(8, UL) | BIT(9, UL))
+/*
+ * [62:61] Svpbmt Memory Type definitions:
+ *
+ *  00 - PMA    Normal Cacheable, No change to implied PMA memory type
+ *  01 - NC     Non-cacheable, idempotent, weakly-ordered Main Memory
+ *  10 - IO     Non-cacheable, non-idempotent, strongly-ordered I/O memory
+ *  11 - Rsvd   Reserved for future standard use
+ */
+#define PTE_PBMT_NOCACHE            BIT(61, UL)
+#define PTE_PBMT_IO                 BIT(62, UL)
 
 #define PTE_LEAF_DEFAULT            (PTE_VALID | PTE_READABLE | PTE_WRITABLE)
 #define PTE_TABLE                   (PTE_VALID)
@@ -46,6 +54,15 @@
 #define PAGE_HYPERVISOR_RX          (PTE_VALID | PTE_READABLE | PTE_EXECUTABLE)
 
 #define PAGE_HYPERVISOR             PAGE_HYPERVISOR_RW
+/*
+ * PAGE_HYPERVISOR_NOCACHE is used for ioremap().
+ *
+ * Both PTE_PBMT_IO and PTE_PBMT_NOCACHE are non-cacheable, but the difference
+ * is that IO is non-idempotent and strongly ordered, which makes it a good
+ * candidate for mapping IOMEM.
+ */
+#define PAGE_HYPERVISOR_NOCACHE     (PAGE_HYPERVISOR_RW | PTE_PBMT_IO)
+#define PAGE_HYPERVISOR_WC          (PAGE_HYPERVISOR_RW | PTE_PBMT_NOCACHE)
 
 /*
  * The PTE format does not contain the following bits within itself;
@@ -56,7 +73,17 @@
 #define PTE_SMALL       BIT(10, UL)
 #define PTE_POPULATE    BIT(11, UL)
 
+enum pbmt_type {
+    pbmt_pma,
+    pbmt_nc,
+    pbmt_io,
+    pbmt_rsvd,
+    pbmt_count,
+};
+
 #define PTE_ACCESS_MASK (PTE_READABLE | PTE_WRITABLE | PTE_EXECUTABLE)
+
+#define PTE_PBMT_MASK   (PTE_PBMT_NOCACHE | PTE_PBMT_IO)
 
 /* Calculate the offsets into the pagetables for a given VA */
 #define pt_linear_offset(lvl, va)   ((va) >> XEN_PT_LEVEL_SHIFT(lvl))
@@ -93,15 +120,28 @@ typedef struct {
 #endif
 } pte_t;
 
-static inline pte_t paddr_to_pte(paddr_t paddr,
-                                 unsigned int permissions)
+#if RV_STAGE1_MODE != SATP_MODE_SV32
+#define PTE_PPN_MASK _UL(0x3FFFFFFFFFFC00)
+#else
+#define PTE_PPN_MASK _U(0xFFFFFC00)
+#endif
+
+static inline void pte_set_mfn(pte_t *p, mfn_t mfn)
 {
-    return (pte_t) { .pte = (paddr_to_pfn(paddr) << PTE_PPN_SHIFT) | permissions };
+    /*
+     * At the moment spec provides Sv32 - Sv57.
+     * If one day new MMU mode will be added it will be needed
+     * to check that PPN mask still continue to cover bits 53:10.
+     */
+    BUILD_BUG_ON(RV_STAGE1_MODE > SATP_MODE_SV57);
+
+    p->pte &= ~PTE_PPN_MASK;
+    p->pte |= MASK_INSR(mfn_x(mfn), PTE_PPN_MASK);
 }
 
-static inline paddr_t pte_to_paddr(pte_t pte)
+static inline mfn_t pte_get_mfn(pte_t p)
 {
-    return pfn_to_paddr(pte.pte >> PTE_PPN_SHIFT);
+    return _mfn(MASK_EXTR(p.pte, PTE_PPN_MASK));
 }
 
 static inline bool pte_is_valid(pte_t p)
@@ -150,6 +190,11 @@ static inline bool pte_is_mapping(pte_t p)
     return (p.pte & PTE_VALID) && (p.pte & PTE_ACCESS_MASK);
 }
 
+static inline bool pte_is_superpage(pte_t p, unsigned int level)
+{
+    return (level > 0) && pte_is_mapping(p);
+}
+
 static inline int clean_and_invalidate_dcache_va_range(const void *p,
                                                        unsigned long size)
 {
@@ -177,18 +222,13 @@ static inline void invalidate_icache(void)
 #define clear_page(page) memset((void *)(page), 0, PAGE_SIZE)
 #define copy_page(dp, sp) memcpy(dp, sp, PAGE_SIZE)
 
-static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache)
-{
-    const void *v = map_domain_page(_mfn(mfn));
+#define clear_page_hot  clear_page
+#define clear_page_cold clear_page
 
-    if ( clean_and_invalidate_dcache_va_range(v, PAGE_SIZE) )
-        BUG();
+#define scrub_page_hot(page) memset(page, SCRUB_BYTE_PATTERN, PAGE_SIZE)
+#define scrub_page_cold      scrub_page_hot
 
-    unmap_domain_page(v);
-
-    if ( sync_icache )
-        invalidate_icache();
-}
+void flush_page_to_ram(unsigned long mfn, bool sync_icache);
 
 /* Write a pagetable entry. */
 static inline void write_pte(pte_t *p, pte_t pte)
@@ -202,12 +242,14 @@ static inline pte_t read_pte(const pte_t *p)
     return read_atomic(p);
 }
 
-static inline pte_t pte_from_mfn(mfn_t mfn, unsigned int flags)
+static inline pte_t pte_from_mfn(mfn_t mfn, pte_attr_t flags)
 {
     unsigned long pte = (mfn_x(mfn) << PTE_PPN_SHIFT) | flags;
     return (pte_t){ .pte = pte };
 }
 
-#endif /* __ASSEMBLY__ */
+pte_t pt_walk(vaddr_t va, unsigned int *pte_level);
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* ASM__RISCV__PAGE_H */

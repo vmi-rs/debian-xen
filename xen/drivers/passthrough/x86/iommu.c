@@ -19,6 +19,7 @@
 #include <xen/paging.h>
 #include <xen/guest_access.h>
 #include <xen/event.h>
+#include <xen/param.h>
 #include <xen/softirq.h>
 #include <xen/vm_event.h>
 #include <xsm/xsm.h>
@@ -35,6 +36,12 @@ bool __read_mostly iommu_non_coherent;
 bool __initdata iommu_superpages = true;
 
 enum iommu_intremap __read_mostly iommu_intremap = iommu_intremap_full;
+
+/*
+ * iommu_inclusive_mapping: When set, all memory below 4GB is included in dom0
+ * 1:1 iommu mappings except xen and unusable regions.
+ */
+boolean_param("iommu_inclusive_mapping", iommu_hwdom_inclusive);
 
 #ifdef CONFIG_PV
 /* Possible unfiltered LAPIC/MSI messages from untrusted sources? */
@@ -312,14 +319,6 @@ void iommu_identity_map_teardown(struct domain *d)
     }
 }
 
-static int __hwdom_init cf_check map_subtract(unsigned long s, unsigned long e,
-                                              void *data)
-{
-    struct rangeset *map = data;
-
-    return rangeset_remove_range(map, s, e);
-}
-
 struct handle_iomemcap {
     struct rangeset *r;
     unsigned long last;
@@ -505,7 +504,7 @@ void __hwdom_init arch_iommu_hwdom_init(struct domain *d)
          * since ranges in mmio_ro_ranges are already explicitly mapped below
          * in read-only mode.
          */
-        rc = rangeset_report_ranges(mmio_ro_ranges, 0, ~0UL, map_subtract, map);
+        rc = rangeset_subtract(map, mmio_ro_ranges);
         if ( rc )
             panic("IOMMU failed to remove read-only regions: %d\n", rc);
     }

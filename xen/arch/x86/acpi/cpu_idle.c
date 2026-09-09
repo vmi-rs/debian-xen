@@ -1,6 +1,6 @@
 /*
- * cpu_idle - xen idle state module derived from Linux 
- *            drivers/acpi/processor_idle.c & 
+ * cpu_idle - xen idle state module derived from Linux
+ *            drivers/acpi/processor_idle.c &
  *            arch/x86/kernel/acpi/cstate.c
  *
  *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
@@ -30,33 +30,34 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
-#include <xen/errno.h>
-#include <xen/lib.h>
-#include <xen/types.h>
 #include <xen/acpi.h>
-#include <xen/smp.h>
+#include <xen/cpu.h>
+#include <xen/errno.h>
 #include <xen/guest_access.h>
-#include <xen/keyhandler.h>
-#include <xen/param.h>
-#include <xen/trace.h>
 #include <xen/irq.h>
-#include <xen/sections.h>
-
-#include <asm/io.h>
-#include <asm/iocap.h>
-#include <asm/hpet.h>
-#include <asm/processor.h>
+#include <xen/keyhandler.h>
+#include <xen/lib.h>
+#include <xen/notifier.h>
+#include <xen/param.h>
 #include <xen/pmstat.h>
+#include <xen/sections.h>
+#include <xen/smp.h>
 #include <xen/softirq.h>
-#include <public/platform.h>
-#include <public/sysctl.h>
-#include <acpi/cpufreq/cpufreq.h>
+#include <xen/trace.h>
+
 #include <asm/apic.h>
 #include <asm/cpuidle.h>
+#include <asm/hpet.h>
+#include <asm/io.h>
+#include <asm/iocap.h>
+#include <asm/match-cpu.h>
 #include <asm/mwait.h>
-#include <xen/notifier.h>
-#include <xen/cpu.h>
 #include <asm/spec_ctrl.h>
+
+#include <acpi/cpufreq/cpufreq.h>
+
+#include <public/platform.h>
+#include <public/sysctl.h>
 
 /*#define DEBUG_PM_CX*/
 
@@ -70,20 +71,20 @@ static always_inline void monitor(
      * The memory clobber is a compiler barrier.  Subseqeunt reads from the
      * monitored cacheline must not be reordered over MONITOR.
      */
-    asm volatile ( ".byte 0x0f, 0x01, 0xc8" /* monitor */
+    asm volatile ( "monitor"
                    :: "a" (addr), "c" (ecx), "d" (edx) : "memory" );
 }
 
 static always_inline void mwait(unsigned int eax, unsigned int ecx)
 {
-    asm volatile ( ".byte 0x0f, 0x01, 0xc9" /* mwait */
+    asm volatile ( "mwait"
                    :: "a" (eax), "c" (ecx) );
 }
 
 static always_inline void sti_mwait_cli(unsigned int eax, unsigned int ecx)
 {
     /* STI shadow covers MWAIT. */
-    asm volatile ( "sti; .byte 0x0f, 0x01, 0xc9;" /* mwait */ " cli"
+    asm volatile ( "sti; mwait; cli"
                    :: "a" (eax), "c" (ecx) );
 }
 
@@ -108,7 +109,7 @@ void (*__read_mostly lapic_timer_on)(void);
 
 bool lapic_timer_init(void)
 {
-    if ( boot_cpu_has(X86_FEATURE_ARAT) )
+    if ( boot_cpu_has(X86_FEATURE_XEN_ARAT) )
     {
         lapic_timer_off = lapic_timer_nop;
         lapic_timer_on = lapic_timer_nop;
@@ -180,10 +181,10 @@ static void cf_check do_get_hw_residencies(void *arg)
     struct cpuinfo_x86 *c = &current_cpu_data;
     struct hw_residencies *hw_res = arg;
 
-    if ( c->x86_vendor != X86_VENDOR_INTEL || c->x86 != 6 )
+    if ( c->vendor != X86_VENDOR_INTEL || c->family != 6 )
         return;
 
-    switch ( c->x86_model )
+    switch ( c->model )
     {
     /* 4th generation Intel Core (Haswell) */
     case 0x45:
@@ -586,7 +587,6 @@ bool errata_c6_workaround(void)
 
     if ( unlikely(fix_needed == -1) )
     {
-#define INTEL_FAM6_MODEL(m) { X86_VENDOR_INTEL, 6, m, X86_FEATURE_ALWAYS }
         /*
          * Errata AAJ72, etc: EOI Transaction May Not be Sent if Software
          * Enters Core C6 During an Interrupt Service Routine
@@ -602,13 +602,13 @@ bool errata_c6_workaround(void)
          * service only enter C1.
          */
         static const struct x86_cpu_id eoi_errata[] = {
-            INTEL_FAM6_MODEL(0x1a), /* AAJ72 */
-            INTEL_FAM6_MODEL(0x1e),
-            INTEL_FAM6_MODEL(0x1f),
-            INTEL_FAM6_MODEL(0x2e), /* BA106 */
-            INTEL_FAM6_MODEL(0x25),
-            INTEL_FAM6_MODEL(0x2c),
-            INTEL_FAM6_MODEL(0x2f),
+            X86_MATCH_VFM(INTEL_NEHALEM_EP,   NULL), /* AAJ72 */
+            X86_MATCH_VFM(INTEL_NEHALEM,      NULL),
+            X86_MATCH_VFM(INTEL_NEHALEM_G,    NULL),
+            X86_MATCH_VFM(INTEL_NEHALEM_EX,   NULL), /* BA106 */
+            X86_MATCH_VFM(INTEL_WESTMERE,     NULL),
+            X86_MATCH_VFM(INTEL_WESTMERE_EP,  NULL),
+            X86_MATCH_VFM(INTEL_WESTMERE_EX,  NULL),
             { }
         };
         /*
@@ -626,29 +626,22 @@ bool errata_c6_workaround(void)
          * discovered on Haswell hardware, and is affected.
          */
         static const struct x86_cpu_id isr_errata[] = {
-            /* Haswell */
-            INTEL_FAM6_MODEL(0x3c),
-            INTEL_FAM6_MODEL(0x3f),
-            INTEL_FAM6_MODEL(0x45),
-            INTEL_FAM6_MODEL(0x46),
-            /* Broadwell */
-            INTEL_FAM6_MODEL(0x47),
-            INTEL_FAM6_MODEL(0x3d),
-            INTEL_FAM6_MODEL(0x4f),
-            INTEL_FAM6_MODEL(0x56),
-            /* Skylake (client) */
-            INTEL_FAM6_MODEL(0x5e),
-            INTEL_FAM6_MODEL(0x4e),
-            /* {Sky/Cascade}lake (server) */
-            INTEL_FAM6_MODEL(0x55),
-            /* {Kaby/Coffee/Whiskey/Amber} Lake */
-            INTEL_FAM6_MODEL(0x9e),
-            INTEL_FAM6_MODEL(0x8e),
-            /* Cannon Lake */
-            INTEL_FAM6_MODEL(0x66),
+            X86_MATCH_VFM(INTEL_HASWELL,      NULL),
+            X86_MATCH_VFM(INTEL_HASWELL_X,    NULL),
+            X86_MATCH_VFM(INTEL_HASWELL_L,    NULL),
+            X86_MATCH_VFM(INTEL_HASWELL_G,    NULL),
+            X86_MATCH_VFM(INTEL_BROADWELL,    NULL),
+            X86_MATCH_VFM(INTEL_BROADWELL_G,  NULL),
+            X86_MATCH_VFM(INTEL_BROADWELL_X,  NULL),
+            X86_MATCH_VFM(INTEL_BROADWELL_D,  NULL),
+            X86_MATCH_VFM(INTEL_SKYLAKE_L,    NULL),
+            X86_MATCH_VFM(INTEL_SKYLAKE,      NULL),
+            X86_MATCH_VFM(INTEL_SKYLAKE_X,    NULL),
+            X86_MATCH_VFM(INTEL_KABYLAKE_L,   NULL),
+            X86_MATCH_VFM(INTEL_KABYLAKE,     NULL),
+            X86_MATCH_VFM(INTEL_CANNONLAKE_L, NULL),
             { }
         };
-#undef INTEL_FAM6_MODEL
 
         fix_needed = cpu_has_apic &&
                      ((!directed_eoi_enabled && x86_match_cpu(eoi_errata)) ||
@@ -800,7 +793,7 @@ static void cf_check acpi_processor_idle(void)
 
     case ACPI_STATE_C3:
         /*
-         * Before invoking C3, be aware that TSC/APIC timer may be 
+         * Before invoking C3, be aware that TSC/APIC timer may be
          * stopped by H/W. Without carefully handling of TSC/APIC stop issues,
          * deep C state can't work correctly.
          */
@@ -926,7 +919,7 @@ void cf_check acpi_dead_idle(void)
             mwait(cx->address, 0);
         }
     }
-    else if ( (current_cpu_data.x86_vendor &
+    else if ( (current_cpu_data.vendor &
                (X86_VENDOR_AMD | X86_VENDOR_HYGON)) &&
               cx->entry_method == ACPI_CSTATE_EM_SYSIO )
     {
@@ -1053,8 +1046,8 @@ static void acpi_processor_power_init_bm_check(struct acpi_processor_flags *flag
     flags->bm_check = 0;
     if ( num_online_cpus() == 1 )
         flags->bm_check = 1;
-    else if ( (c->x86_vendor == X86_VENDOR_INTEL) ||
-              ((c->x86_vendor == X86_VENDOR_AMD) && (c->x86 == 0x15)) )
+    else if ( (c->vendor == X86_VENDOR_INTEL) ||
+              ((c->vendor == X86_VENDOR_AMD) && (c->family == 0x15)) )
     {
         /*
          * Today all MP CPUs that support C3 share cache.
@@ -1070,9 +1063,8 @@ static void acpi_processor_power_init_bm_check(struct acpi_processor_flags *flag
      * is not required while entering C3 type state on
      * P4, Core and beyond CPUs
      */
-    if ( c->x86_vendor == X86_VENDOR_INTEL &&
-        (c->x86 > 0x6 || (c->x86 == 6 && c->x86_model >= 14)) )
-            flags->bm_control = 0;
+    if ( c->vendor == X86_VENDOR_INTEL )
+        flags->bm_control = 0;
 }
 
 #define VENDOR_INTEL                   (1)
@@ -1091,7 +1083,7 @@ static int check_cx(struct acpi_processor_power *power, xen_processor_cx_t *cx)
         break;
 
     case ACPI_ADR_SPACE_FIXED_HARDWARE:
-        if ( cx->reg.bit_width != VENDOR_INTEL || 
+        if ( cx->reg.bit_width != VENDOR_INTEL ||
              cx->reg.bit_offset != NATIVE_CSTATE_BEYOND_HALT )
             return -EINVAL;
 
@@ -1278,14 +1270,14 @@ static void print_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
            "\t       pwr_setup_done[%d], bm_rld_set[%d]\n",
            power->flags.bm_control, power->flags.bm_check, power->flags.has_cst,
            power->flags.power_setup_done, power->flags.bm_rld_set);
-    
+
     states = power->states;
-    
+
     for ( i = 0; i < power->count; i++ )
     {
         if ( unlikely(copy_from_guest_offset(&state, states, i, 1)) )
             return;
-        
+
         printk("\tstates[%d]:\n", i);
         printk("\t\treg.space_id = %#x\n", state.reg.space_id);
         printk("\t\treg.bit_width = %#x\n", state.reg.bit_width);
@@ -1298,7 +1290,7 @@ static void print_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
 
         csd = state.dp;
         printk("\t\tdp(@0x%p)\n", csd.p);
-        
+
         if ( csd.p != NULL )
         {
             if ( unlikely(copy_from_guest(&dp, csd, 1)) )
@@ -1397,7 +1389,7 @@ long set_cx_pminfo(uint32_t acpi_id, struct xen_processor_power *power)
 
         dead_idle = acpi_dead_idle;
     }
- 
+
     return 0;
 }
 
@@ -1427,12 +1419,12 @@ static void amd_cpuidle_init(struct acpi_processor_power *power)
     if ( vendor_override < 0 )
         return;
 
-    switch ( c->x86 )
+    switch ( c->family )
     {
     case 0x1a:
     case 0x19:
     case 0x18:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_HYGON )
+        if ( boot_cpu_data.vendor != X86_VENDOR_HYGON )
         {
     default:
             vendor_override = -1;
@@ -1474,7 +1466,7 @@ static void amd_cpuidle_init(struct acpi_processor_power *power)
 
         if ( !vendor_override )
         {
-            if ( !boot_cpu_has(X86_FEATURE_ARAT) )
+            if ( !boot_cpu_has(X86_FEATURE_XEN_ARAT) )
                 hpet_broadcast_init();
 
             if ( !lapic_timer_init() )
@@ -1499,6 +1491,7 @@ static void amd_cpuidle_init(struct acpi_processor_power *power)
         vendor_override = -1;
 }
 
+#ifdef CONFIG_PM_STATS
 uint32_t pmstat_get_cx_nr(unsigned int cpu)
 {
     return processor_powers[cpu] ? processor_powers[cpu]->count : 0;
@@ -1618,6 +1611,7 @@ int pmstat_reset_cx_stat(unsigned int cpu)
 {
     return 0;
 }
+#endif /* CONFIG_PM_STATS */
 
 void cpuidle_disable_deep_cstate(void)
 {
@@ -1658,7 +1652,7 @@ static int cf_check cpu_callback(
         break;
 
     case CPU_ONLINE:
-        if ( (boot_cpu_data.x86_vendor &
+        if ( (boot_cpu_data.vendor &
               (X86_VENDOR_AMD | X86_VENDOR_HYGON)) &&
              processor_powers[cpu] )
             amd_cpuidle_init(processor_powers[cpu]);
@@ -1676,6 +1670,9 @@ static int __init cf_check cpuidle_presmp_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
 
+    if ( boot_cpu_data.vendor == X86_VENDOR_INTEL )
+        intel_init_arat();
+
     if ( !xen_cpuidle )
         return 0;
 
@@ -1686,4 +1683,3 @@ static int __init cf_check cpuidle_presmp_init(void)
     return 0;
 }
 presmp_initcall(cpuidle_presmp_init);
-

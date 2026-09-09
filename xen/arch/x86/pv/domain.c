@@ -12,10 +12,12 @@
 
 #include <asm/cpu-policy.h>
 #include <asm/cpufeature.h>
+#include <asm/fsgsbase.h>
 #include <asm/invpcid.h>
-#include <asm/spec_ctrl.h>
 #include <asm/pv/domain.h>
 #include <asm/shadow.h>
+#include <asm/spec_ctrl.h>
+#include <asm/traps.h>
 
 #ifdef CONFIG_PV32
 int8_t __read_mostly opt_pv32 = -1;
@@ -173,7 +175,7 @@ static int __init cf_check pge_init(void)
 {
     if ( opt_global_pages == -1 )
         opt_global_pages = !cpu_has_hypervisor ||
-                           !(boot_cpu_data.x86_vendor &
+                           !(boot_cpu_data.vendor &
                              (X86_VENDOR_AMD | X86_VENDOR_HYGON));
 
     return 0;
@@ -281,7 +283,13 @@ int switch_compat(struct domain *d)
             goto undo_and_fail;
     }
 
-    domain_set_alloc_bitsize(d);
+    d->arch.pv.hv_compat_vstart = __HYPERVISOR_COMPAT_VIRT_START;
+
+    if ( MACH2PHYS_COMPAT_NR_ENTRIES(d) < max_page )
+        d->arch.pv.physaddr_bitsize =
+            /* 2^n entries can be contained in guest's p2m mapping space */
+            fls(MACH2PHYS_COMPAT_NR_ENTRIES(d)) - 1 + PAGE_SHIFT;
+
     recalculate_cpuid_policy(d);
 
     d->arch.x87_fip_width = 4;
@@ -340,9 +348,9 @@ int pv_vcpu_initialise(struct vcpu *v)
     if ( rc )
         return rc;
 
-    BUILD_BUG_ON(X86_NR_VECTORS * sizeof(*v->arch.pv.trap_ctxt) >
+    BUILD_BUG_ON(X86_IDT_VECTORS * sizeof(*v->arch.pv.trap_ctxt) >
                  PAGE_SIZE);
-    v->arch.pv.trap_ctxt = xzalloc_array(struct trap_info, X86_NR_VECTORS);
+    v->arch.pv.trap_ctxt = xzalloc_array(struct trap_info, X86_IDT_VECTORS);
     if ( !v->arch.pv.trap_ctxt )
     {
         rc = -ENOMEM;
@@ -516,11 +524,28 @@ void toggle_guest_mode(struct vcpu *v)
      * subsequent context switch won't bother re-reading it.
      */
     gs_base = read_gs_base();
+
+    /*
+     * In FRED mode, not only are the two GSes the other way around (i.e. we
+     * want to read GS_SHADOW here), the SWAPGS instruction is disallowed so
+     * we have to emulate it.
+     */
+    if ( opt_fred )
+    {
+        unsigned long gs_shadow = rdmsr(MSR_SHADOW_GS_BASE);
+
+        wrmsrns(MSR_SHADOW_GS_BASE, gs_base);
+        write_gs_base(gs_shadow);
+
+        gs_base = gs_shadow;
+    }
+    else
+        asm volatile ( "swapgs" );
+
     if ( v->arch.flags & TF_kernel_mode )
         v->arch.pv.gs_base_kernel = gs_base;
     else
         v->arch.pv.gs_base_user = gs_base;
-    asm volatile ( "swapgs" );
 
     _toggle_guest_pt(v);
 

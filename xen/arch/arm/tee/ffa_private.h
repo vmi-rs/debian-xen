@@ -6,15 +6,16 @@
 #ifndef __FFA_PRIVATE_H__
 #define __FFA_PRIVATE_H__
 
-#include <xen/const.h>
-#include <xen/sizes.h>
-#include <xen/types.h>
-#include <xen/mm.h>
-#include <xen/list.h>
-#include <xen/spinlock.h>
-#include <xen/sched.h>
-#include <xen/time.h>
 #include <xen/bitmap.h>
+#include <xen/const.h>
+#include <xen/list.h>
+#include <xen/mm.h>
+#include <xen/sched.h>
+#include <xen/sizes.h>
+#include <xen/spinlock.h>
+#include <xen/time.h>
+#include <xen/types.h>
+#include <asm/tee/ffa.h>
 
 /* Error codes */
 #define FFA_RET_OK                      0
@@ -30,9 +31,9 @@
 
 /* FFA_VERSION helpers */
 #define FFA_VERSION_MAJOR_SHIFT         16U
-#define FFA_VERSION_MAJOR_MASK          0x7FFFU
+#define FFA_VERSION_MAJOR_MASK          GENMASK(14, 0)
 #define FFA_VERSION_MINOR_SHIFT         0U
-#define FFA_VERSION_MINOR_MASK          0xFFFFU
+#define FFA_VERSION_MINOR_MASK          GENMASK(15, 0)
 #define MAKE_FFA_VERSION(major, minor)  \
         ((((major) & FFA_VERSION_MAJOR_MASK) << FFA_VERSION_MAJOR_SHIFT) | \
          ((minor) & FFA_VERSION_MINOR_MASK))
@@ -42,6 +43,7 @@
 
 #define FFA_VERSION_1_0         MAKE_FFA_VERSION(1, 0)
 #define FFA_VERSION_1_1         MAKE_FFA_VERSION(1, 1)
+#define FFA_VERSION_1_2         MAKE_FFA_VERSION(1, 2)
 /* The minimal FF-A version of the SPMC that can be supported */
 #define FFA_MIN_SPMC_VERSION    FFA_VERSION_1_1
 
@@ -51,7 +53,7 @@
  * that particular guest or SP.
  */
 #define FFA_MY_VERSION_MAJOR    1U
-#define FFA_MY_VERSION_MINOR    1U
+#define FFA_MY_VERSION_MINOR    2U
 #define FFA_MY_VERSION          MAKE_FFA_VERSION(FFA_MY_VERSION_MAJOR, \
                                                  FFA_MY_VERSION_MINOR)
 
@@ -109,6 +111,14 @@
 #define FFA_CTX_TEARDOWN_DELAY          SECONDS(1)
 
 /*
+ * The maximum number of Secure partitions we support for partinfo_get.
+ * This prevents holding the CPU during potentially to long time during
+ * a partinfo_get call. Value choosen seems realistic for any configuration
+ * but can be incremented here if needed.
+ */
+#define FFA_MAX_NUM_SP                  64
+
+/*
  * We rely on the convention suggested but not mandated by the FF-A
  * specification that secure world endpoint identifiers have the bit 15
  * set and normal world have it set to 0.
@@ -119,11 +129,26 @@
 #define FFA_HANDLE_HYP_FLAG             BIT(63, ULL)
 #define FFA_HANDLE_INVALID              0xffffffffffffffffULL
 
+/* NS attribute was introduced in v1.1 */
+#define FFA_MEM_ATTR_NS                 BIT(6, U)
+
+#define FFA_MEM_ATTR_TYPE_DEV           (1U << 3)
+#define FFA_MEM_ATTR_TYPE_MEM           (2U << 4)
+
+#define FFA_MEM_ATTR_NC                 (1U << 2)
+#define FFA_MEM_ATTR_WB                 (3U << 2)
+
+#define FFA_MEM_ATTR_NON_SHARE          (0U)
+#define FFA_MEM_ATTR_OUT_SHARE          (2U)
+#define FFA_MEM_ATTR_INN_SHARE          (3U)
+
 /*
  * Memory attributes: Normal memory, Write-Back cacheable, Inner shareable
  * Defined in FF-A-1.1-REL0 Table 10.18 at page 175.
  */
-#define FFA_NORMAL_MEM_REG_ATTR         0x2fU
+#define FFA_NORMAL_MEM_REG_ATTR         (FFA_MEM_ATTR_TYPE_MEM | \
+                                         FFA_MEM_ATTR_WB | \
+                                         FFA_MEM_ATTR_INN_SHARE)
 /*
  * Memory access permissions: Read-write
  * Defined in FF-A-1.1-REL0 Table 10.15 at page 168.
@@ -187,6 +212,18 @@
  */
 #define FFA_PARTITION_INFO_GET_COUNT_FLAG BIT(0, U)
 
+/*
+ * Partition properties we give for a normal world VM:
+ * - can send direct message but not receive them
+ * - can handle indirect messages
+ * - can receive notifications
+ * 32/64 bit flag is set depending on the VM
+ */
+#define FFA_PART_VM_PROP    (FFA_PART_PROP_DIRECT_REQ_SEND | \
+                             FFA_PART_PROP_INDIRECT_MSGS | \
+                             FFA_PART_PROP_RECV_NOTIF | \
+                             FFA_PART_PROP_IS_PE_ID)
+
 /* Flags used in calls to FFA_NOTIFICATION_GET interface  */
 #define FFA_NOTIF_FLAG_BITMAP_SP        BIT(0, U)
 #define FFA_NOTIF_FLAG_BITMAP_VM        BIT(1, U)
@@ -197,6 +234,8 @@
 #define FFA_NOTIF_INFO_GET_ID_LIST_SHIFT    12
 #define FFA_NOTIF_INFO_GET_ID_COUNT_SHIFT   7
 #define FFA_NOTIF_INFO_GET_ID_COUNT_MASK    0x1F
+
+#define FFA_NOTIF_RX_BUFFER_FULL        BIT(0, U)
 
 /* Feature IDs used with FFA_FEATURES */
 #define FFA_FEATURE_NOTIF_PEND_INTR     0x1U
@@ -248,21 +287,24 @@
 #define FFA_RX_ACQUIRE                  0x84000084U
 #define FFA_SPM_ID_GET                  0x84000085U
 #define FFA_MSG_SEND2                   0x84000086U
+#define FFA_CONSOLE_LOG_32              0x8400008AU
+#define FFA_CONSOLE_LOG_64              0xC400008AU
+#define FFA_PARTITION_INFO_GET_REGS     0xC400008BU
+#define FFA_MSG_SEND_DIRECT_REQ2        0xC400008DU
+#define FFA_MSG_SEND_DIRECT_RESP2       0xC400008EU
 
 /**
  * Encoding of features supported or not by the fw in a bitmap:
- * - Function IDs are going from 0x60 to 0xFF
+ * - Function IDs are going from 0x60 to 0xEF in SMCCC standard
  * - A function can be supported in 32 and/or 64bit
  * The bitmap has one bit for each function in 32 and 64 bit.
  */
 #define FFA_ABI_ID(id)        ((id) & ARM_SMCCC_FUNC_MASK)
 #define FFA_ABI_CONV(id)      (((id) >> ARM_SMCCC_CONV_SHIFT) & BIT(0,U))
 
-#define FFA_ABI_MIN           FFA_ABI_ID(FFA_ERROR)
-#define FFA_ABI_MAX           FFA_ABI_ID(FFA_MSG_SEND2)
-
-#define FFA_ABI_BITMAP_SIZE   (2 * (FFA_ABI_MAX - FFA_ABI_MIN + 1))
-#define FFA_ABI_BITNUM(id)    ((FFA_ABI_ID(id) - FFA_ABI_MIN) << 1 | \
+#define FFA_ABI_BITMAP_SIZE   (2 * (FFA_FNUM_MAX_VALUE - FFA_FNUM_MIN_VALUE \
+                               + 1))
+#define FFA_ABI_BITNUM(id)    ((FFA_ABI_ID(id) - FFA_FNUM_MIN_VALUE) << 1 | \
                                FFA_ABI_CONV(id))
 
 /* Constituent memory region descriptor */
@@ -280,85 +322,204 @@ struct ffa_mem_region {
     struct ffa_address_range address_range_array[];
 };
 
+struct ffa_uuid {
+    uint64_t val[2];
+};
+
 struct ffa_ctx_notif {
     /*
      * True if domain is reported by FFA_NOTIFICATION_INFO_GET to have
-     * pending global notifications.
+     * pending notifications from the secure world.
      */
     bool secure_pending;
+
+    /*
+     * True if domain is reported by FFA_NOTIFICATION_INFO_GET to have
+     * pending notifications from VMs (including framework ones).
+     */
+    bool vm_pending;
+
+    /*
+     * True if domain has buffer full notification pending
+     */
+    bool buff_full_pending;
 };
 
 struct ffa_ctx {
-    void *rx;
-    const void *tx;
-    struct page_info *rx_pg;
-    struct page_info *tx_pg;
+    /*
+     * Chain list of all FF-A contexts.
+     * As we might have several read from the list of context through parallel
+     * partinfo_get but fewer additions/removal as those happen only during a
+     * version negotiation or guest shutdown, access to this list is protected
+     * through a rwlock (addition/removal with write lock, reading through a
+     * read lock).
+     */
+    struct list_head ctx_list; /* chain list of all FF-A contexts */
+
+    /*
+     * Data access unlocked (mainly for part_info_get in VM to VM).
+     * Those should be set before the ctx is added in the list.
+     */
+    /* FF-A Endpoint ID */
+    uint16_t ffa_id;
+    uint16_t num_vcpus;
+    /*
+     * Must only be accessed with the ffa_ctx_list_rwlock taken as it set
+     * when guest_vers is set and other accesses could see a partially set
+     * value.
+     */
+    bool is_64bit;
+
+    /*
+     * Global data accessed atomically or using ACCES_ONCE.
+     */
+    struct ffa_ctx_notif notif;
+
+    /*
+     * Global data accessed with lock locked.
+     */
+    spinlock_t lock;
     /* Number of 4kB pages in each of rx/rx_pg and tx/tx_pg */
     unsigned int page_count;
-    /* FF-A version used by the guest */
-    uint32_t guest_vers;
-    bool rx_is_free;
-    /* Used shared memory objects, struct ffa_shm_mem */
-    struct list_head shm_list;
     /* Number of allocated shared memory object */
     unsigned int shm_count;
-    struct ffa_ctx_notif notif;
+    /* Used shared memory objects, struct ffa_shm_mem */
+    struct list_head shm_list;
+
     /*
-     * tx_lock is used to serialize access to tx
-     * rx_lock is used to serialize access to rx_is_free
-     * lock is used for the rest in this struct
+     * FF-A version handling
+     * guest_vers is the single published negotiated version. It is 0 until
+     * negotiation completes, after which it is set once and never changes.
+     * Negotiation uses guest_vers_tmp under guest_vers_lock; when a
+     * non-VERSION ABI is invoked, Xen finalizes negotiation by publishing
+     * guest_vers using ACCESS_ONCE() store.
+     * Readers use ACCESS_ONCE(guest_vers) != 0 to detect availability and
+     * can consume guest_vers without barriers because it never changes once
+     * published.
+     */
+    spinlock_t guest_vers_lock;
+    /*
+     * Published negotiated version. Zero means "not negotiated yet".
+     * Once non-zero, it never changes.
+     * Must always be accessed using ACCESS_ONCE().
+     */
+    uint32_t guest_vers;
+    /* Temporary version used during negotiation under guest_vers_lock */
+    uint32_t guest_vers_tmp;
+
+    /*
+     * Rx buffer, accessed with rx_lock locked.
+     * rx_is_free is used to serialize access.
+     */
+    spinlock_t rx_lock;
+    bool rx_is_free;
+    void *rx;
+    struct page_info *rx_pg;
+
+    /*
+     * Tx buffer, access with tx_lock locked.
      */
     spinlock_t tx_lock;
-    spinlock_t rx_lock;
-    spinlock_t lock;
-    /* Used if domain can't be torn down immediately */
+    const void *tx;
+    struct page_info *tx_pg;
+
+
+    /*
+     * Domain teardown handling if data shared or used by other domains
+     * do not allow to teardown the domain immediately.
+     */
     struct domain *teardown_d;
     struct list_head teardown_list;
     s_time_t teardown_expire;
-    /*
-     * Used for ffa_domain_teardown() to keep track of which SPs should be
-     * notified that this guest is being destroyed.
-     */
+    /* Keep track of SPs that should be notified of VM destruction */
     unsigned long *vm_destroy_bitmap;
 };
 
-extern void *ffa_rx;
-extern void *ffa_tx;
-extern spinlock_t ffa_rx_buffer_lock;
-extern spinlock_t ffa_tx_buffer_lock;
 extern DECLARE_BITMAP(ffa_fw_abi_supported, FFA_ABI_BITMAP_SIZE);
+extern uint32_t ffa_fw_version;
+
+extern struct list_head ffa_ctx_head;
+extern rwlock_t ffa_ctx_list_rwlock;
+#ifdef CONFIG_FFA_VM_TO_VM
+extern atomic_t ffa_vm_count;
+#endif
 
 bool ffa_shm_domain_destroy(struct domain *d);
 void ffa_handle_mem_share(struct cpu_user_regs *regs);
-int ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags);
+int32_t ffa_handle_mem_reclaim(uint64_t handle, uint32_t flags);
 
 bool ffa_partinfo_init(void);
-int ffa_partinfo_domain_init(struct domain *d);
+int32_t ffa_partinfo_domain_init(struct domain *d);
 bool ffa_partinfo_domain_destroy(struct domain *d);
 void ffa_handle_partition_info_get(struct cpu_user_regs *regs);
+void ffa_handle_partition_info_get_regs(struct cpu_user_regs *regs);
+void ffa_partinfo_inc_tag(void);
 
-bool ffa_rxtx_init(void);
-void ffa_rxtx_destroy(void);
+int32_t ffa_endpoint_domain_lookup(uint16_t endpoint_id, struct domain **d_out,
+                                   struct ffa_ctx **ctx_out);
+
+bool ffa_rxtx_spmc_init(void);
+void ffa_rxtx_spmc_destroy(void);
+void *ffa_rxtx_spmc_rx_acquire(void);
+int32_t ffa_rxtx_spmc_rx_release(bool notify_fw);
+void *ffa_rxtx_spmc_tx_acquire(void);
+void ffa_rxtx_spmc_tx_release(void);
+
+int32_t ffa_rxtx_domain_init(struct domain *d);
 void ffa_rxtx_domain_destroy(struct domain *d);
-uint32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
+int32_t ffa_handle_rxtx_map(uint32_t fid, register_t tx_addr,
 			     register_t rx_addr, uint32_t page_count);
-uint32_t ffa_handle_rxtx_unmap(void);
-int32_t ffa_rx_acquire(struct domain *d);
-int32_t ffa_rx_release(struct domain *d);
+int32_t ffa_handle_rxtx_unmap(void);
+int32_t ffa_rx_acquire(struct ffa_ctx *ctx, void **buf, size_t *buf_size);
+int32_t ffa_rx_release(struct ffa_ctx *ctx);
+int32_t ffa_tx_acquire(struct ffa_ctx *ctx, const void **buf, size_t *buf_size);
+int32_t ffa_tx_release(struct ffa_ctx *ctx);
 
 void ffa_notif_init(void);
 void ffa_notif_init_interrupt(void);
 int ffa_notif_domain_init(struct domain *d);
 void ffa_notif_domain_destroy(struct domain *d);
 
-int ffa_handle_notification_bind(struct cpu_user_regs *regs);
-int ffa_handle_notification_unbind(struct cpu_user_regs *regs);
+int32_t ffa_handle_notification_bind(struct cpu_user_regs *regs);
+int32_t ffa_handle_notification_unbind(struct cpu_user_regs *regs);
 void ffa_handle_notification_info_get(struct cpu_user_regs *regs);
 void ffa_handle_notification_get(struct cpu_user_regs *regs);
-int ffa_handle_notification_set(struct cpu_user_regs *regs);
+int32_t ffa_handle_notification_set(struct cpu_user_regs *regs);
+
+#ifdef CONFIG_FFA_VM_TO_VM
+void ffa_raise_rx_buffer_full(struct domain *d);
+#else
+static inline void ffa_raise_rx_buffer_full(struct domain *d)
+{
+}
+#endif
 
 void ffa_handle_msg_send_direct_req(struct cpu_user_regs *regs, uint32_t fid);
 int32_t ffa_handle_msg_send2(struct cpu_user_regs *regs);
+void ffa_handle_run(struct cpu_user_regs *regs, uint32_t fid);
+
+#ifdef CONFIG_FFA_VM_TO_VM
+static inline uint16_t get_ffa_vm_count(void)
+{
+    return atomic_read(&ffa_vm_count);
+}
+
+static inline void inc_ffa_vm_count(void)
+{
+    atomic_inc(&ffa_vm_count);
+}
+
+static inline void dec_ffa_vm_count(void)
+{
+    ASSERT(atomic_read(&ffa_vm_count) > 0);
+    atomic_dec(&ffa_vm_count);
+}
+#else
+/* Only count the caller VM */
+#define get_ffa_vm_count()  ((uint16_t)1UL)
+#define inc_ffa_vm_count()  do {} while(0)
+#define dec_ffa_vm_count()  do {} while(0)
+#endif
 
 static inline uint16_t ffa_get_vm_id(const struct domain *d)
 {
@@ -379,20 +540,32 @@ static inline void ffa_set_regs(struct cpu_user_regs *regs, register_t v0,
                                 register_t v4, register_t v5, register_t v6,
                                 register_t v7)
 {
-        set_user_reg(regs, 0, v0);
-        set_user_reg(regs, 1, v1);
-        set_user_reg(regs, 2, v2);
-        set_user_reg(regs, 3, v3);
-        set_user_reg(regs, 4, v4);
-        set_user_reg(regs, 5, v5);
-        set_user_reg(regs, 6, v6);
-        set_user_reg(regs, 7, v7);
+    struct domain *d = current->domain;
+    struct ffa_ctx *ctx = d->arch.tee;
+    int i;
+
+    set_user_reg(regs, 0, v0);
+    set_user_reg(regs, 1, v1);
+    set_user_reg(regs, 2, v2);
+    set_user_reg(regs, 3, v3);
+    set_user_reg(regs, 4, v4);
+    set_user_reg(regs, 5, v5);
+    set_user_reg(regs, 6, v6);
+    set_user_reg(regs, 7, v7);
+
+    if ( ctx && ACCESS_ONCE(ctx->guest_vers) >= FFA_VERSION_1_2 &&
+         is_64bit_domain(d) )
+    {
+        for (i = 8; i <= 17; i++)
+            set_user_reg(regs, i, 0);
+    }
 }
 
 static inline void ffa_set_regs_error(struct cpu_user_regs *regs,
-                                      uint32_t error_code)
+                                      int32_t error_code)
 {
-    ffa_set_regs(regs, FFA_ERROR, 0, error_code, 0, 0, 0, 0, 0);
+    ffa_set_regs(regs, FFA_ERROR, 0, error_code & GENMASK_ULL(31, 0), 0, 0, 0,
+                 0, 0);
 }
 
 static inline void ffa_set_regs_success(struct cpu_user_regs *regs,
@@ -407,7 +580,7 @@ static inline int32_t ffa_get_ret_code(const struct arm_smccc_1_2_regs *resp)
     {
     case FFA_ERROR:
         if ( resp->a2 )
-            return resp->a2;
+            return resp->a2 & GENMASK_ULL(31, 0);
         else
             return FFA_RET_NOT_SUPPORTED;
     case FFA_SUCCESS_32:
@@ -436,18 +609,41 @@ static inline int32_t ffa_simple_call(uint32_t fid, register_t a1,
     return ffa_get_ret_code(&resp);
 }
 
-static inline int32_t ffa_hyp_rx_release(void)
-{
-    return ffa_simple_call(FFA_RX_RELEASE, 0, 0, 0, 0);
-}
-
 static inline bool ffa_fw_supports_fid(uint32_t fid)
 {
-    BUILD_BUG_ON(FFA_ABI_MIN > FFA_ABI_MAX);
+    BUILD_BUG_ON(FFA_FNUM_MIN_VALUE > FFA_FNUM_MAX_VALUE);
 
-    if ( FFA_ABI_BITNUM(fid) > FFA_ABI_BITMAP_SIZE)
+    if ( FFA_ABI_BITNUM(fid) >= FFA_ABI_BITMAP_SIZE)
         return false;
     return test_bit(FFA_ABI_BITNUM(fid), ffa_fw_abi_supported);
+}
+
+static inline bool ffa_uuid_is_nil(struct ffa_uuid id)
+{
+    return id.val[0] == 0 && id.val[1] == 0;
+}
+
+static inline bool ffa_uuid_equal(struct ffa_uuid id1, struct ffa_uuid id2)
+{
+    return id1.val[0] == id2.val[0] && id1.val[1] == id2.val[1];
+}
+
+static inline void ffa_uuid_set(struct ffa_uuid *id, uint32_t val0,
+                                uint32_t val1, uint32_t val2, uint32_t val3)
+{
+    id->val[0] = ((uint64_t)val1 << 32U) | val0;
+    id->val[1] = ((uint64_t)val3 << 32U) | val2;
+}
+
+/*
+ * Common overflow-safe helper to verify that adding a number of pages to an
+ * address will not wrap around.
+ */
+static inline bool ffa_safe_addr_add(uint64_t addr, uint64_t pages)
+{
+    uint64_t off = pages * FFA_PAGE_SIZE;
+
+    return (off / FFA_PAGE_SIZE) == pages && addr <= UINT64_MAX - off;
 }
 
 #endif /*__FFA_PRIVATE_H__*/

@@ -8,7 +8,15 @@
 
 #include <xen/cache.h>
 #include <xen/const.h>
+#include <xen/macros.h>
+
+#ifndef __ASSEMBLER__
+#include <asm/cpu-policy.h>
 #include <asm/cpuid.h>
+#include <xen/lib/x86/cpu-policy.h>
+#else
+#include <asm/cpufeatureset.h>
+#endif
 
 #define cpufeat_word(idx)	((idx) / 32)
 #define cpufeat_bit(idx)	((idx) % 32)
@@ -17,13 +25,48 @@
 /* An alias of a feature we know is always going to be present. */
 #define X86_FEATURE_ALWAYS      X86_FEATURE_LM
 
-#ifndef __ASSEMBLY__
+/*
+ * Layout tied to cpuinfo_x86.vfm
+ */
+#define VFM_MODEL_MASK  0x000000ff
+#define VFM_FAMILY_MASK 0x0000ff00
+#define VFM_VENDOR_MASK 0x00ff0000
+
+#define VFM_MAKE(v, f, m) (MASK_INSR(v, VFM_VENDOR_MASK) | \
+                           MASK_INSR(f, VFM_FAMILY_MASK) | \
+                           MASK_INSR(m, VFM_MODEL_MASK))
+
+#define VFM_MODEL(vfm)  MASK_EXTR(vfm, VFM_MODEL_MASK)
+#define VFM_FAMILY(vfm) MASK_EXTR(vfm, VFM_FAMILY_MASK)
+#define VFM_VENDOR(vfm) MASK_EXTR(vfm, VFM_VENDOR_MASK)
+
+#ifndef __ASSEMBLER__
 
 struct cpuinfo_x86 {
-    unsigned char x86;                 /* CPU family */
-    unsigned char x86_vendor;          /* CPU vendor */
-    unsigned char x86_model;
-    unsigned char x86_mask;
+    /* TODO: Phase out the x86 prefixed names. */
+    union {
+        struct {
+            union {
+                uint8_t x86_model;
+                uint8_t model;
+            };
+            union {
+                uint8_t x86;
+                uint8_t family;
+            };
+            union {
+                uint8_t x86_vendor;
+                uint8_t vendor;
+            };
+            uint8_t _rsvd;             /* Use of this needs coordinating with VFM_MAKE() */
+        };
+        uint32_t vfm;                  /* Vendor Family Model */
+    };
+    union {
+        uint8_t x86_mask;
+        uint8_t stepping;
+    };
+
     unsigned int cpuid_level;          /* Maximum supported CPUID level */
     unsigned int extended_cpuid_level; /* Maximum supported CPUID extended level */
     unsigned int x86_capability[NCAPINTS];
@@ -41,6 +84,24 @@ struct cpuinfo_x86 {
     unsigned short x86_clflush_size;
 } __cacheline_aligned;
 
+#define CPU_DATA_INIT(what...)                     \
+        what.cpuid_level = 1,                      \
+        what.extended_cpuid_level = 0,             \
+        what.x86_cache_size = -1,                  \
+        what.x86_max_cores = 1,                    \
+        what.x86_num_siblings = 1,                 \
+        what.apicid = BAD_APICID,                  \
+        what.phys_proc_id = XEN_INVALID_SOCKET_ID, \
+        what.cpu_core_id = XEN_INVALID_CORE_ID,    \
+        what.compute_unit_id = INVALID_CUID
+
+/*
+ * @keep_basic set to true retains data firmly assumed to be symmetric
+ * across all CPUs.  Only CPU_DATA_INIT() will be invoked in that case
+ * on the passed structure.
+ */
+void reset_cpuinfo(struct cpuinfo_x86 *c, bool keep_basic);
+
 extern struct cpuinfo_x86 boot_cpu_data;
 
 static inline bool cpu_has(const struct cpuinfo_x86 *info, unsigned int feat)
@@ -54,15 +115,6 @@ static inline bool boot_cpu_has(unsigned int feat)
 }
 
 #define CPUID_PM_LEAF                                6
-#define CPUID6_EAX_HWP                               BIT(7, U)
-#define CPUID6_EAX_HWP_NOTIFICATION                  BIT(8, U)
-#define CPUID6_EAX_HWP_ACTIVITY_WINDOW               BIT(9, U)
-#define CPUID6_EAX_HWP_ENERGY_PERFORMANCE_PREFERENCE BIT(10, U)
-#define CPUID6_EAX_HWP_PACKAGE_LEVEL_REQUEST         BIT(11, U)
-#define CPUID6_EAX_HDC                               BIT(13, U)
-#define CPUID6_EAX_HWP_PECI                          BIT(16, U)
-#define CPUID6_EAX_HW_FEEDBACK                       BIT(19, U)
-#define CPUID6_ECX_APERFMPERF_CAPABILITY             BIT(0, U)
 
 /* CPUID level 0x00000001.edx */
 #define cpu_has_fpu             1
@@ -70,7 +122,7 @@ static inline bool boot_cpu_has(unsigned int feat)
 #define cpu_has_pse             1
 #define cpu_has_apic            boot_cpu_has(X86_FEATURE_APIC)
 #define cpu_has_sep             boot_cpu_has(X86_FEATURE_SEP)
-#define cpu_has_mtrr            1
+#define cpu_has_mtrr            boot_cpu_has(X86_FEATURE_MTRR)
 #define cpu_has_pge             1
 #define cpu_has_pse36           boot_cpu_has(X86_FEATURE_PSE36)
 #define cpu_has_clflush         boot_cpu_has(X86_FEATURE_CLFLUSH)
@@ -115,6 +167,21 @@ static inline bool boot_cpu_has(unsigned int feat)
 #define cpu_has_skinit          boot_cpu_has(X86_FEATURE_SKINIT)
 #define cpu_has_fma4            boot_cpu_has(X86_FEATURE_FMA4)
 #define cpu_has_tbm             boot_cpu_has(X86_FEATURE_TBM)
+
+/* CPUID level 0x00000006.eax */
+#define cpu_has_turbo_boost     host_cpu_policy.basic.turbo_boost
+#define cpu_has_arat            host_cpu_policy.basic.arat
+#define cpu_has_hwp             host_cpu_policy.basic.hwp
+#define cpu_has_hwp_interrupt   host_cpu_policy.basic.hwp_interrupt
+#define cpu_has_hwp_activity_window host_cpu_policy.basic.hwp_activity_window
+#define cpu_has_hwp_epp         host_cpu_policy.basic.hwp_epp
+#define cpu_has_hwp_request_pkg host_cpu_policy.basic.hwp_request_pkg
+#define cpu_has_hdc             host_cpu_policy.basic.hdc
+#define cpu_has_hwp_peci_override host_cpu_policy.basic.hwp_peci_override
+#define cpu_has_hw_feedback     host_cpu_policy.basic.hw_feedback
+
+/* CPUID level 0x00000006.ecx */
+#define cpu_has_hw_feedback_cap host_cpu_policy.basic.hw_feedback_cap
 
 /* CPUID level 0x0000000D:1.eax */
 #define cpu_has_xsaveopt        boot_cpu_has(X86_FEATURE_XSAVEOPT)
@@ -170,6 +237,7 @@ static inline bool boot_cpu_has(unsigned int feat)
 #define cpu_has_amd_ssbd        boot_cpu_has(X86_FEATURE_AMD_SSBD)
 #define cpu_has_virt_ssbd       boot_cpu_has(X86_FEATURE_VIRT_SSBD)
 #define cpu_has_ssb_no          boot_cpu_has(X86_FEATURE_SSB_NO)
+#define cpu_has_cppc            boot_cpu_has(X86_FEATURE_CPPC)
 #define cpu_has_auto_ibrs       boot_cpu_has(X86_FEATURE_AUTO_IBRS)
 
 /* CPUID level 0x00000007:0.edx */
@@ -190,6 +258,9 @@ static inline bool boot_cpu_has(unsigned int feat)
 #define cpu_has_avx_vnni        boot_cpu_has(X86_FEATURE_AVX_VNNI)
 #define cpu_has_avx512_bf16     boot_cpu_has(X86_FEATURE_AVX512_BF16)
 #define cpu_has_cmpccxadd       boot_cpu_has(X86_FEATURE_CMPCCXADD)
+#define cpu_has_fred            boot_cpu_has(X86_FEATURE_FRED)
+#define cpu_has_lkgs            boot_cpu_has(X86_FEATURE_LKGS)
+#define cpu_has_nmi_src         boot_cpu_has(X86_FEATURE_NMI_SRC)
 #define cpu_has_avx_ifma        boot_cpu_has(X86_FEATURE_AVX_IFMA)
 
 /* CPUID level 0x80000021.eax */
@@ -229,7 +300,6 @@ static inline bool boot_cpu_has(unsigned int feat)
 /* Synthesized. */
 #define cpu_has_arch_perfmon    boot_cpu_has(X86_FEATURE_ARCH_PERFMON)
 #define cpu_has_cpuid_faulting  boot_cpu_has(X86_FEATURE_CPUID_FAULTING)
-#define cpu_has_aperfmperf      boot_cpu_has(X86_FEATURE_APERFMPERF)
 #define cpu_has_xen_lbr         boot_cpu_has(X86_FEATURE_XEN_LBR)
 #define cpu_has_xen_shstk       (IS_ENABLED(CONFIG_XEN_SHSTK) && \
                                  boot_cpu_has(X86_FEATURE_XEN_SHSTK))
@@ -286,7 +356,7 @@ struct cpuid4_info {
 };
 
 int cpuid4_cache_lookup(int index, struct cpuid4_info *this_leaf);
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __ASM_I386_CPUFEATURE_H */
 

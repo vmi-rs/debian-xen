@@ -8,7 +8,7 @@
 #define PAGE_ORDER_2M       9
 #define PAGE_ORDER_1G       18
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 # include <xen/types.h>
 # include <xen/lib.h>
 #endif
@@ -107,7 +107,7 @@
 #define l4e_from_mfn(m, f) l4e_from_pfn(mfn_x(m), f)
 
 /* Construct a pte from a physical address and access flags. */
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 static inline l1_pgentry_t l1e_from_paddr(paddr_t pa, unsigned int flags)
 {
     ASSERT((pa & ~(PADDR_MASK & PAGE_MASK)) == 0);
@@ -128,7 +128,7 @@ static inline l4_pgentry_t l4e_from_paddr(paddr_t pa, unsigned int flags)
     ASSERT((pa & ~(PADDR_MASK & PAGE_MASK)) == 0);
     return (l4_pgentry_t) { pa | put_pte_flags(flags) };
 }
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 /* Construct a pte from its direct integer representation. */
 #define l1e_from_intpte(intpte)    ((l1_pgentry_t) { (intpte_t)(intpte) })
@@ -204,7 +204,7 @@ static inline l4_pgentry_t l4e_from_paddr(paddr_t pa, unsigned int flags)
 #define pgentry_ptr_to_slot(_p)    \
     (((unsigned long)(_p) & ~PAGE_MASK) / sizeof(*(_p)))
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /* Page-table type. */
 typedef struct { u64 pfn; } pagetable_t;
@@ -219,11 +219,18 @@ typedef struct { u64 pfn; } pagetable_t;
 #define pagetable_from_paddr(p) pagetable_from_pfn((p)>>PAGE_SHIFT)
 #define pagetable_null()        pagetable_from_pfn(0)
 
-void clear_page_sse2(void *pg);
-void copy_page_sse2(void *to, const void *from);
+void clear_page_hot(void *pg);
+void clear_page_cold(void *pg);
+void copy_page_hot(void *to, const void *from);
+void copy_page_cold(void *to, const void *from);
 
-#define clear_page(_p)      clear_page_sse2(_p)
-#define copy_page(_t, _f)   copy_page_sse2(_t, _f)
+#define clear_page(_p)      clear_page_cold(_p)
+#define copy_page(_t, _f)   copy_page_cold(_t, _f)
+
+#ifdef CONFIG_DEBUG
+void scrub_page_hot(void *ptr);
+void scrub_page_cold(void *ptr);
+#endif
 
 /* Convert between Xen-heap virtual addresses and machine addresses. */
 #define __pa(x)             (virt_to_maddr(x))
@@ -238,8 +245,8 @@ void copy_page_sse2(void *to, const void *from);
 #define page_to_mfn(pg)     pdx_to_mfn((unsigned long)((pg) - frame_table))
 
 /* Convert between machine addresses and page-info structures. */
-#define __maddr_to_page(ma) mfn_to_page(maddr_to_mfn(ma))
-#define __page_to_maddr(pg) mfn_to_maddr(page_to_mfn(pg))
+#define maddr_to_page(ma)   mfn_to_page(maddr_to_mfn(ma))
+#define page_to_maddr(pg)   mfn_to_maddr(page_to_mfn(pg))
 
 /* Convert between frame number and address formats.  */
 #define __pfn_to_paddr(pfn) ((paddr_t)(pfn) << PAGE_SHIFT)
@@ -256,17 +263,14 @@ void copy_page_sse2(void *to, const void *from);
 #define mfn_valid(mfn)      __mfn_valid(mfn_x(mfn))
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
-#define maddr_to_page(ma)   __maddr_to_page(ma)
-#define page_to_maddr(pg)   __page_to_maddr(pg)
-#define virt_to_page(va)    __virt_to_page(va)
-#define page_to_virt(pg)    __page_to_virt(pg)
 #define pfn_to_paddr(pfn)   __pfn_to_paddr(pfn)
 #define paddr_to_pfn(pa)    __paddr_to_pfn(pa)
-#define paddr_to_pdx(pa)    pfn_to_pdx(paddr_to_pfn(pa))
+
+/* Specialized forms acting on vmap() addresses. */
 #define vmap_to_mfn(va)     xen_map_to_mfn((unsigned long)(va))
 #define vmap_to_page(va)    mfn_to_page(vmap_to_mfn(va))
 
-#endif /* !defined(__ASSEMBLY__) */
+#endif /* !defined(__ASSEMBLER__) */
 
 /* Where to find each level of the linear mapping */
 #define __linear_l1_table ((l1_pgentry_t *)(LINEAR_PT_VIRT_START))
@@ -278,7 +282,7 @@ void copy_page_sse2(void *to, const void *from);
  ((l4_pgentry_t *)(__linear_l3_table + l3_linear_offset(LINEAR_PT_VIRT_START)))
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern root_pgentry_t idle_pg_table[ROOT_PAGETABLE_ENTRIES];
 extern l2_pgentry_t  *compat_idle_pg_table_l2;
 extern unsigned int   m2p_compat_vstart;
@@ -289,7 +293,7 @@ extern l2_pgentry_t l2_directmap[4*L2_PAGETABLE_ENTRIES];
 extern l1_pgentry_t l1_fixmap[L1_PAGETABLE_ENTRIES];
 void paging_init(void);
 void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e);
-#endif /* !defined(__ASSEMBLY__) */
+#endif /* !defined(__ASSEMBLER__) */
 
 #define _PAGE_NONE     _AC(0x000,U)
 #define _PAGE_PRESENT  _AC(0x001,U)
@@ -309,7 +313,7 @@ void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e);
 #define _PAGE_PSE_PAT  _AC(0x1000,U)
 #define _PAGE_AVAIL_HIGH (_AC(0x7ff, U) << 12)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /* Dependency on NX being available can't be expressed. */
 #define _PAGE_NX       (cpu_has_nx ? _PAGE_NX_BIT : 0)
 #endif
@@ -350,7 +354,7 @@ void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e);
 
 #define MAP_SMALL_PAGES _PAGE_AVAIL0 /* don't use superpages mappings */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /* Convert between PAT/PCD/PWT embedded in PTE flags and 3-bit cacheattr. */
 static inline unsigned int pte_flags_to_cacheattr(unsigned int flags)
@@ -387,7 +391,7 @@ static inline void invalidate_icache(void)
  */
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __X86_PAGE_H__ */
 

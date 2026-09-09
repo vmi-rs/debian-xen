@@ -7,6 +7,7 @@ CONFIG_PV_SHIM_EXCLUSIVE=y
 CONFIG_NR_CPUS=32
 CONFIG_EXPERT=y
 # Disable features not used by the PV shim
+CONFIG_PDX_NONE=y
 # CONFIG_XEN_SHSTK is not set
 # CONFIG_XEN_IBT is not set
 # CONFIG_GRANT_TABLE is not set
@@ -19,10 +20,9 @@ CONFIG_EXPERT=y
 # CONFIG_SCHED_CREDIT2 is not set
 # CONFIG_SCHED_RTDS is not set
 # CONFIG_SCHED_ARINC653 is not set
-# CONFIG_LIVEPATCH is not set
 # CONFIG_SUPPRESS_DUPLICATE_SYMBOL_WARNINGS is not set
-# CONFIG_TRACEBUFFER is not set
 # CONFIG_AMD_IOMMU is not set
 # CONFIG_INTEL_IOMMU is not set
 # CONFIG_DEBUG is not set
 # CONFIG_GDBSX is not set
+# CONFIG_SYSCTL is not set

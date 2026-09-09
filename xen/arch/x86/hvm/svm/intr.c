@@ -17,7 +17,6 @@
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
 #include <asm/hvm/vlapic.h>
-#include <asm/hvm/svm/svm.h>
 #include <asm/hvm/nestedhvm.h> /* for nestedhvm_vcpu_in_guestmode */
 #include <asm/vm_event.h>
 #include <xen/event.h>
@@ -26,6 +25,7 @@
 #include <xen/domain_page.h>
 
 #include "nestedhvm.h"
+#include "vmcb.h"
 
 static void svm_inject_nmi(struct vcpu *v)
 {
@@ -136,7 +136,7 @@ void asmlinkage svm_intr_assist(void)
     enum hvm_intblk intblk;
 
     /* Block event injection while handling a sync vm_event. */
-    if ( unlikely(v->arch.vm_event) && v->arch.vm_event->sync_event )
+    if ( unlikely(vm_event_is_enabled(v)) && v->arch.vm_event->sync_event )
         return;
 
     /* Crank the handle on interrupt state. */

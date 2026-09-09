@@ -17,7 +17,7 @@ int cf_check vmx_cpu_up(void);
 void cf_check vmx_cpu_down(void);
 
 struct vmcs_struct {
-    u32 vmcs_revision_id;
+    uint32_t revision_id;
     unsigned char data [0]; /* vmcs size is read from MSR */
 };
 
@@ -46,6 +46,7 @@ struct ept_data {
 
 #define _VMX_DOMAIN_PML_ENABLED    0
 #define VMX_DOMAIN_PML_ENABLED     (1ul << _VMX_DOMAIN_PML_ENABLED)
+
 struct vmx_domain {
     mfn_t apic_access_mfn;
     /* VMX_DOMAIN_* */
@@ -56,6 +57,13 @@ struct vmx_domain {
      * around CVE-2018-12207 as appropriate.
      */
     bool exec_sp;
+    /*
+     * If one of vcpus of this domain is in no_fill_mode or
+     * mtrr/pat between vcpus is not the same, set in_uc_mode.
+     * Protected by uc_lock.
+     */
+    bool in_uc_mode;
+    spinlock_t uc_lock;
 };
 
 /*
@@ -71,7 +79,7 @@ struct vmx_msr_bitmap {
 };
 
 struct pi_desc {
-    DECLARE_BITMAP(pir, X86_NR_VECTORS);
+    DECLARE_BITMAP(pir, X86_IDT_VECTORS);
     union {
         struct {
             u16     on     : 1,  /* bit 256 - Outstanding Notification */
@@ -138,16 +146,16 @@ struct vmx_vcpu {
     unsigned int         host_msr_count;
 
     unsigned long        eoi_exitmap_changed;
-    DECLARE_BITMAP(eoi_exit_bitmap, X86_NR_VECTORS);
+    DECLARE_BITMAP(eoi_exit_bitmap, X86_IDT_VECTORS);
     struct pi_desc       pi_desc;
-
-    unsigned long        host_cr0;
 
     /* Do we need to tolerate a spurious EPT_MISCONFIG VM exit? */
     bool                 ept_spurious_misconfig;
 
+#ifdef CONFIG_VMTRACE
     /* Processor Trace configured and enabled for the vcpu. */
     bool                 ipt_active;
+#endif
 
     /* Is the guest in real mode? */
     uint8_t              vmx_realmode;
@@ -155,6 +163,11 @@ struct vmx_vcpu {
     uint8_t              vmx_emulate;
 
     uint8_t              lbr_flags;
+
+    /* Which cache mode is this VCPU in (CR0:CD/NW)? */
+    uint8_t              cache_mode;
+#define CACHE_MODE_NORMAL  0
+#define CACHE_MODE_NO_FILL 2
 
     /* Bitmask of segments that we can't safely use in virtual 8086 mode */
     uint16_t             vm86_segment_mask;
@@ -210,14 +223,12 @@ void vmx_vmcs_reload(struct vcpu *v);
 #define CPU_BASED_MONITOR_EXITING             0x20000000U
 #define CPU_BASED_PAUSE_EXITING               0x40000000U
 #define CPU_BASED_ACTIVATE_SECONDARY_CONTROLS 0x80000000U
-extern u32 vmx_cpu_based_exec_control;
 
 #define PIN_BASED_EXT_INTR_MASK         0x00000001
 #define PIN_BASED_NMI_EXITING           0x00000008
 #define PIN_BASED_VIRTUAL_NMIS          0x00000020
 #define PIN_BASED_PREEMPT_TIMER         0x00000040
 #define PIN_BASED_POSTED_INTERRUPT      0x00000080
-extern u32 vmx_pin_based_exec_control;
 
 #define VM_EXIT_SAVE_DEBUG_CNTRLS       0x00000004
 #define VM_EXIT_IA32E_MODE              0x00000200
@@ -229,7 +240,6 @@ extern u32 vmx_pin_based_exec_control;
 #define VM_EXIT_LOAD_HOST_EFER          0x00200000
 #define VM_EXIT_SAVE_PREEMPT_TIMER      0x00400000
 #define VM_EXIT_CLEAR_BNDCFGS           0x00800000
-extern u32 vmx_vmexit_control;
 
 #define VM_ENTRY_IA32E_MODE             0x00000200
 #define VM_ENTRY_SMM                    0x00000400
@@ -238,7 +248,6 @@ extern u32 vmx_vmexit_control;
 #define VM_ENTRY_LOAD_GUEST_PAT         0x00004000
 #define VM_ENTRY_LOAD_GUEST_EFER        0x00008000
 #define VM_ENTRY_LOAD_BNDCFGS           0x00010000
-extern u32 vmx_vmentry_control;
 
 #define SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES 0x00000001U
 #define SECONDARY_EXEC_ENABLE_EPT               0x00000002U
@@ -260,7 +269,6 @@ extern u32 vmx_vmentry_control;
 #define SECONDARY_EXEC_TSC_SCALING              0x02000000U
 #define SECONDARY_EXEC_BUS_LOCK_DETECTION       0x40000000U
 #define SECONDARY_EXEC_NOTIFY_VM_EXITING        0x80000000U
-extern u32 vmx_secondary_exec_control;
 
 #define TERTIARY_EXEC_LOADIWKEY_EXITING         BIT(0, UL)
 #define TERTIARY_EXEC_ENABLE_HLAT               BIT(1, UL)
@@ -268,13 +276,12 @@ extern u32 vmx_secondary_exec_control;
 #define TERTIARY_EXEC_GUEST_PAGING_VERIFY       BIT(3, UL)
 #define TERTIARY_EXEC_IPI_VIRT                  BIT(4, UL)
 #define TERTIARY_EXEC_VIRT_SPEC_CTRL            BIT(7, UL)
-extern uint64_t vmx_tertiary_exec_control;
 
 #define cpu_has_vmx_virt_spec_ctrl \
-     (vmx_tertiary_exec_control & TERTIARY_EXEC_VIRT_SPEC_CTRL)
+     (vmx_caps.tertiary_exec_control & TERTIARY_EXEC_VIRT_SPEC_CTRL)
 
 #define cpu_has_vmx_ept_paging_write \
-     (vmx_tertiary_exec_control & TERTIARY_EXEC_EPT_PAGING_WRITE)
+     (vmx_caps.tertiary_exec_control & TERTIARY_EXEC_EPT_PAGING_WRITE)
 
 #define VMX_EPT_EXEC_ONLY_SUPPORTED                         0x00000001
 #define VMX_EPT_WALK_LENGTH_4_SUPPORTED                     0x00000040
@@ -286,12 +293,11 @@ extern uint64_t vmx_tertiary_exec_control;
 #define VMX_EPT_AD_BIT                                      0x00200000
 #define VMX_EPT_INVEPT_SINGLE_CONTEXT                       0x02000000
 #define VMX_EPT_INVEPT_ALL_CONTEXT                          0x04000000
-#define VMX_VPID_INVVPID_INSTRUCTION                     0x00100000000ULL
-#define VMX_VPID_INVVPID_INDIVIDUAL_ADDR                 0x10000000000ULL
-#define VMX_VPID_INVVPID_SINGLE_CONTEXT                  0x20000000000ULL
-#define VMX_VPID_INVVPID_ALL_CONTEXT                     0x40000000000ULL
-#define VMX_VPID_INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL 0x80000000000ULL
-extern u64 vmx_ept_vpid_cap;
+#define VMX_VPID_INVVPID_INSTRUCTION                        0x00000001
+#define VMX_VPID_INVVPID_INDIVIDUAL_ADDR                    0x00000100
+#define VMX_VPID_INVVPID_SINGLE_CONTEXT                     0x00000200
+#define VMX_VPID_INVVPID_ALL_CONTEXT                        0x00000400
+#define VMX_VPID_INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL    0x00000800
 
 #define VMX_MISC_ACTIVITY_MASK                  0x000001c0
 #define VMX_MISC_PROC_TRACE                     0x00004000
@@ -300,100 +306,115 @@ extern u64 vmx_ept_vpid_cap;
 
 #define VMX_TSC_MULTIPLIER_MAX                  0xffffffffffffffffULL
 
+/* Capabilities and dynamic (run-time adjusted) execution control flags. */
+struct vmx_caps {
+    uint64_t basic_msr;
+    uint32_t pin_based_exec_control;
+    uint32_t cpu_based_exec_control;
+    uint32_t secondary_exec_control;
+    uint64_t tertiary_exec_control;
+    uint32_t vmexit_control;
+    uint32_t vmentry_control;
+    uint32_t ept;
+    uint32_t vpid;
+    uint64_t vmfunc;
+};
+extern struct vmx_caps vmx_caps;
+
 #define cpu_has_wbinvd_exiting \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_WBINVD_EXITING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_WBINVD_EXITING))
 #define cpu_has_vmx_virtualize_apic_accesses \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES))
 #define cpu_has_vmx_tpr_shadow \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_cpu_based_exec_control & CPU_BASED_TPR_SHADOW)
+     (vmx_caps.cpu_based_exec_control & CPU_BASED_TPR_SHADOW))
 #define cpu_has_vmx_vnmi \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_pin_based_exec_control & PIN_BASED_VIRTUAL_NMIS)
+     (vmx_caps.pin_based_exec_control & PIN_BASED_VIRTUAL_NMIS))
 #define cpu_has_vmx_msr_bitmap \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_MSR_BITMAP)
+     (vmx_caps.cpu_based_exec_control & CPU_BASED_ACTIVATE_MSR_BITMAP))
 #define cpu_has_vmx_secondary_exec_control \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS)
+     (vmx_caps.cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS))
 #define cpu_has_vmx_tertiary_exec_control \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_TERTIARY_CONTROLS)
+     (vmx_caps.cpu_based_exec_control & CPU_BASED_ACTIVATE_TERTIARY_CONTROLS))
 #define cpu_has_vmx_ept \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_EPT)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_EPT))
 #define cpu_has_vmx_dt_exiting \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING))
 #define cpu_has_vmx_rdtscp \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_RDTSCP)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_RDTSCP))
 #define cpu_has_vmx_vpid \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VPID)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_VPID))
 #define cpu_has_monitor_trap_flag \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_cpu_based_exec_control & CPU_BASED_MONITOR_TRAP_FLAG)
+     (vmx_caps.cpu_based_exec_control & CPU_BASED_MONITOR_TRAP_FLAG))
 #define cpu_has_vmx_pat \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_vmentry_control & VM_ENTRY_LOAD_GUEST_PAT)
+     (vmx_caps.vmentry_control & VM_ENTRY_LOAD_GUEST_PAT))
 #define cpu_has_vmx_efer \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_vmentry_control & VM_ENTRY_LOAD_GUEST_EFER)
+     (vmx_caps.vmentry_control & VM_ENTRY_LOAD_GUEST_EFER))
 #define cpu_has_vmx_unrestricted_guest \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_UNRESTRICTED_GUEST)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_UNRESTRICTED_GUEST))
 #define vmx_unrestricted_guest(v)               \
     ((v)->arch.hvm.vmx.secondary_exec_control & \
      SECONDARY_EXEC_UNRESTRICTED_GUEST)
 #define cpu_has_vmx_ple \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_PAUSE_LOOP_EXITING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_PAUSE_LOOP_EXITING))
 #define cpu_has_vmx_invpcid \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_INVPCID)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_INVPCID))
 #define cpu_has_vmx_apic_reg_virt \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_APIC_REGISTER_VIRT)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_APIC_REGISTER_VIRT))
 #define cpu_has_vmx_virtual_intr_delivery \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY))
 #define cpu_has_vmx_virtualize_x2apic_mode \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE))
 #define cpu_has_vmx_posted_intr_processing \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_pin_based_exec_control & PIN_BASED_POSTED_INTERRUPT)
+     (vmx_caps.pin_based_exec_control & PIN_BASED_POSTED_INTERRUPT))
 #define cpu_has_vmx_vmcs_shadowing \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VMCS_SHADOWING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_VMCS_SHADOWING))
 #define cpu_has_vmx_vmfunc \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VM_FUNCTIONS)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_VM_FUNCTIONS))
 #define cpu_has_vmx_virt_exceptions \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS))
 #define cpu_has_vmx_pml \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_PML)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_ENABLE_PML))
 #define cpu_has_vmx_mpx \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     (vmx_vmexit_control & VM_EXIT_CLEAR_BNDCFGS) && \
-     (vmx_vmentry_control & VM_ENTRY_LOAD_BNDCFGS))
+     (vmx_caps.vmexit_control & VM_EXIT_CLEAR_BNDCFGS) && \
+     (vmx_caps.vmentry_control & VM_ENTRY_LOAD_BNDCFGS))
 #define cpu_has_vmx_xsaves \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_XSAVES)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_XSAVES))
 #define cpu_has_vmx_tsc_scaling \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_TSC_SCALING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_TSC_SCALING))
 #define cpu_has_vmx_bus_lock_detection \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_BUS_LOCK_DETECTION)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_BUS_LOCK_DETECTION))
 #define cpu_has_vmx_notify_vm_exiting \
     (IS_ENABLED(CONFIG_INTEL_VMX) && \
-     vmx_secondary_exec_control & SECONDARY_EXEC_NOTIFY_VM_EXITING)
+     (vmx_caps.secondary_exec_control & SECONDARY_EXEC_NOTIFY_VM_EXITING))
 
 #define VMCS_RID_TYPE_MASK              0x80000000U
 
@@ -415,9 +436,8 @@ extern u64 vmx_ept_vpid_cap;
  */
 #define VMX_BASIC_DEFAULT1_ZERO		(1ULL << 55)
 
-extern u64 vmx_basic_msr;
 #define cpu_has_vmx_ins_outs_instr_info \
-    (!!(vmx_basic_msr & VMX_BASIC_INS_OUT_INFO))
+    (!!(vmx_caps.basic_msr & VMX_BASIC_INS_OUT_INFO))
 
 /* Guest interrupt status */
 #define VMX_GUEST_INTR_STATUS_SUBFIELD_BITMASK  0x0FF
@@ -429,6 +449,7 @@ extern u64 vmx_basic_msr;
 /* VMCS field encodings. */
 #define VMCS_HIGH(x) ((x) | 1)
 enum vmcs_field {
+    /* 16-bit fields. */
     VIRTUAL_PROCESSOR_ID            = 0x00000000,
     POSTED_INTR_NOTIFICATION_VECTOR = 0x00000002,
     EPTP_INDEX                      = 0x00000004,
@@ -450,6 +471,8 @@ enum vmcs_field {
     HOST_FS_SELECTOR                = 0x00000c08,
     HOST_GS_SELECTOR                = 0x00000c0a,
     HOST_TR_SELECTOR                = 0x00000c0c,
+
+    /* 64-bit fields. */
     IO_BITMAP_A                     = 0x00002000,
     IO_BITMAP_B                     = 0x00002002,
     MSR_BITMAP                      = 0x00002004,
@@ -486,6 +509,8 @@ enum vmcs_field {
     HOST_PAT                        = 0x00002c00,
     HOST_EFER                       = 0x00002c02,
     HOST_PERF_GLOBAL_CTRL           = 0x00002c04,
+
+    /* 32-bit fields. */
     PIN_BASED_VM_EXEC_CONTROL       = 0x00004000,
     CPU_BASED_VM_EXEC_CONTROL       = 0x00004002,
     EXCEPTION_BITMAP                = 0x00004004,
@@ -539,6 +564,8 @@ enum vmcs_field {
     GUEST_SYSENTER_CS               = 0x0000482a,
     GUEST_PREEMPTION_TIMER          = 0x0000482e,
     HOST_SYSENTER_CS                = 0x00004c00,
+
+    /* Natural-width fields. */
     CR0_GUEST_HOST_MASK             = 0x00006000,
     CR4_GUEST_HOST_MASK             = 0x00006002,
     CR0_READ_SHADOW                 = 0x00006004,

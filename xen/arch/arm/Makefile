@@ -1,6 +1,7 @@
 obj-$(CONFIG_ARM_32) += arm32/
 obj-$(CONFIG_ARM_64) += arm64/
 obj-$(CONFIG_MMU) += mmu/
+obj-$(CONFIG_MPU) += mpu/
 obj-$(CONFIG_ACPI) += acpi/
 obj-$(CONFIG_HAS_PCI) += pci/
 ifneq ($(CONFIG_NO_PLAT),y)
@@ -14,7 +15,7 @@ obj-$(CONFIG_HAS_ALTERNATIVE) += alternative.o
 obj-y += cpuerrata.o
 obj-y += cpufeature.o
 obj-y += decode.o
-obj-y += device.o
+obj-y += $(if $(CONFIG_OVERLAY_DTB),device.o,device.init.o)
 obj-$(CONFIG_IOREQ_SERVER) += dm.o
 obj-$(CONFIG_DOM0LESS_BOOT) += dom0less-build.init.o
 obj-y += domain.o
@@ -37,9 +38,9 @@ obj-y += irq.o
 obj-y += kernel.init.o
 obj-$(CONFIG_LIVEPATCH) += livepatch.o
 obj-$(CONFIG_LLC_COLORING) += llc-coloring.o
-obj-$(CONFIG_MEM_ACCESS) += mem_access.o
+obj-$(CONFIG_VM_EVENT) += mem_access.o
 obj-y += mm.o
-obj-y += monitor.o
+obj-$(CONFIG_VM_EVENT) += monitor.o
 obj-y += p2m.o
 obj-y += platform.o
 obj-y += platform_hypercall.o
@@ -50,10 +51,7 @@ obj-y += setup.o
 obj-y += shutdown.o
 obj-y += smp.o
 obj-y += smpboot.o
-obj-$(CONFIG_STATIC_EVTCHN) += static-evtchn.init.o
-obj-$(CONFIG_STATIC_MEMORY) += static-memory.init.o
-obj-$(CONFIG_STATIC_SHM) += static-shmem.init.o
-obj-y += sysctl.o
+obj-$(CONFIG_SYSCTL) += sysctl.o
 obj-y += time.o
 obj-y += traps.o
 obj-y += vcpreg.o
@@ -65,7 +63,7 @@ obj-$(CONFIG_VGICV2) += vgic-v2.o
 obj-$(CONFIG_GICV3) += vgic-v3.o
 obj-$(CONFIG_HAS_ITS) += vgic-v3-its.o
 endif
-obj-y += vm_event.o
+obj-$(CONFIG_VM_EVENT) += vm_event.o
 obj-y += vtimer.o
 obj-$(CONFIG_SBSA_VUART_CONSOLE) += vpl011.o
 obj-y += vsmc.o
@@ -80,15 +78,6 @@ ifneq ($(CONFIG_DTB_FILE),"")
 obj-y += dtb.o
 endif
 
-ifdef CONFIG_LIVEPATCH
-all_symbols = --all-symbols
-ifdef CONFIG_FAST_SYMBOL_LOOKUP
-all_symbols = --all-symbols --sort-by-name
-endif
-else
-all_symbols =
-endif
-
 $(TARGET): $(TARGET)-syms
 	$(OBJCOPY) -O binary -S $< $@
 ifeq ($(CONFIG_ARM_64),y)
@@ -96,20 +85,35 @@ ifeq ($(CONFIG_ARM_64),y)
 endif
 
 $(TARGET)-syms: $(objtree)/prelink.o $(obj)/xen.lds
-	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(objtree)/common/symbols-dummy.o -o $(dot-target).0
-	$(NM) -pa --format=sysv $(dot-target).0 \
-		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
-		> $(dot-target).0.S
+	$(objtree)/tools/symbols $(all_symbols) --empty > $(dot-target).0.S
 	$(MAKE) $(build)=$(@D) $(dot-target).0.o
 	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(dot-target).0.o -o $(dot-target).1
-	$(NM) -pa --format=sysv $(dot-target).1 \
+	      $(dot-target).0.o -o $(dot-target).0
+	$(NM) -pa --format=sysv $(dot-target).0 \
 		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
 		> $(dot-target).1.S
 	$(MAKE) $(build)=$(@D) $(dot-target).1.o
 	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(dot-target).1.o -o $@
+	    $(dot-target).1.o -o $(dot-target).1
+	$(NM) -pa --format=sysv $(dot-target).1 \
+		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
+		> $(dot-target).2.S
+	$(MAKE) $(build)=$(@D) $(dot-target).2.o
+	if ! { $(call compare-symbol-tables, $(dot-target).1.o, $(dot-target).2.o) >/dev/null; }; \
+	then \
+		set -e; \
+		$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
+		    $(dot-target).2.o -o $(dot-target).2; \
+		$(NM) -pa --format=sysv $(dot-target).2 \
+			| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
+			> $(dot-target).3.S; \
+		$(MAKE) $(build)=$(@D) $(dot-target).3.o; \
+		$(call compare-symbol-tables, $(dot-target).2.o, $(dot-target).3.o); \
+	else \
+		ln -sf $(dot-target).2.o $(dot-target).3.o; \
+	fi
+	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
+	    $(dot-target).3.o -o $@
 	$(NM) -pa --format=sysv $@ \
 		| $(objtree)/tools/symbols --all-symbols --xensyms --sysv --sort \
 		> $@.map

@@ -4,8 +4,11 @@
  *
  * Copyright (C) 2011 Citrix Systems, Inc.
  */
+#include <xen/byteorder.h>
 #include <xen/domain_page.h>
 #include <xen/errno.h>
+#include <xen/fdt-domain-build.h>
+#include <xen/fdt-kernel.h>
 #include <xen/guest_access.h>
 #include <xen/gunzip.h>
 #include <xen/init.h>
@@ -15,8 +18,7 @@
 #include <xen/sched.h>
 #include <xen/vmap.h>
 
-#include <asm/byteorder.h>
-#include <asm/kernel.h>
+#include <asm/domain_build.h>
 #include <asm/setup.h>
 
 #define UIMAGE_MAGIC          0x27051956
@@ -38,29 +40,62 @@ struct minimal_dtb_header {
     /* There are other fields but we don't use them yet. */
 };
 
-#define DTB_MAGIC 0xd00dfeedU
-
-static void __init place_modules(struct kernel_info *info,
-                                 paddr_t kernbase, paddr_t kernend)
+static paddr_t __init
+kernel_zimage_place_in_bank(const struct kernel_info *info,
+                            paddr_t bank_start, paddr_t bank_size)
 {
-    /* Align DTB and initrd size to 2Mb. Linux only requires 4 byte alignment */
-    const struct bootmodule *mod = info->initrd_bootmodule;
-    const struct membanks *mem = kernel_info_get_mem(info);
-    const paddr_t initrd_len = ROUNDUP(mod ? mod->size : 0, MB(2));
-    const paddr_t dtb_len = ROUNDUP(fdt_totalsize(info->fdt), MB(2));
-    const paddr_t modsize = initrd_len + dtb_len;
+    paddr_t load_addr;
 
-    /* Convenient */
-    const paddr_t rambase = mem->bank[0].start;
-    const paddr_t ramsize = mem->bank[0].size;
-    const paddr_t ramend = rambase + ramsize;
+#ifdef CONFIG_HAS_DOMAIN_TYPE
+    if ( (info->type == DOMAIN_64BIT) && (info->image.start == 0) )
+        return bank_start + info->image.text_offset;
+#endif
+
+    /*
+     * If start is zero, the zImage is position independent, in this
+     * case Documentation/arm/Booting recommends loading below 128MiB
+     * and above 32MiB. Load it as high as possible within these
+     * constraints, while also avoiding the DTB.
+     */
+    if ( info->image.start == 0 )
+    {
+        paddr_t load_end;
+
+        load_end = bank_start + bank_size;
+        load_end = MIN(bank_start + MB(128), load_end);
+
+        if ( load_end - bank_start < info->image.len )
+            return INVALID_PADDR;
+
+        load_addr = load_end - info->image.len;
+        /* Align to 2MB */
+        load_addr &= ~(MB(2) - 1);
+    }
+    else
+        load_addr = info->image.start;
+
+    return load_addr;
+}
+
+static bool __init first_bank_can_fit_modules(paddr_t ramsize,
+                                              paddr_t kernbase, paddr_t kernend,
+                                              paddr_t dtb_initrd_size)
+{
     const paddr_t kernsize = ROUNDUP(kernend, MB(2)) - kernbase;
+
+    /*
+     * Check only the aggregate kernel + DTB/initrd footprint. The actual
+     * DTB/initrd location is selected by find_dtb_initrd_placement().
+     */
+    return dtb_initrd_size + kernsize <= ramsize;
+}
+
+static bool __init find_dtb_initrd_placement(paddr_t rambase, paddr_t ramend,
+                                             paddr_t kernbase, paddr_t kernend,
+                                             paddr_t dtb_initrd_size,
+                                             paddr_t *dtb_base)
+{
     const paddr_t ram128mb = rambase + MB(128);
-
-    paddr_t modbase;
-
-    if ( modsize + kernsize > ramsize )
-        panic("Not enough memory in the first bank for the kernel+dtb+initrd\n");
 
     /*
      * DTB must be loaded such that it does not conflict with the
@@ -77,21 +112,55 @@ static void __init place_modules(struct kernel_info *info,
      * just before the kernel.
      *
      * If changing this then consider
-     * tools/libxc/xc_dom_arm.c:arch_setup_meminit as well.
+     * tools/libs/guest/xg_dom_arm.c:meminit as well.
      */
-    if ( ramend >= ram128mb + modsize && kernend < ram128mb )
-        modbase = ram128mb;
-    else if ( ramend - modsize > ROUNDUP(kernend, MB(2)) )
-        modbase = ramend - modsize;
-    else if ( kernbase - rambase > modsize )
-        modbase = kernbase - modsize;
-    else
+    if ( ramend >= ram128mb + dtb_initrd_size && kernend < ram128mb )
     {
-        panic("Unable to find suitable location for dtb+initrd\n");
-        return;
+        *dtb_base = ram128mb;
+        return true;
     }
 
-    info->dtb_paddr = modbase;
+    if ( ramend - dtb_initrd_size > ROUNDUP(kernend, MB(2)) )
+    {
+        *dtb_base = ramend - dtb_initrd_size;
+        return true;
+    }
+
+    if ( kernbase - rambase > dtb_initrd_size )
+    {
+        *dtb_base = kernbase - dtb_initrd_size;
+        return true;
+    }
+
+    return false;
+}
+
+static void __init place_dtb_initrd(struct kernel_info *info,
+                                    paddr_t kernbase, paddr_t kernend)
+{
+    /* Align DTB and initrd size to 2Mb. Linux only requires 4 byte alignment */
+    const struct boot_module *initrd = info->bd.initrd;
+    const struct membanks *mem = kernel_info_get_mem(info);
+    const paddr_t initrd_len = ROUNDUP(initrd ? initrd->size : 0, MB(2));
+    const paddr_t dtb_len = ROUNDUP(fdt_totalsize(info->fdt), MB(2));
+    const paddr_t dtb_initrd_size = initrd_len + dtb_len;
+
+    /* Convenient */
+    const paddr_t rambase = mem->bank[0].start;
+    const paddr_t ramsize = mem->bank[0].size;
+    const paddr_t ramend = rambase + ramsize;
+
+    paddr_t dtb_base;
+
+    if ( !first_bank_can_fit_modules(ramsize, kernbase, kernend,
+                                     dtb_initrd_size) )
+        panic("Not enough memory in the first bank for the kernel+dtb+initrd\n");
+
+    if ( !find_dtb_initrd_placement(rambase, ramend, kernbase, kernend,
+                                    dtb_initrd_size, &dtb_base) )
+        panic("Unable to find suitable location for dtb+initrd\n");
+
+    info->dtb_paddr = dtb_base;
     info->initrd_paddr = info->dtb_paddr + dtb_len;
 }
 
@@ -100,39 +169,60 @@ static paddr_t __init kernel_zimage_place(struct kernel_info *info)
     const struct membanks *mem = kernel_info_get_mem(info);
     paddr_t load_addr;
 
-#ifdef CONFIG_ARM_64
-    if ( (info->type == DOMAIN_64BIT) && (info->zimage.start == 0) )
-        return mem->bank[0].start + info->zimage.text_offset;
-#endif
-
-    /*
-     * If start is zero, the zImage is position independent, in this
-     * case Documentation/arm/Booting recommends loading below 128MiB
-     * and above 32MiB. Load it as high as possible within these
-     * constraints, while also avoiding the DTB.
-     */
-    if ( info->zimage.start == 0 )
-    {
-        paddr_t load_end;
-
-        load_end = mem->bank[0].start + mem->bank[0].size;
-        load_end = MIN(mem->bank[0].start + MB(128), load_end);
-
-        load_addr = load_end - info->zimage.len;
-        /* Align to 2MB */
-        load_addr &= ~((2 << 20) - 1);
-    }
-    else
-        load_addr = info->zimage.start;
+    load_addr = kernel_zimage_place_in_bank(info, mem->bank[0].start,
+                                            mem->bank[0].size);
+    if ( load_addr == INVALID_PADDR )
+        panic("Unable to find suitable location for the kernel\n");
 
     return load_addr;
+}
+
+bool __init arch_hwdom_first_bank_can_fit_modules(const struct kernel_info *info,
+                                                  paddr_t bank_start,
+                                                  paddr_t bank_size)
+{
+    const struct boot_module *initrd = info->bd.initrd;
+    /*
+     * place_dtb_initrd() rounds the DTB and initrd placement to 2MB boundaries;
+     * use the same granularity when checking whether the first bank can hold
+     * them.
+     */
+    const paddr_t initrd_len = ROUNDUP(initrd ? initrd->size : 0, MB(2));
+    /*
+     * The hardware domain FDT has not been generated yet. Use the allocation
+     * size as a conservative upper bound for the final DTB size.
+     */
+    const paddr_t dtb_len = ROUNDUP(hwdom_get_fdt_alloc_size(), MB(2));
+    const paddr_t rambase = bank_start;
+    const paddr_t ramsize = bank_size;
+    const paddr_t dtb_initrd_size = initrd_len + dtb_len;
+    const paddr_t ramend = rambase + ramsize;
+    paddr_t kernbase;
+    paddr_t kernend;
+    paddr_t dtb_base;
+
+    kernbase = kernel_zimage_place_in_bank(info, bank_start, bank_size);
+    if ( kernbase == INVALID_PADDR )
+        return false;
+
+    kernend = kernbase + info->image.len;
+
+    if ( (kernbase < rambase) || (kernend > ramend) )
+        return false;
+
+    if ( !first_bank_can_fit_modules(ramsize, kernbase, kernend,
+                                     dtb_initrd_size) )
+        return false;
+
+    return find_dtb_initrd_placement(rambase, ramend, kernbase, kernend,
+                                     dtb_initrd_size, &dtb_base);
 }
 
 static void __init kernel_zimage_load(struct kernel_info *info)
 {
     paddr_t load_addr = kernel_zimage_place(info);
-    paddr_t paddr = info->zimage.kernel_addr;
-    paddr_t len = info->zimage.len;
+    paddr_t paddr = info->image.kernel_addr;
+    paddr_t len = info->image.len;
     void *kernel;
     int rc;
 
@@ -143,120 +233,21 @@ static void __init kernel_zimage_load(struct kernel_info *info)
     if ( info->entry == 0 )
         info->entry = load_addr;
 
-    place_modules(info, load_addr, load_addr + len);
+    place_dtb_initrd(info, load_addr, load_addr + len);
 
     printk("Loading zImage from %"PRIpaddr" to %"PRIpaddr"-%"PRIpaddr"\n",
            paddr, load_addr, load_addr + len);
 
     kernel = ioremap_wc(paddr, len);
     if ( !kernel )
-        panic("Unable to map the hwdom kernel\n");
+        panic("Unable to map the %pd kernel\n", info->bd.d);
 
-    rc = copy_to_guest_phys_flush_dcache(info->d, load_addr,
+    rc = copy_to_guest_phys_flush_dcache(info->bd.d, load_addr,
                                          kernel, len);
     if ( rc != 0 )
-        panic("Unable to copy the kernel in the hwdom memory\n");
+        panic("Unable to copy the kernel in the %pd memory\n", info->bd.d);
 
     iounmap(kernel);
-}
-
-static __init uint32_t output_length(char *image, unsigned long image_len)
-{
-    return *(uint32_t *)&image[image_len - 4];
-}
-
-static __init int kernel_decompress(struct bootmodule *mod, uint32_t offset)
-{
-    char *output, *input;
-    char magic[2];
-    int rc;
-    unsigned int kernel_order_out;
-    paddr_t output_size;
-    struct page_info *pages;
-    mfn_t mfn;
-    int i;
-    paddr_t addr = mod->start;
-    paddr_t size = mod->size;
-
-    if ( size < offset )
-        return -EINVAL;
-
-    /*
-     * It might be that gzip header does not appear at the start address
-     * (e.g. in case of compressed uImage) so take into account offset to
-     * gzip header.
-     */
-    addr += offset;
-    size -= offset;
-
-    if ( size < 2 )
-        return -EINVAL;
-
-    copy_from_paddr(magic, addr, sizeof(magic));
-
-    /* only gzip is supported */
-    if ( !gzip_check(magic, size) )
-        return -EINVAL;
-
-    input = ioremap_cache(addr, size);
-    if ( input == NULL )
-        return -EFAULT;
-
-    output_size = output_length(input, size);
-    kernel_order_out = get_order_from_bytes(output_size);
-    pages = alloc_domheap_pages(NULL, kernel_order_out, 0);
-    if ( pages == NULL )
-    {
-        iounmap(input);
-        return -ENOMEM;
-    }
-    mfn = page_to_mfn(pages);
-    output = vmap_contig(mfn, 1 << kernel_order_out);
-
-    rc = perform_gunzip(output, input, size);
-    clean_dcache_va_range(output, output_size);
-    iounmap(input);
-    vunmap(output);
-
-    if ( rc )
-    {
-        free_domheap_pages(pages, kernel_order_out);
-        return rc;
-    }
-
-    mod->start = page_to_maddr(pages);
-    mod->size = output_size;
-
-    /*
-     * Need to free pages after output_size here because they won't be
-     * freed by discard_initial_modules
-     */
-    i = PFN_UP(output_size);
-    for ( ; i < (1 << kernel_order_out); i++ )
-        free_domheap_page(pages + i);
-
-    /*
-     * When using static heap feature, don't give bootmodules memory back to
-     * the heap allocator
-     */
-    if ( using_static_heap )
-        return 0;
-
-    /*
-     * When freeing the kernel, we need to pass the module start address and
-     * size as they were before taking an offset to gzip header into account,
-     * so that the entire region will be freed.
-     */
-    addr -= offset;
-    size += offset;
-
-    /*
-     * Free the original kernel, update the pointers to the
-     * decompressed kernel
-     */
-    fw_unreserved_regions(addr, addr + size, init_domheap_pages, 0);
-
-    return 0;
 }
 
 /*
@@ -271,8 +262,8 @@ static __init int kernel_decompress(struct bootmodule *mod, uint32_t offset)
 /*
  * Check if the image is a uImage and setup kernel_info
  */
-static int __init kernel_uimage_probe(struct kernel_info *info,
-                                      struct bootmodule *mod)
+int __init kernel_uimage_probe(struct kernel_info *info,
+                               struct boot_module *mod)
 {
     struct {
         __be32 magic;   /* Image Header Magic Number */
@@ -314,7 +305,7 @@ static int __init kernel_uimage_probe(struct kernel_info *info,
         return -EOPNOTSUPP;
     }
 
-    info->zimage.start = be32_to_cpu(uimage.load);
+    info->image.start = be32_to_cpu(uimage.load);
     info->entry = be32_to_cpu(uimage.ep);
 
     /*
@@ -323,20 +314,20 @@ static int __init kernel_uimage_probe(struct kernel_info *info,
      * independent image. That means Xen is free to load such an image at
      * any valid address.
      */
-    if ( info->zimage.start == 0 )
+    if ( info->image.start == 0 )
         printk(XENLOG_INFO
                "No load address provided. Xen will decide where to load it.\n");
     else
         printk(XENLOG_INFO
                "Provided load address: %"PRIpaddr" and entry address: %"PRIpaddr"\n",
-               info->zimage.start, info->entry);
+               info->image.start, info->entry);
 
     /*
      * If the image supports position independent execution, then user cannot
      * provide an entry point as Xen will load such an image at any appropriate
      * memory address. Thus, we need to return error.
      */
-    if ( (info->zimage.start == 0) && (info->entry != 0) )
+    if ( (info->image.start == 0) && (info->entry != 0) )
     {
         printk(XENLOG_ERR
                "Entry point cannot be non zero for PIE image.\n");
@@ -356,18 +347,18 @@ static int __init kernel_uimage_probe(struct kernel_info *info,
         if ( rc )
             return rc;
 
-        info->zimage.kernel_addr = mod->start;
-        info->zimage.len = mod->size;
+        info->image.kernel_addr = mod->start;
+        info->image.len = mod->size;
     }
     else
     {
-        info->zimage.kernel_addr = addr + sizeof(uimage);
-        info->zimage.len = len;
+        info->image.kernel_addr = addr + sizeof(uimage);
+        info->image.len = len;
     }
 
     info->load = kernel_zimage_load;
 
-#ifdef CONFIG_ARM_64
+#ifdef CONFIG_HAS_DOMAIN_TYPE
     switch ( uimage.arch )
     {
     case IH_ARCH_ARM:
@@ -386,9 +377,9 @@ static int __init kernel_uimage_probe(struct kernel_info *info,
      * header. In other words if the user provides a uImage header on top of
      * zImage or zImage64 header, Xen uses the attributes of uImage header only.
      * Thus, Xen uses uimage.load attribute to determine the load address and
-     * zimage.text_offset is ignored.
+     * image.text_offset is ignored.
      */
-    info->zimage.text_offset = 0;
+    info->image.text_offset = 0;
 #endif
 
     return 0;
@@ -437,10 +428,10 @@ static int __init kernel_zimage64_probe(struct kernel_info *info,
     if ( (end - start) > size )
         return -EINVAL;
 
-    info->zimage.kernel_addr = addr;
-    info->zimage.len = end - start;
-    info->zimage.text_offset = zimage.text_offset;
-    info->zimage.start = 0;
+    info->image.kernel_addr = addr;
+    info->image.len = end - start;
+    info->image.text_offset = zimage.text_offset;
+    info->image.start = 0;
 
     info->load = kernel_zimage_load;
 
@@ -480,7 +471,7 @@ static int __init kernel_zimage32_probe(struct kernel_info *info,
     if ( addr + end - start + sizeof(dtb_hdr) <= size )
     {
         copy_from_paddr(&dtb_hdr, addr + end - start, sizeof(dtb_hdr));
-        if (be32_to_cpu(dtb_hdr.magic) == DTB_MAGIC) {
+        if (be32_to_cpu(dtb_hdr.magic) == FDT_MAGIC) {
             end += be32_to_cpu(dtb_hdr.total_size);
 
             if ( end > addr + size )
@@ -488,142 +479,32 @@ static int __init kernel_zimage32_probe(struct kernel_info *info,
         }
     }
 
-    info->zimage.kernel_addr = addr;
+    info->image.kernel_addr = addr;
 
-    info->zimage.start = start;
-    info->zimage.len = end - start;
+    info->image.start = start;
+    info->image.len = end - start;
 
     info->load = kernel_zimage_load;
 
-#ifdef CONFIG_ARM_64
+#ifdef CONFIG_HAS_DOMAIN_TYPE
     info->type = DOMAIN_32BIT;
 #endif
 
     return 0;
 }
 
-int __init kernel_probe(struct kernel_info *info,
-                        const struct dt_device_node *domain)
+int __init kernel_image_probe(struct kernel_info *info, paddr_t addr,
+                               paddr_t size)
 {
-    struct bootmodule *mod = NULL;
-    struct bootcmdline *cmd = NULL;
-    struct dt_device_node *node;
-    u64 kernel_addr, initrd_addr, dtb_addr, size;
     int rc;
 
-    /*
-     * We need to initialize start to 0. This field may be populated during
-     * kernel_xxx_probe() if the image has a fixed entry point (for e.g.
-     * uimage.ep).
-     * We will use this to determine if the image has a fixed entry point or
-     * the load address should be used as the start address.
-     */
-    info->entry = 0;
-
-    /* domain is NULL only for the hardware domain */
-    if ( domain == NULL )
-    {
-        ASSERT(is_hardware_domain(info->d));
-
-        mod = boot_module_find_by_kind(BOOTMOD_KERNEL);
-
-        info->kernel_bootmodule = mod;
-        info->initrd_bootmodule = boot_module_find_by_kind(BOOTMOD_RAMDISK);
-
-        cmd = boot_cmdline_find_by_kind(BOOTMOD_KERNEL);
-        if ( cmd )
-            info->cmdline = &cmd->cmdline[0];
-    }
-    else
-    {
-        const char *name = NULL;
-
-        dt_for_each_child_node(domain, node)
-        {
-            if ( dt_device_is_compatible(node, "multiboot,kernel") )
-            {
-                u32 len;
-                const __be32 *val;
-
-                val = dt_get_property(node, "reg", &len);
-                dt_get_range(&val, node, &kernel_addr, &size);
-                mod = boot_module_find_by_addr_and_kind(
-                        BOOTMOD_KERNEL, kernel_addr);
-                info->kernel_bootmodule = mod;
-            }
-            else if ( dt_device_is_compatible(node, "multiboot,ramdisk") )
-            {
-                u32 len;
-                const __be32 *val;
-
-                val = dt_get_property(node, "reg", &len);
-                dt_get_range(&val, node, &initrd_addr, &size);
-                info->initrd_bootmodule = boot_module_find_by_addr_and_kind(
-                        BOOTMOD_RAMDISK, initrd_addr);
-            }
-            else if ( dt_device_is_compatible(node, "multiboot,device-tree") )
-            {
-                uint32_t len;
-                const __be32 *val;
-
-                val = dt_get_property(node, "reg", &len);
-                if ( val == NULL )
-                    continue;
-                dt_get_range(&val, node, &dtb_addr, &size);
-                info->dtb_bootmodule = boot_module_find_by_addr_and_kind(
-                        BOOTMOD_GUEST_DTB, dtb_addr);
-            }
-            else
-                continue;
-        }
-        name = dt_node_name(domain);
-        cmd = boot_cmdline_find_by_name(name);
-        if ( cmd )
-            info->cmdline = &cmd->cmdline[0];
-    }
-    if ( !mod || !mod->size )
-    {
-        printk(XENLOG_ERR "Missing kernel boot module?\n");
-        return -ENOENT;
-    }
-
-    printk("Loading %pd kernel from boot module @ %"PRIpaddr"\n",
-           info->d, info->kernel_bootmodule->start);
-    if ( info->initrd_bootmodule )
-        printk("Loading ramdisk from boot module @ %"PRIpaddr"\n",
-               info->initrd_bootmodule->start);
-
-    /*
-     * uImage header always appears at the top of the image (even compressed),
-     * so it needs to be probed first. Note that in case of compressed uImage,
-     * kernel_decompress is called from kernel_uimage_probe making the function
-     * self-containing (i.e. fall through only in case of a header not found).
-     */
-    rc = kernel_uimage_probe(info, mod);
-    if ( rc != -ENOENT )
-        return rc;
-
-    /*
-     * If it is a gzip'ed image, 32bit or 64bit, uncompress it.
-     * At this point, gzip header appears (if at all) at the top of the image,
-     * so pass 0 as an offset.
-     */
-    rc = kernel_decompress(mod, 0);
-    if ( rc && rc != -EINVAL )
-        return rc;
-
 #ifdef CONFIG_ARM_64
-    rc = kernel_zimage64_probe(info, mod->start, mod->size);
+    rc = kernel_zimage64_probe(info, addr, size);
     if (rc < 0)
 #endif
-        rc = kernel_zimage32_probe(info, mod->start, mod->size);
+        rc = kernel_zimage32_probe(info, addr, size);
 
     return rc;
-}
-
-void __init kernel_load(struct kernel_info *info)
-{
-    info->load(info);
 }
 
 /*

@@ -58,7 +58,7 @@
  */
 #define MICROCODE_UPDATE_TIMEOUT_US 1000000
 
-static bool __initdata ucode_mod_forced;
+static bool __initdata __maybe_unused ucode_mod_forced;
 static unsigned int nr_cores;
 
 /*
@@ -70,12 +70,13 @@ static unsigned int nr_cores;
  *  - LOADING_ENTER: all CPUs have called in. Initiate ucode loading.
  *  - LOADING_EXIT: ucode loading is done or aborted.
  */
-static enum {
+typedef enum {
     LOADING_PREPARE,
     LOADING_CALLIN,
     LOADING_ENTER,
     LOADING_EXIT,
-} loading_state;
+} loading_state_t;
+static loading_state_t loading_state;
 
 struct patch_with_flags {
     unsigned int flags;
@@ -100,9 +101,10 @@ static struct microcode_patch *microcode_cache;
  * location we require that they are not both active together.
  */
 static int __initdata opt_mod_idx;
-static bool __initdata opt_scan;
+static bool __initdata opt_scan = IS_ENABLED(CONFIG_MICROCODE_SCAN_DEFAULT);
 bool __ro_after_init opt_digest_check = true;
 
+#ifdef CONFIG_MICROCODE_LOADING
 /*
  * Used by the EFI path only, when xen.cfg identifies an explicit microcode
  * file.  Overrides ucode=<int>|scan on the regular command line.
@@ -114,11 +116,6 @@ void __init microcode_set_module(unsigned int idx)
     ucode_mod_forced = 1;
 }
 
-/*
- * The format is '[<integer>|scan=<bool>, nmi=<bool>]'. Both options are
- * optional. If the EFI has forced which of the multiboot payloads is to be
- * used, only nmi=<bool> is parsed.
- */
 static int __init cf_check parse_ucode(const char *s)
 {
     const char *ss;
@@ -133,13 +130,24 @@ static int __init cf_check parse_ucode(const char *s)
             ucode_in_nmi = val;
         else if ( (val = parse_boolean("digest-check", s, ss)) >= 0 )
             opt_digest_check = val;
-        else if ( !ucode_mod_forced ) /* Not forced by EFI */
+        else if ( (val = parse_boolean("scan", s, ss)) >= 0 )
         {
-            if ( (val = parse_boolean("scan", s, ss)) >= 0 )
+            if ( ucode_mod_forced )
+                printk(XENLOG_WARNING
+                       "Ignoring ucode=%.*s setting; overridden by EFI\n",
+                       (int)(ss - s), s);
+            else
             {
                 opt_scan = val;
                 opt_mod_idx = 0;
             }
+        }
+        else if ( isdigit(s[0]) || s[0] == '-' )
+        {
+            if ( ucode_mod_forced )
+                printk(XENLOG_WARNING
+                       "Ignoring ucode=%.*s setting; overridden by EFI\n",
+                       (int)(ss - s), s);
             else
             {
                 const char *q;
@@ -154,6 +162,8 @@ static int __init cf_check parse_ucode(const char *s)
                     opt_scan = false;
             }
         }
+        else
+            rc = -EINVAL;
 
         s = ss + 1;
     } while ( *ss );
@@ -161,8 +171,27 @@ static int __init cf_check parse_ucode(const char *s)
     return rc;
 }
 custom_param("ucode", parse_ucode);
+#endif /* CONFIG_MICROCODE_LOADING */
 
 static struct microcode_ops __ro_after_init ucode_ops;
+
+/* Parse a ucode blob.  Returns a pointer to a heap-allocated copy, or PTR_ERR. */
+static struct microcode_patch *ucode_parse_dup(const char *buf, size_t len)
+{
+    return alternative_call(ucode_ops.parse, buf, len, true);
+}
+
+/* Parse a ucode blob.  Returns a pointer into @buf, or PTR_ERR. */
+static const struct microcode_patch *__init ucode_parse(const char *buf, size_t len)
+{
+    return ucode_ops.parse(buf, len, false);
+}
+
+/* Load a ucode blob.  Returns -errno. */
+static int ucode_load(const struct microcode_patch *patch, unsigned int flags)
+{
+    return alternative_call(ucode_ops.load, patch, flags);
+}
 
 static DEFINE_SPINLOCK(microcode_mutex);
 
@@ -184,21 +213,10 @@ static struct patch_with_flags nmi_patch =
     .patch  = ZERO_BLOCK_PTR,
 };
 
-/*
- * Return a patch that covers current CPU. If there are multiple patches,
- * return the one with the highest revision number. Return error If no
- * patch is found and an error occurs during the parsing process. Otherwise
- * return NULL.
- */
-static struct microcode_patch *parse_blob(const char *buf, size_t len)
-{
-    return alternative_call(ucode_ops.cpu_request_microcode, buf, len, true);
-}
-
 /* Returns true if ucode should be loaded on a given cpu */
 static bool is_cpu_primary(unsigned int cpu)
 {
-    if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
+    if ( boot_cpu_data.vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
         /* Load ucode on every logical thread/core */
         return true;
 
@@ -237,9 +255,9 @@ static bool cf_check wait_cpu_callout(unsigned int nr)
     return atomic_read(&cpu_out) >= nr;
 }
 
-static bool wait_for_state(typeof(loading_state) state)
+static bool wait_for_state(loading_state_t state)
 {
-    typeof(loading_state) cur_state;
+    loading_state_t cur_state;
 
     while ( (cur_state = ACCESS_ONCE(loading_state)) != state )
     {
@@ -251,7 +269,7 @@ static bool wait_for_state(typeof(loading_state) state)
     return true;
 }
 
-static void set_state(typeof(loading_state) state)
+static void set_state(loading_state_t state)
 {
     ACCESS_ONCE(loading_state) = state;
 }
@@ -275,7 +293,7 @@ static int primary_thread_work(const struct microcode_patch *patch,
     if ( !wait_for_state(LOADING_ENTER) )
         return 0;
 
-    ret = alternative_call(ucode_ops.apply_microcode, patch, flags);
+    ret = ucode_load(patch, flags);
     if ( !ret )
         atomic_inc(&cpu_updated);
     atomic_inc(&cpu_out);
@@ -320,12 +338,10 @@ static int secondary_thread_fn(void)
     self_nmi();
 
     /*
-     * Wait for ucode loading is done in case that the NMI does not arrive
-     * synchronously, which may lead to a not-yet-updated CPU signature is
-     * copied below.
+     * NMIs may not be delivered synchronously.  Wait for the primary threads
+     * to be done.
      */
-    if ( unlikely(!wait_for_state(LOADING_EXIT)) )
-        ASSERT_UNREACHABLE();
+    wait_for_state(LOADING_EXIT);
 
     /* Copy update revision from the primary thread. */
     this_cpu(cpu_sig).rev =
@@ -345,12 +361,10 @@ static int primary_thread_fn(const struct microcode_patch *patch,
         self_nmi();
 
         /*
-         * Wait for ucode loading is done in case that the NMI does not arrive
-         * synchronously, which may lead to a not-yet-updated error is returned
-         * below.
+         * NMIs may not be delivered synchronously.  Wait for the primary
+         * threads to be done.
          */
-        if ( unlikely(!wait_for_state(LOADING_EXIT)) )
-            ASSERT_UNREACHABLE();
+        wait_for_state(LOADING_EXIT);
 
         return this_cpu(loading_err);
     }
@@ -389,7 +403,7 @@ static int control_thread_fn(const struct microcode_patch *patch,
         goto out;
 
     /* Control thread loads ucode first while others are in NMI handler. */
-    ret = alternative_call(ucode_ops.apply_microcode, patch, flags);
+    ret = ucode_load(patch, flags);
     if ( !ret )
         atomic_inc(&cpu_updated);
     atomic_inc(&cpu_out);
@@ -472,7 +486,7 @@ struct ucode_buf {
     char buffer[];
 };
 
-static long cf_check microcode_update_helper(void *data)
+static long cf_check __maybe_unused ucode_update_hcall_cont(void *data)
 {
     struct microcode_patch *patch = NULL;
     int ret, result;
@@ -503,7 +517,7 @@ static long cf_check microcode_update_helper(void *data)
         goto put;
     }
 
-    patch = parse_blob(buffer->buffer, buffer->len);
+    patch = ucode_parse_dup(buffer->buffer, buffer->len);
     patch_with_flags.flags = buffer->flags;
 
     xfree(buffer);
@@ -616,8 +630,9 @@ static long cf_check microcode_update_helper(void *data)
     return ret;
 }
 
-int microcode_update(XEN_GUEST_HANDLE(const_void) buf,
-                     unsigned long len, unsigned int flags)
+#ifdef CONFIG_MICROCODE_LOADING
+int ucode_update_hcall(XEN_GUEST_HANDLE(const_void) buf,
+                       unsigned long len, unsigned int flags)
 {
     int ret;
     struct ucode_buf *buffer;
@@ -625,7 +640,7 @@ int microcode_update(XEN_GUEST_HANDLE(const_void) buf,
     if ( flags & ~XENPF_UCODE_FORCE )
         return -EINVAL;
 
-    if ( !ucode_ops.apply_microcode )
+    if ( !ucode_ops.load )
         return -EINVAL;
 
     buffer = xmalloc_flex_struct(struct ucode_buf, buffer, len);
@@ -642,12 +657,13 @@ int microcode_update(XEN_GUEST_HANDLE(const_void) buf,
     buffer->flags = flags;
 
     /*
-     * Always queue microcode_update_helper() on CPU0.  Most of the logic
+     * Always queue ucode_update_hcall_cont() on CPU0.  Most of the logic
      * won't care, but the update of the Raw CPU policy wants to (re)run on
      * the BSP.
      */
-    return continue_hypercall_on_cpu(0, microcode_update_helper, buffer);
+    return continue_hypercall_on_cpu(0, ucode_update_hcall_cont, buffer);
 }
+#endif /* CONFIG_MICROCODE_LOADING */
 
 /* Load a cached update to current cpu */
 int microcode_update_one(void)
@@ -661,12 +677,12 @@ int microcode_update_one(void)
     if ( ucode_ops.collect_cpu_info )
         alternative_vcall(ucode_ops.collect_cpu_info);
 
-    if ( !ucode_ops.apply_microcode )
+    if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) || !ucode_ops.load )
         return -EOPNOTSUPP;
 
     spin_lock(&microcode_mutex);
     if ( microcode_cache )
-        rc = alternative_call(ucode_ops.apply_microcode, microcode_cache, 0);
+        rc = ucode_load(microcode_cache, 0);
     else
         rc = -ENOENT;
     spin_unlock(&microcode_mutex);
@@ -681,6 +697,7 @@ int microcode_update_one(void)
  */
 static int __initdata early_mod_idx = -1;
 
+#ifdef CONFIG_MICROCODE_LOADING
 static int __init cf_check microcode_init_cache(void)
 {
     struct boot_info *bi = &xen_boot_info;
@@ -715,7 +732,7 @@ static int __init cf_check microcode_init_cache(void)
         size = cd.size;
     }
 
-    patch = parse_blob(data, size);
+    patch = ucode_parse_dup(data, size);
     if ( IS_ERR(patch) )
     {
         rc = PTR_ERR(patch);
@@ -737,6 +754,7 @@ static int __init cf_check microcode_init_cache(void)
     return rc;
 }
 presmp_initcall(microcode_init_cache);
+#endif /* CONFIG_MICROCODE_LOADING */
 
 /*
  * There are several tasks:
@@ -748,7 +766,7 @@ static int __init early_microcode_load(struct boot_info *bi)
 {
     void *data = NULL;
     size_t size;
-    struct microcode_patch *patch;
+    const struct microcode_patch *patch;
     struct cpio_data cd;
     int idx = opt_mod_idx;
     int rc;
@@ -768,8 +786,7 @@ static int __init early_microcode_load(struct boot_info *bi)
             const struct boot_module *bm = &bi->mods[idx];
 
             /* Search anything unclaimed or likely to be a CPIO archive. */
-            if ( bm->type != BOOTMOD_UNKNOWN &&
-                 bm->type != BOOTMOD_RAMDISK )
+            if ( bm->kind != BOOTMOD_UNKNOWN && bm->kind != BOOTMOD_RAMDISK )
                 continue;
 
             size = bm->size;
@@ -819,12 +836,12 @@ static int __init early_microcode_load(struct boot_info *bi)
             return -ENODEV;
         }
 
-        if ( bi->mods[idx].type != BOOTMOD_UNKNOWN )
+        if ( bi->mods[idx].kind != BOOTMOD_UNKNOWN )
         {
             printk(XENLOG_WARNING "Microcode: Chosen module %d already used\n", idx);
             return -ENODEV;
         }
-        bi->mods[idx].type = BOOTMOD_MICROCODE;
+        bi->mods[idx].kind = BOOTMOD_MICROCODE;
 
         size = bi->mods[idx].size;
         data = bootstrap_map_bm(&bi->mods[idx]);
@@ -859,7 +876,7 @@ static int __init early_microcode_load(struct boot_info *bi)
     return 0;
 
  found:
-    patch = ucode_ops.cpu_request_microcode(data, size, false);
+    patch = ucode_parse(data, size);
     if ( IS_ERR(patch) )
     {
         rc = PTR_ERR(patch);
@@ -883,7 +900,7 @@ static int __init early_microcode_load(struct boot_info *bi)
      */
     early_mod_idx = idx;
 
-    rc = ucode_ops.apply_microcode(patch, 0);
+    rc = ucode_load(patch, 0);
 
     if ( rc == 0 )
         /* Rescan CPUID/MSR features, which may have changed after a load. */
@@ -899,7 +916,7 @@ int __init early_microcode_init(struct boot_info *bi)
 {
     const struct cpuinfo_x86 *c = &boot_cpu_data;
 
-    switch ( c->x86_vendor )
+    switch ( c->vendor )
     {
     case X86_VENDOR_AMD:
         ucode_probe_amd(&ucode_ops);
@@ -920,6 +937,9 @@ int __init early_microcode_init(struct boot_info *bi)
 
     printk(XENLOG_INFO "BSP microcode revision: 0x%08x\n", this_cpu(cpu_sig).rev);
 
+    if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) )
+        return -ENODEV;
+
     /*
      * Some hypervisors deliberately report a microcode revision of -1 to
      * mean that they will not accept microcode updates.
@@ -929,11 +949,11 @@ int __init early_microcode_init(struct boot_info *bi)
      *
      * Take the hint in either case and ignore the microcode interface.
      */
-    if ( !ucode_ops.apply_microcode || this_cpu(cpu_sig).rev == ~0 )
+    if ( !ucode_ops.load || this_cpu(cpu_sig).rev == ~0 )
     {
         printk(XENLOG_INFO "Microcode loading disabled due to: %s\n",
-               ucode_ops.apply_microcode ? "rev = ~0" : "HW toggle");
-        ucode_ops.apply_microcode = NULL;
+               ucode_ops.load ? "rev = ~0" : "HW toggle");
+        ucode_ops.load = NULL;
         return -ENODEV;
     }
 

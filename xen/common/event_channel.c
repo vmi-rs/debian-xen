@@ -120,7 +120,14 @@ static uint8_t get_xen_consumer(xen_event_channel_notification_t fn)
 /* Get the notification function for a given Xen-bound event channel. */
 #define xen_notification_fn(e) (xen_consumers[(e)->xen_consumer-1])
 
-static bool virq_is_global(unsigned int virq)
+static struct domain *__read_mostly global_virq_handlers[NR_VIRQS];
+
+static struct domain *get_global_virq_handler(unsigned int virq)
+{
+    return global_virq_handlers[virq] ?: hardware_domain;
+}
+
+static enum virq_type get_virq_type(unsigned int virq)
 {
     switch ( virq )
     {
@@ -128,14 +135,17 @@ static bool virq_is_global(unsigned int virq)
     case VIRQ_DEBUG:
     case VIRQ_XENOPROF:
     case VIRQ_XENPMU:
-        return false;
+        return VIRQ_VCPU;
+
+    case VIRQ_ARGO:
+        return VIRQ_DOMAIN;
 
     case VIRQ_ARCH_0 ... VIRQ_ARCH_7:
-        return arch_virq_is_global(virq);
+        return arch_get_virq_type(virq);
     }
 
     ASSERT(virq < NR_VIRQS);
-    return true;
+    return VIRQ_GLOBAL;
 }
 
 static struct evtchn *_evtchn_from_port(const struct domain *d,
@@ -469,6 +479,7 @@ int evtchn_bind_virq(evtchn_bind_virq_t *bind, evtchn_port_t port)
     struct domain *d = current->domain;
     int            virq = bind->virq, vcpu = bind->vcpu;
     int            rc = 0;
+    enum virq_type type;
 
     if ( (virq < 0) || (virq >= ARRAY_SIZE(v->virq_to_evtchn)) )
         return -EINVAL;
@@ -478,14 +489,21 @@ int evtchn_bind_virq(evtchn_bind_virq_t *bind, evtchn_port_t port)
     * speculative execution.
     */
     virq = array_index_nospec(virq, ARRAY_SIZE(v->virq_to_evtchn));
+    type = get_virq_type(virq);
 
-    if ( virq_is_global(virq) && (vcpu != 0) )
+    if ( type != VIRQ_VCPU && vcpu != 0 )
         return -EINVAL;
 
     if ( (v = domain_vcpu(d, vcpu)) == NULL )
         return -ENOENT;
 
     write_lock(&d->event_lock);
+
+    if ( type == VIRQ_GLOBAL && get_global_virq_handler(virq) != d )
+    {
+        rc = -EBUSY;
+        goto out;
+    }
 
     if ( read_atomic(&v->virq_to_evtchn[virq]) )
     {
@@ -494,10 +512,19 @@ int evtchn_bind_virq(evtchn_bind_virq_t *bind, evtchn_port_t port)
         goto out;
     }
 
+    if ( virq == VIRQ_DOM_EXC )
+    {
+        rc = domain_init_states();
+        if ( rc )
+            goto out;
+    }
+
     port = rc = evtchn_get_port(d, port);
     if ( rc < 0 )
     {
         gdprintk(XENLOG_WARNING, "EVTCHNOP failure: error %d\n", rc);
+        if ( virq == VIRQ_DOM_EXC )
+            domain_deinit_states(d);
         goto out;
     }
 
@@ -715,11 +742,14 @@ int evtchn_close(struct domain *d1, int port1, bool guest)
             if ( !is_hvm_domain(d1) ||
                  domain_pirq_to_irq(d1, pirq->pirq) <= 0 ||
                  unmap_domain_pirq_emuirq(d1, pirq->pirq) < 0 )
+            {
                 /*
                  * The successful path of unmap_domain_pirq_emuirq() will have
                  * called pirq_cleanup_check() already.
                  */
-                pirq_cleanup_check(pirq, d1);
+                if ( !pirq->evtchn )
+                    pirq_cleanup_check(pirq, d1);
+            }
         }
         unlink_pirq_port(chn1, d1->vcpu[chn1->notify_vcpu_id]);
         break;
@@ -730,7 +760,11 @@ int evtchn_close(struct domain *d1, int port1, bool guest)
         struct vcpu *v;
         unsigned long flags;
 
-        v = d1->vcpu[virq_is_global(chn1->u.virq) ? 0 : chn1->notify_vcpu_id];
+        if ( chn1->u.virq == VIRQ_DOM_EXC )
+            domain_deinit_states(d1);
+
+        v = d1->vcpu[get_virq_type(chn1->u.virq) != VIRQ_VCPU
+            ? 0 : chn1->notify_vcpu_id];
 
         write_lock_irqsave(&v->virq_lock, flags);
         ASSERT(read_atomic(&v->virq_to_evtchn[chn1->u.virq]) == port1);
@@ -874,7 +908,7 @@ bool evtchn_virq_enabled(const struct vcpu *v, unsigned int virq)
     if ( !v )
         return false;
 
-    if ( virq_is_global(virq) && v->vcpu_id )
+    if ( get_virq_type(virq) != VIRQ_VCPU && v->vcpu_id )
         v = domain_vcpu(v->domain, 0);
 
     return read_atomic(&v->virq_to_evtchn[virq]);
@@ -887,7 +921,7 @@ void send_guest_vcpu_virq(struct vcpu *v, uint32_t virq)
     struct domain *d;
     struct evtchn *chn;
 
-    ASSERT(!virq_is_global(virq));
+    ASSERT(get_virq_type(virq) == VIRQ_VCPU);
 
     read_lock_irqsave(&v->virq_lock, flags);
 
@@ -907,14 +941,14 @@ void send_guest_vcpu_virq(struct vcpu *v, uint32_t virq)
     read_unlock_irqrestore(&v->virq_lock, flags);
 }
 
-void send_guest_global_virq(struct domain *d, uint32_t virq)
+void send_guest_domain_virq(struct domain *d, uint32_t virq)
 {
     unsigned long flags;
     int port;
     struct vcpu *v;
     struct evtchn *chn;
 
-    ASSERT(virq_is_global(virq));
+    ASSERT(get_virq_type(virq) != VIRQ_VCPU);
 
     if ( unlikely(d == NULL) || unlikely(d->vcpu == NULL) )
         return;
@@ -940,6 +974,7 @@ void send_guest_global_virq(struct domain *d, uint32_t virq)
     read_unlock_irqrestore(&v->virq_lock, flags);
 }
 
+#ifdef CONFIG_HAS_PIRQ
 void send_guest_pirq(struct domain *d, const struct pirq *pirq)
 {
     int port;
@@ -964,26 +999,26 @@ void send_guest_pirq(struct domain *d, const struct pirq *pirq)
         evtchn_read_unlock(chn);
     }
 }
-
-static struct domain *global_virq_handlers[NR_VIRQS] __read_mostly;
+#endif /* CONFIG_HAS_PIRQ */
 
 static DEFINE_SPINLOCK(global_virq_handlers_lock);
 
 void send_global_virq(uint32_t virq)
 {
-    ASSERT(virq_is_global(virq));
+    ASSERT(get_virq_type(virq) == VIRQ_GLOBAL);
 
-    send_guest_global_virq(global_virq_handlers[virq] ?: hardware_domain, virq);
+    send_guest_domain_virq(get_global_virq_handler(virq), virq);
 }
 
 int set_global_virq_handler(struct domain *d, uint32_t virq)
 {
-    struct domain *old;
+    struct domain *old, *hdl;
+    const struct vcpu *v;
     int rc = 0;
 
     if (virq >= NR_VIRQS)
         return -EINVAL;
-    if (!virq_is_global(virq))
+    if (get_virq_type(virq) != VIRQ_GLOBAL)
         return -EINVAL;
 
     if (global_virq_handlers[virq] == d)
@@ -1010,7 +1045,24 @@ int set_global_virq_handler(struct domain *d, uint32_t virq)
     else
     {
         old = global_virq_handlers[virq];
-        global_virq_handlers[virq] = d;
+        hdl = get_global_virq_handler(virq);
+        if ( !hdl )
+            global_virq_handlers[virq] = d;
+        else if ( hdl != d )
+        {
+            read_lock(&hdl->event_lock);
+
+            v = hdl->vcpu[0];
+            if ( v && read_atomic(&v->virq_to_evtchn[virq]) )
+            {
+                rc = -EBUSY;
+                old = d;
+            }
+            else
+                global_virq_handlers[virq] = d;
+
+            read_unlock(&hdl->event_lock);
+        }
     }
 
     spin_unlock(&global_virq_handlers_lock);
@@ -1044,6 +1096,29 @@ static void clear_global_virq_handlers(struct domain *d)
         put_domain(d);
         put_count--;
     }
+}
+
+struct domain *lock_dom_exc_handler(void)
+{
+    struct domain *d;
+
+    d = get_global_virq_handler(VIRQ_DOM_EXC);
+    if ( unlikely(!d) || unlikely(!get_domain(d)) )
+        return NULL;
+
+    read_lock(&d->event_lock);
+
+    return d;
+}
+
+void unlock_dom_exc_handler(struct domain *d)
+{
+    if ( likely(!d) )
+        return;
+
+    read_unlock(&d->event_lock);
+
+    put_domain(d);
 }
 
 int evtchn_status(evtchn_status_t *status)
@@ -1139,7 +1214,7 @@ int evtchn_bind_vcpu(evtchn_port_t port, unsigned int vcpu_id)
     switch ( chn->state )
     {
     case ECS_VIRQ:
-        if ( virq_is_global(chn->u.virq) )
+        if ( get_virq_type(chn->u.virq) != VIRQ_VCPU )
             chn->notify_vcpu_id = v->vcpu_id;
         else
             rc = -EINVAL;
@@ -1637,7 +1712,7 @@ void evtchn_destroy_final(struct domain *d)
 #endif
 }
 
-
+#ifdef CONFIG_HAS_PIRQ
 void evtchn_move_pirqs(struct vcpu *v)
 {
     struct domain *d = v->domain;
@@ -1653,7 +1728,7 @@ void evtchn_move_pirqs(struct vcpu *v)
     }
     read_unlock(&d->event_lock);
 }
-
+#endif /* CONFIG_HAS_PIRQ */
 
 static void domain_dump_evtchn_info(struct domain *d)
 {

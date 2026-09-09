@@ -23,7 +23,7 @@ extern unsigned int nr_irqs;
 #define LEGACY_VECTOR(irq)          ((irq) + FIRST_LEGACY_VECTOR)
 
 typedef struct {
-    DECLARE_BITMAP(_bits, X86_NR_VECTORS);
+    DECLARE_BITMAP(_bits, X86_IDT_VECTORS);
 } vmask_t;
 
 struct irq_desc;
@@ -96,7 +96,7 @@ struct arch_irq_desc {
 
 #define IRQ_VECTOR_UNASSIGNED (-1)
 
-typedef int vector_irq_t[X86_NR_VECTORS];
+typedef int vector_irq_t[X86_IDT_VECTORS];
 DECLARE_PER_CPU(vector_irq_t, vector_irq);
 
 extern bool opt_noirqbalance;
@@ -108,7 +108,7 @@ extern bool opt_noirqbalance;
 
 extern int opt_irq_vector_map;
 
-#define platform_legacy_irq(irq)	((irq) < 16)
+#define platform_legacy_irq(irq)	((irq) < NR_ISA_IRQS)
 
 void cf_check event_check_interrupt(void);
 void cf_check invalidate_interrupt(void);
@@ -225,7 +225,7 @@ void cleanup_domain_irq_mapping(struct domain *d);
 
 bool cpu_has_pending_apic_eoi(void);
 
-static inline void arch_move_irqs(struct vcpu *v) { }
+#define arch_move_irqs(v) evtchn_move_pirqs(v)
 
 struct msi_info;
 int allocate_and_map_gsi_pirq(struct domain *d, int index, int *pirq_p);

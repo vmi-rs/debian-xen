@@ -947,6 +947,7 @@ static void reduce_status_for_pin(struct domain *rd,
         gnttab_clear_flags(rd, clear_flags, status);
 }
 
+#ifdef CONFIG_HAS_GRANT_CACHE_FLUSH
 static struct active_grant_entry *grant_map_exists(const struct domain *ld,
                                                    struct grant_table *rgt,
                                                    mfn_t mfn,
@@ -982,6 +983,7 @@ static struct active_grant_entry *grant_map_exists(const struct domain *ld,
 
     return ERR_PTR(-EINVAL);
 }
+#endif /* CONFIG_HAS_GRANT_CACHE_FLUSH */
 
 union maptrack_node {
     struct {
@@ -1863,8 +1865,7 @@ gnttab_unpopulate_status_frames(struct domain *d, struct grant_table *gt)
         {
             int rc = gfn_eq(gfn, INVALID_GFN)
                      ? 0
-                     : gnttab_set_frame_gfn(gt, true, i, INVALID_GFN,
-                                            page_to_mfn(pg));
+                     : guest_physmap_remove_page(d, gfn, page_to_mfn(pg), 0);
 
             if ( rc )
             {
@@ -3589,6 +3590,7 @@ gnttab_swap_grant_ref(XEN_GUEST_HANDLE_PARAM(gnttab_swap_grant_ref_t) uop,
     return 0;
 }
 
+#ifdef CONFIG_HAS_GRANT_CACHE_FLUSH
 static int _cache_flush(const gnttab_cache_flush_t *cflush, grant_ref_t *cur_ref)
 {
     struct domain *d, *owner;
@@ -3700,6 +3702,7 @@ gnttab_cache_flush(XEN_GUEST_HANDLE_PARAM(gnttab_cache_flush_t) uop,
 
     return 0;
 }
+#endif /* CONFIG_HAS_GRANT_CACHE_FLUSH */
 
 long do_grant_table_op(
     unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) uop, unsigned int count)
@@ -3842,6 +3845,7 @@ long do_grant_table_op(
         break;
     }
 
+#ifdef CONFIG_HAS_GRANT_CACHE_FLUSH
     case GNTTABOP_cache_flush:
     {
         XEN_GUEST_HANDLE_PARAM(gnttab_cache_flush_t) cflush =
@@ -3858,6 +3862,7 @@ long do_grant_table_op(
         }
         break;
     }
+#endif /* CONFIG_HAS_GRANT_CACHE_FLUSH */
 
     default:
         rc = -ENOSYS;
@@ -4025,6 +4030,7 @@ int gnttab_release_mappings(struct domain *d)
     return 0;
 }
 
+#ifdef CONFIG_HAS_SOFT_RESET
 void grant_table_warn_active_grants(struct domain *d)
 {
     struct grant_table *gt = d->grant_table;
@@ -4069,6 +4075,7 @@ void grant_table_warn_active_grants(struct domain *d)
 
 #undef WARN_GRANT_MAX
 }
+#endif /* CONFIG_HAS_SOFT_RESET */
 
 void
 grant_table_destroy(
@@ -4316,7 +4323,6 @@ int gnttab_map_frame_begin(
 {
     int rc = 0;
     struct grant_table *gt = d->grant_table;
-    bool status = false;
 
     if ( gfn_eq(gfn, INVALID_GFN) )
     {
@@ -4329,8 +4335,6 @@ int gnttab_map_frame_begin(
     if ( evaluate_nospec(gt->gt_version == 2) && (idx & XENMAPIDX_grant_table_status) )
     {
         idx &= ~XENMAPIDX_grant_table_status;
-        status = true;
-
         rc = gnttab_get_status_frame_mfn(d, idx, mfn);
     }
     else
@@ -4346,8 +4350,6 @@ int gnttab_map_frame_begin(
          */
         if ( !get_page(pg, d) )
             rc = -EBUSY;
-        else if ( (rc = gnttab_set_frame_gfn(gt, status, idx, gfn, *mfn)) )
-            put_page(pg);
     }
 
     if ( rc )
@@ -4423,6 +4425,20 @@ static void gnttab_usage_print(struct domain *rd)
     if ( first )
         printk("no active grant table entries\n");
 }
+
+#ifdef CONFIG_DOM0LESS_BOOT
+void __init gnttab_seed_entry(const struct domain *d, unsigned int idx,
+                              domid_t be_domid, uint32_t frame)
+{
+    const struct grant_table *gt = d->grant_table;
+
+    ASSERT(!d->creation_finished);
+    ASSERT(gt->gt_version == 1);
+    shared_entry_v1(gt, idx).flags = GTF_permit_access;
+    shared_entry_v1(gt, idx).domid = be_domid;
+    shared_entry_v1(gt, idx).frame = frame;
+}
+#endif
 
 static void cf_check gnttab_usage_print_all(unsigned char key)
 {

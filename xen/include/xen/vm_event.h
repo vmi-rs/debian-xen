@@ -50,11 +50,15 @@ struct vm_event_domain
     unsigned int last_vcpu_wake_up;
 };
 
-/* Clean up on domain destruction */
-void vm_event_cleanup(struct domain *d);
-
 /* Returns whether a ring has been set up */
+#ifdef CONFIG_VM_EVENT
 bool vm_event_check_ring(struct vm_event_domain *ved);
+#else
+static inline bool vm_event_check_ring(struct vm_event_domain *ved)
+{
+    return false;
+}
+#endif /* CONFIG_VM_EVENT */
 
 /* Returns 0 on success, -ENOSYS if there is no ring, -EBUSY if there is no
  * available space and the caller is a foreign domain. If the guest itself
@@ -88,7 +92,18 @@ void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *ved);
 void vm_event_put_request(struct domain *d, struct vm_event_domain *ved,
                           vm_event_request_t *req);
 
+#ifdef CONFIG_VM_EVENT
+/* Clean up on domain destruction */
+void vm_event_cleanup(struct domain *d);
 int vm_event_domctl(struct domain *d, struct xen_domctl_vm_event_op *vec);
+#else /* !CONFIG_VM_EVENT */
+static inline void vm_event_cleanup(struct domain *d) {}
+static inline int vm_event_domctl(struct domain *d,
+                                  struct xen_domctl_vm_event_op *vec)
+{
+    return -EOPNOTSUPP;
+}
+#endif /* !CONFIG_VM_EVENT */
 
 void vm_event_vcpu_pause(struct vcpu *v);
 void vm_event_vcpu_unpause(struct vcpu *v);

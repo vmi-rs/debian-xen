@@ -42,7 +42,7 @@ should be mentioned.
 
 When referencing other patches (e.g. `similar to patch xy ...`) those
 patches should be referenced via their commit id (at least 12 digits)
-and the patch subject, if the very same patch isn't referenced by the
+and the patch subject, if the very same patch isn't referenced by e.g. a
 `Fixes:` tag, too:
 
     Similar to commit 67d01cdb5518 ("x86: infrastructure to allow converting
@@ -105,6 +105,24 @@ E.g.:
 If git was configured as explained earlier, this can be retrieved using
 ``git log --pretty=fixes`` otherwise ``git log --abbrev=12 --oneline`` will
 give the proper tag and commit-id.
+
+### Amends:
+
+If your patch doesn't quite fix a bug, but still amends a specific commit,
+e.g. because an omission was found, please consider using an `Amends:` tag.
+See the `Fixes:` tag description above for how to use it.
+
+### Resolves:
+
+If your patch addresses an issue logged in a GitLab ticket, use the `Resolves:`
+tag followed by the issue link to automatically close the ticket when the patch
+is merged.
+
+    Resolves: <URL>
+
+E.g.:
+
+    Resolves: https://gitlab.com/xen-project/xen/-/issues/199
 
 ### Backport:
 
@@ -177,6 +195,28 @@ E.g.:
 
     Requested-by: Jane Doe <jane.doe@example.org>
 
+### Assisted-by:
+
+When AI tools contribute to Xen development, proper attribution
+helps track the evolving role of AI in the development process.
+Contributions should include an `Assisted-by:` tag in the
+following format:
+
+    Assisted-by: AGENT_NAME:MODEL_VERSION [, ...]
+
+Where:
+
+* `AGENT_NAME` is the name of the AI tool or framework
+* `MODEL_VERSION` is the specific model version used
+
+Basic development tools (git, gcc, make, editors) should not be listed.
+Specialised but deterministic tools may optionally be listed, but their use
+should be clear from other context in the commit message.
+
+Example:
+
+    Assisted-by: Claude:claude-3-opus
+
 ### Signed-off-by:
 
 This mandatory tag specifies the author(s) of a patch (for each author a
@@ -190,6 +230,15 @@ E.g.:
 
 The author must be a natural person (not a team or just a company) and the
 `Signed-off-by:` tag must include the real name of the author (no pseudonym).
+
+AI agents MUST NOT add `Signed-off-by:` tags. Only humans can legally
+certify the Developer Certificate of Origin (DCO). The human submitter
+is responsible for:
+
+* Reviewing all AI-generated code
+* Ensuring compliance with licensing requirements
+* Adding their own `Signed-off-by:` tag to certify the DCO
+* Taking full responsibility for the contribution
 
 By signing the patch with her/his name the author explicitly confirms to have
 made the contribution conforming to the `Developer's Certificate of Origin`:

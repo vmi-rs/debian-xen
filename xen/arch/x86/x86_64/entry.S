@@ -39,10 +39,9 @@ FUNC_LOCAL(switch_to_kernel)
         leal  (,%rcx,TBF_INTERRUPT),%ecx
 
         /*
-         * The PV ABI hardcodes the (guest-inaccessible and virtual)
-         * SYSCALL_MASK MSR such that DF (and nothing else) would be cleared.
-         * Note that the equivalent of IF (VGCF_syscall_disables_events) is
-         * dealt with separately above.
+         * The PV ABI, given no virtual SYSCALL_MASK, hardcodes that DF is
+         * cleared.  Other flags are handled in the same way as interrupts and
+         * exceptions in create_bounce_frame().
          */
         mov   $~X86_EFLAGS_DF, %esi
 
@@ -64,7 +63,7 @@ UNLIKELY_END(syscall_no_callback)
         /* Conditionally clear DF */
         and   %esi, UREGS_eflags(%rsp)
 /* %rbx: struct vcpu */
-test_all_events:
+LABEL(test_all_events, 0)
         ASSERT_NOT_IN_ATOMIC
         cli                             # tests must not race interrupts
 /*test_softirqs:*/
@@ -147,11 +146,42 @@ process_trap:
         jmp  test_all_events
 END(switch_to_kernel)
 
+/*
+ * When returning to guest from an NMI, we must execute an IRET/ERETU to
+ * re-enable NMIs, and must not process softirqs which can e.g. schedule
+ * rather than returning to guest context.
+ *
+ * If a softirq is pending, send ourselves an EVENT_CHECK IPI to compensate.
+ * This will cause softirq processing to occur upon leaving NMI context.
+ *
+ * %rbx: struct vcpu, %r14 stack_end
+ */
+FUNC(nmi_exit_to_guest)
+        mov     STACK_CPUINFO_FIELD(processor_id)(%r14), %eax
+        shl     $IRQSTAT_shift, %eax
+        lea     irq_stat + IRQSTAT_softirq_pending(%rip), %rcx
+        cmpl    $0, (%rcx, %rax, 1)
+        je      1f
+        mov     $EVENT_CHECK_VECTOR, %edi
+        call    send_IPI_self
+1:
+        /* For restore_all_guest. */
+        mov     STACK_CPUINFO_FIELD(current_vcpu)(%r14), %rbx
+#ifdef CONFIG_PV32
+        mov     VCPU_domain(%rbx), %rax
+        cmpb    $0, DOMAIN_is_32bit_pv(%rax)
+        jne     compat_restore_all_guest
+#endif
+        jmp     restore_all_guest
+END(nmi_exit_to_guest)
+
         .section .text.entry, "ax", @progbits
 
 /* %rbx: struct vcpu, interrupts disabled */
 FUNC_LOCAL(restore_all_guest)
         ASSERT_INTERRUPTS_DISABLED
+
+        ALTERNATIVE "", "jmp eretu_exit_to_guest", X86_FEATURE_XEN_FRED
 
         /* Stash guest SPEC_CTRL value while we can read struct vcpu. */
         mov VCPU_arch_msrs(%rbx), %rdx
@@ -241,8 +271,9 @@ iret_exit_to_guest:
         SPEC_CTRL_COND_VERW     /* Req: %rsp=eframe                    Clob: efl */
 
         addq  $8,%rsp
-.Lft0:  iretq
-        _ASM_PRE_EXTABLE(.Lft0, handle_exception)
+
+LABEL(iret_to_guest, 0)
+        iretq
 END(restore_all_guest)
 
 /*
@@ -664,7 +695,9 @@ FUNC(continue_pv_domain)
         ALTERNATIVE "", "mov $2, %eax; incsspd %eax", X86_FEATURE_XEN_SHSTK
 #endif
 
+#ifdef CONFIG_VM_EVENT
         call  check_wakeup_from_wait
+#endif
 ret_from_intr:
         GET_CURRENT(bx)
         testb $3, UREGS_cs(%rsp)
@@ -871,7 +904,7 @@ handle_exception_saved:
          * reading %cr2. Otherwise a page fault in the nested interrupt handler
          * would corrupt %cr2.
          */
-        DISPATCH(X86_EXC_PF, do_page_fault)
+        DISPATCH(X86_EXC_PF, handle_PF_IDT)
 
         /* Only re-enable IRQs if they were active before taking the fault */
         testb $X86_EFLAGS_IF >> 8, UREGS_eflags + 1(%rsp)
@@ -920,10 +953,23 @@ handle_exception_saved:
 exception_with_ints_disabled:
         testb $3,UREGS_cs(%rsp)         # interrupts disabled outside Xen?
         jnz   FATAL_exception_with_ints_disabled
-        movq  %rsp,%rdi
-        call  search_pre_exception_table
-        testq %rax,%rax                 # no fixup code for faulting EIP?
-        jz    .Ldispatch_exceptions
+
+#ifndef CONFIG_PV
+        /* No PV?  No IRETs-to-guest to worry about. */
+        jmp .Ldispatch_exceptions
+#else
+        /* Check to see if the exception was on the IRET to guest context. */
+        lea   iret_to_guest(%rip), %rax
+        cmp   %rax, UREGS_rip(%rsp)
+        jne   .Ldispatch_exceptions
+
+        /*
+         * Recovery is at handle_exception.  It may be necessary to make space
+         * on the interrupted stack for ec/ev, after which the current ec/ev
+         * is copied to make it appear as if this exception occurred in guest
+         * context.
+         */
+        lea   handle_exception(%rip), %rax
         movq  %rax,UREGS_rip(%rsp)      # fixup regular stack
 
 #ifdef CONFIG_XEN_SHSTK
@@ -940,13 +986,14 @@ exception_with_ints_disabled:
         movq  %rsp,%rsi
         subq  $8,%rsp
         movq  %rsp,%rdi
-        movq  $UREGS_kernel_sizeof/8,%rcx
-        rep;  movsq                     # make room for ec/ev
+        mov   $UREGS_kernel_sizeof/8, %ecx
+        rep movsq                       # make room for ec/ev
 1:      movq  UREGS_error_code(%rsp),%rax # ec/ev
         movq  %rax,UREGS_kernel_sizeof(%rsp)
         mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
         mov   %r13b, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
         jmp   restore_all_xen           # return to fixup code
+#endif /* !CONFIG_PV */
 
 /* No special register assumptions. */
 FATAL_exception_with_ints_disabled:
@@ -1171,7 +1218,7 @@ FUNC(handle_ist_exception)
 .L_ ## vec ## _done:
 
         DISPATCH(X86_EXC_NMI, do_nmi)
-        DISPATCH(X86_EXC_DB,  do_debug)
+        DISPATCH(X86_EXC_DB,  handle_DB_IDT)
         DISPATCH(X86_EXC_MC,  do_machine_check)
 #undef DISPATCH
 
@@ -1191,25 +1238,7 @@ FUNC(handle_ist_exception)
 #ifdef CONFIG_PV
         testb $3,UREGS_cs(%rsp)
         jz    restore_all_xen
-        /* Send an IPI to ourselves to cover for the lack of event checking. */
-        mov   STACK_CPUINFO_FIELD(processor_id)(%r14), %eax
-        shll  $IRQSTAT_shift,%eax
-        leaq  irq_stat+IRQSTAT_softirq_pending(%rip),%rcx
-        cmpl  $0,(%rcx,%rax,1)
-        je    1f
-        movl  $EVENT_CHECK_VECTOR,%edi
-        call  send_IPI_self
-1:
-        /* For restore_all_guest. */
-        mov   STACK_CPUINFO_FIELD(current_vcpu)(%r14), %rbx
-#ifdef CONFIG_PV32
-        movq  VCPU_domain(%rbx),%rax
-        cmpb  $0,DOMAIN_is_32bit_pv(%rax)
-        je    restore_all_guest
-        jmp   compat_restore_all_guest
-#else
-        jmp   restore_all_guest
-#endif
+        jmp   nmi_exit_to_guest
 #else
         ASSERT_CONTEXT_IS_XEN
         jmp   restore_all_xen
@@ -1229,62 +1258,78 @@ FUNC(trap_nop, 0)
         iretq
 END(trap_nop)
 
-/* Table of automatically generated entry points.  One per vector. */
-        .pushsection .init.rodata, "a", @progbits
-DATA(autogen_entrypoints, 8)
-        /* pop into the .init.rodata section and record an entry point. */
-        .macro entrypoint ent
-        .pushsection .init.rodata, "a", @progbits
-        .quad \ent
+/*
+ * Automatically generated entrypoints, and IDT
+ */
+
+        .pushsection .data.page_aligned, "aw", @progbits
+DATA(bsp_idt, PAGE_SIZE)
         .popsection
-        .endm
 
+/*
+ * Write an IDT Entry.  The linker provides us new _ADDR1/2 symbols calculated
+ * from \sym.
+ */
+.macro write_idte sym, dpl
+        .pushsection .data.page_aligned, "aw", @progbits
+        .word IDT_\sym\()_ADDR1
+        .word __HYPERVISOR_CS
+        .word 0x8e00 | (\dpl << 13) /* Present, DPL, Interrupt Gate */
+        .word IDT_\sym\()_ADDR2
+        .long __XEN_VIRT_START >> 32
+        .long 0
         .popsection
-FUNC_LOCAL(autogen_stubs, 0) /* Automatically generated stubs. */
+.endm
 
-        vec = 0
-        .rept X86_NR_VECTORS
+/*
+ * Write an automatically generated stub.  Vectors in the exception range keep
+ * the stack properly aligned by judging whether the CPU pushed an error code
+ * or not.
+ *
+ * Alignment is forced to 16 because that's the size of the interrupt stub
+ * with CET active.
+ */
+.macro gen_entry_stub vec, sym
 
-        /* Common interrupts, heading towards do_IRQ(). */
-#if defined(CONFIG_PV32)
-        .if vec >= FIRST_IRQ_VECTOR && vec != HYPERCALL_VECTOR && vec != LEGACY_SYSCALL_VECTOR
-#elif defined(CONFIG_PV)
-        .if vec >= FIRST_IRQ_VECTOR && vec != LEGACY_SYSCALL_VECTOR
-#else
-        .if vec >= FIRST_IRQ_VECTOR
-#endif
-
-        .align CONFIG_FUNCTION_ALIGNMENT, CODE_FILL
-1:
+FUNC(\sym, 16)
         ENDBR64
-        pushq $0
-        movb  $vec, EFRAME_entry_vector(%rsp)
-        jmp   common_interrupt
 
-        entrypoint 1b
+        .if \vec < 0x20 /* Exception. */
 
-        /* Reserved exceptions, heading towards do_unhandled_trap(). */
-        .elseif vec == X86_EXC_CSO || vec == X86_EXC_SPV || \
-                vec == X86_EXC_VE  || (vec > X86_EXC_CP && vec < X86_EXC_NUM)
+            test  $8, %spl       /* 64bit exception frames are 16 byte aligned, but the word */
+            jz    1f             /* size is 8 bytes.  Check whether the processor gave us an */
+            pushq $0             /* error code, and insert an empty one if not.              */
+1:          movb  $\vec, EFRAME_entry_vector(%rsp)
+            jmp   handle_exception
 
-1:
-        ENDBR64
-        test  $8,%spl        /* 64bit exception frames are 16 byte aligned, but the word */
-        jz    2f             /* size is 8 bytes.  Check whether the processor gave us an */
-        pushq $0             /* error code, and insert an empty one if not.              */
-2:      movb  $vec, EFRAME_entry_vector(%rsp)
-        jmp   handle_exception
+        .else /* Interrupt. */
 
-        entrypoint 1b
+            pushq $0
+            movb  $\vec, EFRAME_entry_vector(%rsp)
+            jmp   common_interrupt
 
-        /* Hand crafted entry points above. */
-        .else
-        entrypoint 0
+        .endif
+END(\sym)
+.endm
+
+/*
+ * Generator.  Write an entrypoint if necessary, and record an IDT entry.
+ */
+.macro gen vec, sym, dpl, auto
+
+        .if \auto
+            gen_entry_stub \vec, \sym
         .endif
 
-        vec = vec + 1
-        .endr
-END(autogen_stubs)
+        write_idte \sym, \dpl
+.endm
+#define GEN(v, s, d, a) gen vec=v, sym=s, dpl=d auto=a
+#include <asm/gen-idt.h>
+#undef GEN
 
-        .section .init.rodata, "a", @progbits
-END(autogen_entrypoints)
+        .pushsection .data.page_aligned, "aw", @progbits
+END(bsp_idt)
+        .if . - bsp_idt != PAGE_SIZE
+            .error "Bad bsp_idt size, should be PAGE_SIZE"
+        .endif
+        .popsection

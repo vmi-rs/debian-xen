@@ -26,6 +26,11 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
     if (libxl_defbool_val(d_config->b_info.arch_x86.msr_relaxed))
         config->arch.misc_flags |= XEN_X86_MSR_RELAXED;
 
+    if (libxl_defbool_val(d_config->b_info.trap_unmapped_accesses)) {
+            LOG(ERROR, "trap_unmapped_accesses is not supported on x86\n");
+            return ERROR_FAIL;
+    }
+
     return 0;
 }
 
@@ -737,12 +742,22 @@ static int domain_construct_memmap(libxl__gc *gc,
         nr++;
     }
 
+    /*
+     * Mark populated reserved memory that contains ACPI tables as ACPI NVS.
+     * That should help the guest to treat it correctly later: e.g. pass to
+     * the next kernel on kexec.
+     *
+     * Furthermore, Xen relies on accessing ACPI tables from within the AML
+     * code exposed to guests. So Xen's ACPI tables are not, in general,
+     * reclaimable.
+     */
+
     for (i = 0; i < MAX_ACPI_MODULES; i++) {
         if (dom->acpi_modules[i].length) {
             e820[nr].addr = dom->acpi_modules[i].guest_addr_out & ~(page_size - 1);
             e820[nr].size = dom->acpi_modules[i].length +
                 (dom->acpi_modules[i].guest_addr_out & (page_size - 1));
-            e820[nr].type = E820_ACPI;
+            e820[nr].type = E820_NVS;
             nr++;
         }
     }
@@ -803,6 +818,7 @@ int libxl__arch_domain_build_info_setdefault(libxl__gc *gc,
 {
     libxl_defbool_setdefault(&b_info->acpi, true);
     libxl_defbool_setdefault(&b_info->arch_x86.msr_relaxed, false);
+    libxl_defbool_setdefault(&b_info->trap_unmapped_accesses, false);
 
     if (b_info->type == LIBXL_DOMAIN_TYPE_HVM) {
         /*

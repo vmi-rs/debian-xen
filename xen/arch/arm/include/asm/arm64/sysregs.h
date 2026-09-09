@@ -462,6 +462,32 @@
 #define ZCR_ELx_LEN_SIZE             9
 #define ZCR_ELx_LEN_MASK             0x1ff
 
+/* Virtualization Secure Translation Control Register */
+#define VSTCR_EL2_SA                 (_AC(0x1,U) << 30)
+#define VSTCR_EL2_SC                 (_AC(0x1,U) << 20)
+
+#ifdef CONFIG_MPU
+/*
+ * The Armv8-R AArch64 architecture always executes code in Secure
+ * state with EL2 as the highest exception level.
+ *
+ * Hypervisor timer registers for Secure EL2.
+ */
+#define CNTHP_CTL_EL2   CNTHPS_CTL_EL2
+#define CNTHP_CVAL_EL2  CNTHPS_CVAL_EL2
+#endif
+
+#define REGION_TEXT_PRBAR       0x38    /* SH=11 AP=10 XN=00 */
+#define REGION_RO_PRBAR         0x3A    /* SH=11 AP=10 XN=10 */
+#define REGION_DATA_PRBAR       0x32    /* SH=11 AP=00 XN=10 */
+#define REGION_DEVICE_PRBAR     0x22    /* SH=10 AP=00 XN=10 */
+
+#ifdef __ASSEMBLER__
+
+#define WRITE_SYSREG_ASM(v, name) "msr " __stringify(name,) #v
+
+#else /* __ASSEMBLER__ */
+
 /* Access to system registers */
 
 #define WRITE_SYSREG64(v, name) do {                    \
@@ -480,6 +506,8 @@
 #define ICH_LR_REG(index)          ICH_LR ## index ## _EL2
 #define WRITE_SYSREG_LR(v, index)  WRITE_SYSREG(v, ICH_LR_REG(index))
 #define READ_SYSREG_LR(index)      READ_SYSREG(ICH_LR_REG(index))
+
+#endif /* !__ASSEMBLER__ */
 
 #endif /* _ASM_ARM_ARM64_SYSREGS_H */
 

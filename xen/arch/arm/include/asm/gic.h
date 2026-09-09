@@ -179,7 +179,7 @@
 #define GICH_LR_PENDING         1
 #define GICH_LR_ACTIVE          2
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <xen/device_tree.h>
 #include <xen/irq.h>
 
@@ -327,6 +327,30 @@ extern void gic_dump_vgic_info(struct vcpu *v);
 
 /* Number of interrupt lines */
 extern unsigned int gic_number_lines(void);
+#ifdef CONFIG_GICV3_ESPI
+extern unsigned int gic_number_espis(void);
+
+static inline bool gic_is_valid_espi(unsigned int irq)
+{
+    return irq >= ESPI_BASE_INTID &&
+           irq < espi_idx_to_intid(gic_number_espis());
+}
+#else
+static inline bool gic_is_valid_espi(unsigned int irq)
+{
+    return false;
+}
+#endif
+
+static inline bool gic_is_valid_line(unsigned int irq)
+{
+    return irq < gic_number_lines() || gic_is_valid_espi(irq);
+}
+
+static inline bool gic_is_spi(unsigned int irq)
+{
+    return irq >= NR_LOCAL_IRQS && gic_is_valid_line(irq);
+}
 
 /* IRQ translation function for the device tree */
 int gic_irq_xlate(const u32 *intspec, unsigned int intsize,
@@ -337,6 +361,10 @@ struct gic_info {
     enum gic_version hw_version;
     /* Number of GIC lines supported */
     unsigned int nr_lines;
+#ifdef CONFIG_GICV3_ESPI
+    /* Number of GIC eSPI supported */
+    unsigned int nr_espi;
+#endif
     /* Number of LR registers */
     uint8_t nr_lrs;
     /* Maintenance irq number */
@@ -472,7 +500,7 @@ unsigned long gic_get_hwdom_madt_size(const struct domain *d);
 int gic_map_hwdom_extra_mappings(struct domain *d);
 int gic_iomem_deny_access(struct domain *d);
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif
 
 /*

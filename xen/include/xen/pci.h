@@ -79,6 +79,11 @@ static inline bool is_pci_passthrough_enabled(void)
     return false;
 }
 
+static inline bool arch_pci_device_physdevop(void)
+{
+    return false;
+}
+
 #endif
 
 struct pci_dev_info {
@@ -120,6 +125,9 @@ struct pci_dev {
     uint8_t phantom_stride;
 
     nodeid_t node; /* NUMA node */
+
+    /* Whether the device has (accessible) extended config space. */
+    bool ext_cfg;
 
     /* Device to be quarantined, don't automatically re-assign to dom0 */
     bool quarantine;
@@ -219,7 +227,6 @@ void setup_hwdom_pci_devices(struct domain *d,
                              int (*handler)(uint8_t devfn,
                                             struct pci_dev *pdev));
 int pci_release_devices(struct domain *d);
-void pci_segments_init(void);
 int pci_add_segment(u16 seg);
 const unsigned long *pci_get_ro_map(u16 seg);
 int pci_add_device(u16 seg, u8 bus, u8 devfn,
@@ -236,6 +243,11 @@ void pci_check_disable_device(u16 seg, u8 bus, u8 devfn);
  * Can be called with interrupts disabled.
  */
 int pci_iterate_devices(int (*handler)(struct pci_dev *pdev, void *arg),
+                        void *arg);
+
+/* Iterate a single PCI segment, with locking but without preemption. */
+int pci_segment_iterate(unsigned int segment,
+                        int (*handler)(struct pci_dev *pdev, void *arg),
                         void *arg);
 
 uint8_t pci_conf_read8(pci_sbdf_t sbdf, unsigned int reg);
@@ -256,8 +268,11 @@ unsigned int pci_find_next_cap_ttl(pci_sbdf_t sbdf, unsigned int pos,
                                    unsigned int *ttl);
 unsigned int pci_find_next_cap(pci_sbdf_t sbdf, unsigned int pos,
                                unsigned int cap);
-unsigned int pci_find_ext_capability(pci_sbdf_t sbdf, unsigned int cap);
-unsigned int pci_find_next_ext_capability(pci_sbdf_t sbdf, unsigned int start,
+void pci_check_extcfg(struct pci_dev *pdev);
+unsigned int pci_find_ext_capability(const struct pci_dev *pdev,
+                                     unsigned int cap);
+unsigned int pci_find_next_ext_capability(const struct pci_dev *pdev,
+                                          unsigned int start,
                                           unsigned int cap);
 const char *parse_pci(const char *s, unsigned int *seg_p, unsigned int *bus_p,
                       unsigned int *dev_p, unsigned int *func_p);

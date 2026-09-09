@@ -79,6 +79,8 @@ const char *const fetch_type_names[] = {
 # define for_each_shadow_table(v, i) for ( (i) = 0; (i) < 1; ++(i) )
 #endif
 
+static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush);
+
 /* Helper to perform a local TLB flush. */
 static void sh_flush_local(const struct domain *d)
 {
@@ -395,51 +397,44 @@ static inline mfn_t cf_check sh_next_page(mfn_t smfn)
     shadow_set_l2e(d, sl2e, new_sl2e, sl2mfn, SH_type_fl1_shadow, sh_next_page)
 
 static inline u32
-guest_index(void *ptr)
+guest_index(const void *ptr)
 {
     return (u32)((unsigned long)ptr & ~PAGE_MASK) / sizeof(guest_l1e_t);
 }
 
-static u32 cf_check shadow_l1_index(mfn_t *smfn, u32 guest_index)
+static uint32_t cf_check shadow_l1_index(mfn_t *smfn, uint32_t gidx)
 {
 #if (GUEST_PAGING_LEVELS == 2)
     ASSERT(mfn_to_page(*smfn)->u.sh.head);
-    if ( guest_index >= SHADOW_L1_PAGETABLE_ENTRIES )
+    if ( gidx >= SHADOW_L1_PAGETABLE_ENTRIES )
         *smfn = sh_next_page(*smfn);
-    return (guest_index % SHADOW_L1_PAGETABLE_ENTRIES);
+    return (gidx % SHADOW_L1_PAGETABLE_ENTRIES);
 #else
-    return guest_index;
+    return gidx;
 #endif
 }
 
-static u32 cf_check shadow_l2_index(mfn_t *smfn, u32 guest_index)
-{
 #if (GUEST_PAGING_LEVELS == 2)
+static uint32_t cf_check shadow_l2_index(mfn_t *smfn, uint32_t gidx)
+{
     int i;
     ASSERT(mfn_to_page(*smfn)->u.sh.head);
     // Because we use 2 shadow l2 entries for each guest entry, the number of
     // guest entries per shadow page is SHADOW_L2_PAGETABLE_ENTRIES/2
-    for ( i = 0; i < guest_index / (SHADOW_L2_PAGETABLE_ENTRIES / 2); i++ )
+    for ( i = 0; i < gidx / (SHADOW_L2_PAGETABLE_ENTRIES / 2); i++ )
         *smfn = sh_next_page(*smfn);
     // We multiply by two to get the index of the first of the two entries
     // used to shadow the specified guest entry.
-    return (guest_index % (SHADOW_L2_PAGETABLE_ENTRIES / 2)) * 2;
-#else
-    return guest_index;
-#endif
+    return (gidx % (SHADOW_L2_PAGETABLE_ENTRIES / 2)) * 2;
 }
+#else
+#define shadow_l2_index shadow_l1_index
+#endif
 
 #if GUEST_PAGING_LEVELS >= 4
 
-static u32 cf_check shadow_l3_index(mfn_t *smfn, u32 guest_index)
-{
-    return guest_index;
-}
-
-static u32 cf_check shadow_l4_index(mfn_t *smfn, u32 guest_index)
-{
-    return guest_index;
-}
+#define shadow_l3_index shadow_l1_index
+#define shadow_l4_index shadow_l1_index
 
 #endif // GUEST_PAGING_LEVELS >= 4
 
@@ -471,9 +466,7 @@ _sh_propagate(struct vcpu *v,
     /* We don't shadow PAE l3s */
     ASSERT(GUEST_PAGING_LEVELS > 3 || level != 3);
 
-    /* Check there's something for the shadows to map to */
-    if ( (!p2m_is_valid(p2mt) && !p2m_is_grant(p2mt))
-         || !gfn_valid(d, target_gfn) )
+    if ( !gfn_valid(d, target_gfn) )
     {
         *sp = shadow_l1e_empty();
         goto done;
@@ -503,6 +496,13 @@ _sh_propagate(struct vcpu *v,
         goto done;
     }
 
+    /* Check there's something for the shadows to map to */
+    if ( !p2m_is_any_ram(p2mt) && p2mt != p2m_mmio_direct )
+    {
+        *sp = shadow_l1e_empty();
+        goto done;
+    }
+
     // Must have a valid target_mfn unless this is a prefetch or an l1
     // pointing at MMIO space.  In the case of a prefetch, an invalid
     // mfn means that we can not usefully shadow anything, and so we
@@ -512,7 +512,7 @@ _sh_propagate(struct vcpu *v,
                || (level == 1
                    && page_get_owner(mfn_to_page(target_mfn)) == dom_io);
     if ( mmio_mfn
-         && !(level == 1 && (!shadow_mode_refcounts(d)
+         && !(level == 1 && (!paging_mode_refcounts(d)
                              || p2mt == p2m_mmio_direct)) )
     {
         ASSERT((ft == ft_prefetch));
@@ -529,7 +529,7 @@ _sh_propagate(struct vcpu *v,
                        _PAGE_RW | _PAGE_PRESENT);
     if ( guest_nx_enabled(v) )
         pass_thru_flags |= _PAGE_NX_BIT;
-    if ( level == 1 && !shadow_mode_refcounts(d) && mmio_mfn )
+    if ( level == 1 && !paging_mode_refcounts(d) && mmio_mfn )
         pass_thru_flags |= PAGE_CACHE_ATTRS;
     sflags = gflags & pass_thru_flags;
 
@@ -554,7 +554,7 @@ _sh_propagate(struct vcpu *v,
         if ( !mmio_mfn &&
              (type = hvm_get_mem_pinned_cacheattr(d, target_gfn, 0)) >= 0 )
             sflags |= pat_type_2_pte_flags(type);
-        else if ( d->arch.hvm.is_in_uc_mode )
+        else if ( hvm_is_in_uc_mode(d) )
             sflags |= pat_type_2_pte_flags(X86_MT_UC);
         else
             if ( iomem_access_permitted(d, mfn_x(target_mfn), mfn_x(target_mfn)) )
@@ -603,7 +603,7 @@ _sh_propagate(struct vcpu *v,
 #ifdef CONFIG_HVM
     if ( unlikely(level == 1) && is_hvm_domain(d) )
     {
-        struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram;
+        struct sh_dirty_vram *dirty_vram = d->arch.hvm.dirty_vram.sh;
 
         if ( dirty_vram && dirty_vram->last_dirty == -1 &&
              gfn_x(target_gfn) >= dirty_vram->begin_pfn &&
@@ -627,35 +627,36 @@ _sh_propagate(struct vcpu *v,
         sflags |= _PAGE_UC;
     }
 
-    // protect guest page tables
-    //
-    if ( unlikely((level == 1)
-                  && sh_mfn_is_a_page_table(target_mfn)
-#if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC )
-                  /* Unless the page is out of sync and the guest is
-                     writing to it. */
-                  && !(mfn_oos_may_write(target_mfn)
-                       && (ft == ft_demand_write))
-#endif /* OOS */
-                  ) )
-        sflags &= ~_PAGE_RW;
-
-    /*
-     * shadow_mode_log_dirty support
-     *
-     * Only allow the guest write access to a page a) on a demand fault,
-     * or b) if the page is already marked as dirty.
-     *
-     * (We handle log-dirty entirely inside the shadow code, without using the
-     * p2m_ram_logdirty p2m type: only HAP uses that.)
-     */
-    if ( level == 1 && unlikely(shadow_mode_log_dirty(d)) && !mmio_mfn )
+    if ( level == 1 )
     {
-        if ( ft & FETCH_TYPE_WRITE )
-            paging_mark_dirty(d, target_mfn);
-        else if ( (sflags & _PAGE_RW) &&
-                  !paging_mfn_is_dirty(d, target_mfn) )
+        /* Protect guest page tables. */
+        if ( unlikely(sh_mfn_is_a_page_table(target_mfn))
+#if SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC
+             /*
+              * Unless the page is out of sync and the guest is writing to it.
+              */
+             && (ft != ft_demand_write || !mfn_oos_may_write(target_mfn))
+#endif /* OOS */
+           )
             sflags &= ~_PAGE_RW;
+
+        /*
+         * shadow_mode_log_dirty support
+         *
+         * Only allow the guest write access to a page a) on a demand fault,
+         * or b) if the page is already marked as dirty.
+         *
+         * (We handle log-dirty entirely inside the shadow code, without using
+         * the p2m_ram_logdirty p2m type: only HAP uses that.)
+         */
+        if ( unlikely(paging_mode_log_dirty(d)) && !mmio_mfn )
+        {
+            if ( ft & FETCH_TYPE_WRITE )
+                paging_mark_dirty(d, target_mfn);
+            else if ( (sflags & _PAGE_RW) &&
+                      !paging_mfn_is_dirty(d, target_mfn) )
+                sflags &= ~_PAGE_RW;
+        }
     }
 
     // PV guests in 64-bit mode use two different page tables for user vs
@@ -788,7 +789,7 @@ do {                                                                    \
 do {                                                                    \
     int __done = 0;                                                     \
     _FOREACH_PRESENT_L1E(_sl1mfn, _sl1e, _gl1p,                         \
-                         ({ (__done = _done); }), _code);               \
+                         ({ __done = (_done); }), _code);               \
     _sl1mfn = sh_next_page(_sl1mfn);                                    \
     if ( !__done )                                                      \
         _FOREACH_PRESENT_L1E(_sl1mfn, _sl1e, _gl1p, _done, _code);      \
@@ -805,7 +806,7 @@ do {                                                                    \
 #define FOREACH_PRESENT_L2E(_sl2mfn, _sl2e, _gl2p, _done, _dom, _code)    \
 do {                                                                      \
     int _i, _j;                                                           \
-    ASSERT(shadow_mode_external(_dom));                                   \
+    ASSERT(paging_mode_external(_dom));                                   \
     ASSERT(mfn_to_page(_sl2mfn)->u.sh.type == SH_type_l2_32_shadow);      \
     for ( _j = 0; _j < 4; _j++ )                                          \
     {                                                                     \
@@ -831,7 +832,7 @@ do {                                                                      \
 do {                                                                       \
     int _i;                                                                \
     shadow_l2e_t *_sp = map_domain_page((_sl2mfn));                        \
-    ASSERT(shadow_mode_external(_dom));                                    \
+    ASSERT(paging_mode_external(_dom));                                    \
     ASSERT(mfn_to_page(_sl2mfn)->u.sh.type == SH_type_l2_pae_shadow);      \
     for ( _i = 0; _i < SHADOW_L2_PAGETABLE_ENTRIES; _i++ )                 \
     {                                                                      \
@@ -849,13 +850,13 @@ do {                                                                       \
 /* 64-bit l2: touch all entries except for PAE compat guests. */
 #define FOREACH_PRESENT_L2E(_sl2mfn, _sl2e, _gl2p, _done, _dom, _code)      \
 do {                                                                        \
-    unsigned int _i, _end = SHADOW_L2_PAGETABLE_ENTRIES;                    \
+    unsigned int _i, _nr = SHADOW_L2_PAGETABLE_ENTRIES;                     \
     shadow_l2e_t *_sp = map_domain_page((_sl2mfn));                         \
     ASSERT_VALID_L2(mfn_to_page(_sl2mfn)->u.sh.type);                       \
-    if ( is_pv_32bit_domain(_dom) /* implies !shadow_mode_external */ &&    \
+    if ( is_pv_32bit_domain(_dom) /* implies !paging_mode_external */ &&    \
          mfn_to_page(_sl2mfn)->u.sh.type != SH_type_l2_64_shadow )          \
-        _end = COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(_dom);                    \
-    for ( _i = 0; _i < _end; ++_i )                                         \
+        _nr = COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(_dom);                     \
+    for ( _i = 0; _i < _nr; ++_i )                                          \
     {                                                                       \
         (_sl2e) = _sp + _i;                                                 \
         if ( shadow_l2e_get_flags(*(_sl2e)) & _PAGE_PRESENT )               \
@@ -894,7 +895,7 @@ do {                                                                    \
 #define FOREACH_PRESENT_L4E(_sl4mfn, _sl4e, _gl4p, _done, _dom, _code)  \
 do {                                                                    \
     shadow_l4e_t *_sp = map_domain_page((_sl4mfn));                     \
-    int _xen = !shadow_mode_external(_dom);                             \
+    int _xen = !paging_mode_external(_dom);                             \
     int _i;                                                             \
     ASSERT(mfn_to_page(_sl4mfn)->u.sh.type == SH_type_l4_64_shadow);\
     for ( _i = 0; _i < SHADOW_L4_PAGETABLE_ENTRIES; _i++ )              \
@@ -963,7 +964,7 @@ sh_make_shadow(struct vcpu *v, mfn_t gmfn, u32 shadow_type)
 #endif
 
     // Create the Xen mappings...
-    if ( !shadow_mode_external(d) )
+    if ( !paging_mode_external(d) )
     {
         switch (shadow_type)
         {
@@ -1365,7 +1366,7 @@ void sh_destroy_l1_shadow(struct domain *d, mfn_t smfn)
         shadow_demote(d, gmfn, t);
     }
 
-    if ( shadow_mode_refcounts(d) )
+    if ( paging_mode_refcounts(d) )
     {
         /* Decrement refcounts of all the old entries */
         mfn_t sl1mfn = smfn;
@@ -1462,7 +1463,7 @@ static int cf_check validate_gl4e(
     l4e_propagate_from_guest(v, new_gl4e, sl3mfn, &new_sl4e, ft_prefetch);
 
     // check for updates to xen reserved slots
-    if ( !shadow_mode_external(d) )
+    if ( !paging_mode_external(d) )
     {
         int shadow_index = (((unsigned long)sl4p & ~PAGE_MASK) /
                             sizeof(shadow_l4e_t));
@@ -2039,6 +2040,7 @@ static void __maybe_unused sh_trace_gfn_va(uint32_t event, gfn_t gfn,
 }
 
 #ifdef CONFIG_HVM
+#ifdef CONFIG_TRACEBUFFER
 #if GUEST_PAGING_LEVELS == 3
 static DEFINE_PER_CPU(guest_va_t,trace_emulate_initial_va);
 static DEFINE_PER_CPU(int,trace_extra_emulation_count);
@@ -2048,27 +2050,31 @@ static DEFINE_PER_CPU(guest_l1e_t, trace_emulate_write_val);
 static void cf_check trace_emulate_write_val(
     const void *ptr, unsigned long vaddr, const void *src, unsigned int bytes)
 {
-    if ( bytes > sizeof(this_cpu(trace_emulate_write_val)) )
-        bytes = sizeof(this_cpu(trace_emulate_write_val));
+    guest_l1e_t *pval = &this_cpu(trace_emulate_write_val);
+
+    if ( bytes > sizeof(*pval) )
+        bytes = sizeof(*pval);
 
 #if GUEST_PAGING_LEVELS == 3
     if ( vaddr == this_cpu(trace_emulate_initial_va) )
-        memcpy(&this_cpu(trace_emulate_write_val), src, bytes);
+        memcpy(pval, src, bytes);
     else if ( (vaddr & ~(GUEST_PTE_SIZE - 1)) ==
               this_cpu(trace_emulate_initial_va) )
     {
         TRACE_SHADOW_PATH_FLAG(TRCE_SFLAG_EMULATE_FULL_PT);
-        memcpy(&this_cpu(trace_emulate_write_val),
+        memcpy(pval,
                (typeof(ptr))((unsigned long)ptr & ~(GUEST_PTE_SIZE - 1)),
                GUEST_PTE_SIZE);
     }
 #else
-    memcpy(&this_cpu(trace_emulate_write_val), src, bytes);
+    memcpy(pval, src, bytes);
 #endif
 }
+#endif /* CONFIG_TRACEBUFFER */
 
 static inline void sh_trace_emulate(guest_l1e_t gl1e, unsigned long va)
 {
+#ifdef CONFIG_TRACEBUFFER
     if ( tb_init_done )
     {
         struct __packed {
@@ -2094,6 +2100,7 @@ static inline void sh_trace_emulate(guest_l1e_t gl1e, unsigned long va)
 
         sh_trace(TRC_SHADOW_EMULATE, sizeof(d), &d);
     }
+#endif /* CONFIG_TRACEBUFFER */
 }
 #endif /* CONFIG_HVM */
 
@@ -2185,16 +2192,19 @@ static int cf_check sh_page_fault(
 #if (SHADOW_OPTIMIZATIONS & SHOPT_FAST_FAULT_PATH)
     if ( (regs->error_code & PFEC_reserved_bit) )
     {
+        const shadow_l1e_t *psl1e;
+
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
         /* First, need to check that this isn't an out-of-sync
          * shadow l1e.  If it is, we fall back to the slow path, which
          * will sync it up again. */
         {
             shadow_l2e_t sl2e;
+            const shadow_l2e_t *psl2e = sh_linear_l2_table(v) +
+                                        shadow_l2_linear_offset(va);
             mfn_t gl1mfn;
-            if ( (get_unsafe(sl2e,
-                             (sh_linear_l2_table(v) +
-                              shadow_l2_linear_offset(va))) != 0)
+
+            if ( (get_unsafe(sl2e, psl2e) != 0)
                  || !(shadow_l2e_get_flags(sl2e) & _PAGE_PRESENT)
                  || !mfn_valid(gl1mfn = backpointer(mfn_to_page(
                                   shadow_l2e_get_mfn(sl2e))))
@@ -2210,9 +2220,8 @@ static int cf_check sh_page_fault(
 #endif /* SHOPT_OUT_OF_SYNC */
         /* The only reasons for reserved bits to be set in shadow entries
          * are the two "magic" shadow_l1e entries. */
-        if ( likely((get_unsafe(sl1e,
-                                (sh_linear_l1_table(v) +
-                                 shadow_l1_linear_offset(va))) == 0)
+        psl1e = sh_linear_l1_table(v) + shadow_l1_linear_offset(va);
+        if ( likely((get_unsafe(sl1e, psl1e) == 0)
                     && sh_l1e_is_magic(sl1e)) )
         {
 
@@ -2371,9 +2380,17 @@ static int cf_check sh_page_fault(
     gfn = guest_walk_to_gfn(&gw);
     gmfn = get_gfn(d, gfn, &p2mt);
 
-    if ( shadow_mode_refcounts(d) &&
-         ((!p2m_is_valid(p2mt) && !p2m_is_grant(p2mt)) ||
-          (!p2m_is_mmio(p2mt) && !mfn_valid(gmfn))) )
+    /*
+     * p2m_mmio_dm in particular is handled further down, and hence can't be
+     * short-circuited here. Furthermore, while not fitting with architectural
+     * behavior, propagating #PF to the guest when a sensible shadow entry
+     * can't be written is necessary. Without doing so (by installing a non-
+     * present entry) we'd get back right here immediately afterwards, thus
+     * preventing the guest from making further forward progress.
+     */
+    if ( paging_mode_refcounts(d) &&
+         !p2m_is_mmio(p2mt) &&
+         (!p2m_is_any_ram(p2mt) || !mfn_valid(gmfn)) )
     {
         perfc_incr(shadow_fault_bail_bad_gfn);
         SHADOW_PRINTK("BAD gfn=%"SH_PRI_gfn" gmfn=%"PRI_mfn"\n",
@@ -2461,13 +2478,13 @@ static int cf_check sh_page_fault(
          * In any case, in the PAE case, the ASSERT is not true; it can
          * happen because of actions the guest is taking. */
 #if GUEST_PAGING_LEVELS == 3
-        v->arch.paging.mode->update_cr3(v, false);
+        sh_update_cr3(v, false);
 #else
         ASSERT(d->is_shutting_down);
+        sh_trace_va(TRC_SHADOW_DOMF_DYING, va);
 #endif
         paging_unlock(d);
         put_gfn(d, gfn_x(gfn));
-        sh_trace_va(TRC_SHADOW_DOMF_DYING, va);
         return 0;
     }
 
@@ -2595,7 +2612,7 @@ static int cf_check sh_page_fault(
     return EXCRET_fault_fixed;
 
  emulate:
-    if ( !shadow_mode_refcounts(d) )
+    if ( !paging_mode_refcounts(d) )
         goto not_a_shadow_fault;
 
 #ifdef CONFIG_HVM
@@ -2665,7 +2682,9 @@ static int cf_check sh_page_fault(
     paging_unlock(d);
     put_gfn(d, gfn_x(gfn));
 
+#ifdef CONFIG_TRACEBUFFER
     this_cpu(trace_emulate_write_val) = (guest_l1e_t){};
+#endif
 
 #if SHADOW_OPTIMIZATIONS & SHOPT_FAST_EMULATION
  early_emulation:
@@ -2781,7 +2800,10 @@ static int cf_check sh_page_fault(
     if ( r == X86EMUL_OKAY && !emul_ctxt.ctxt.retire.raw )
     {
         int i, emulation_count=0;
+
+#ifdef CONFIG_TRACEBUFFER
         this_cpu(trace_emulate_initial_va) = va;
+#endif
 
         for ( i = 0 ; i < 4 ; i++ )
         {
@@ -2817,7 +2839,10 @@ static int cf_check sh_page_fault(
                 break; /* Don't emulate again if we failed! */
             }
         }
+
+#ifdef CONFIG_TRACEBUFFER
         this_cpu(trace_extra_emulation_count)=emulation_count;
+#endif
     }
 #endif /* PAE guest */
 
@@ -2851,6 +2876,7 @@ static bool cf_check sh_invlpg(struct vcpu *v, unsigned long linear)
 {
     mfn_t sl1mfn;
     shadow_l2e_t sl2e;
+    const shadow_l2e_t *psl2e;
 
     perfc_incr(shadow_invlpg);
 
@@ -2869,6 +2895,9 @@ static bool cf_check sh_invlpg(struct vcpu *v, unsigned long linear)
 #if SHADOW_PAGING_LEVELS == 4
     {
         shadow_l3e_t sl3e;
+        const shadow_l3e_t *psl3e = sh_linear_l3_table(v) +
+                                    shadow_l3_linear_offset(linear);
+
         if ( !(shadow_l4e_get_flags(
                    sh_linear_l4_table(v)[shadow_l4_linear_offset(linear)])
                & _PAGE_PRESENT) )
@@ -2876,9 +2905,7 @@ static bool cf_check sh_invlpg(struct vcpu *v, unsigned long linear)
         /* This must still be a copy-from-unsafe because we don't have the
          * paging lock, and the higher-level shadows might disappear
          * under our feet. */
-        if ( get_unsafe(sl3e,
-                        (sh_linear_l3_table(v) +
-                         shadow_l3_linear_offset(linear))) != 0 )
+        if ( get_unsafe(sl3e, psl3e) != 0 )
         {
             perfc_incr(shadow_invlpg_fault);
             return false;
@@ -2897,9 +2924,8 @@ static bool cf_check sh_invlpg(struct vcpu *v, unsigned long linear)
 
     /* This must still be a copy-from-unsafe because we don't have the shadow
      * lock, and the higher-level shadows might disappear under our feet. */
-    if ( get_unsafe(sl2e,
-                    (sh_linear_l2_table(v) +
-                     shadow_l2_linear_offset(linear))) != 0 )
+    psl2e = sh_linear_l2_table(v) + shadow_l2_linear_offset(linear);
+    if ( get_unsafe(sl2e, psl2e) != 0 )
     {
         perfc_incr(shadow_invlpg_fault);
         return false;
@@ -2940,9 +2966,7 @@ static bool cf_check sh_invlpg(struct vcpu *v, unsigned long linear)
              * have the paging lock last time we checked, and the
              * higher-level shadows might have disappeared under our
              * feet. */
-            if ( get_unsafe(sl2e,
-                            (sh_linear_l2_table(v) +
-                             shadow_l2_linear_offset(linear))) != 0 )
+            if ( get_unsafe(sl2e, psl2e) != 0 )
             {
                 perfc_incr(shadow_invlpg_fault);
                 paging_unlock(d);
@@ -3036,7 +3060,7 @@ sh_update_linear_entries(struct vcpu *v)
      */
 
     /* Don't try to update the monitor table if it doesn't exist */
-    if ( !shadow_mode_external(d) ||
+    if ( !paging_mode_external(d) ||
          pagetable_get_pfn(v->arch.hvm.monitor_table) == 0 )
         return;
 
@@ -3187,7 +3211,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
     /* Double-check that the HVM code has sent us a sane guest_table */
     if ( is_hvm_domain(d) )
     {
-        ASSERT(shadow_mode_external(d));
+        ASSERT(paging_mode_external(d));
         if ( hvm_paging_enabled(v) )
             ASSERT(pagetable_get_pfn(v->arch.guest_table));
         else
@@ -3212,7 +3236,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
      * table.  We cache the current state of that table and shadow that,
      * until the next CR3 write makes us refresh our cache.
      */
-    ASSERT(shadow_mode_external(d));
+    ASSERT(paging_mode_external(d));
 
     /*
      * Find where in the page the l3 table is, but ignore the low 2 bits of
@@ -3244,7 +3268,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
         ASSERT(d->is_dying || d->is_shutting_down);
         return old_entry;
     }
-    if ( !shadow_mode_external(d) && !is_pv_32bit_domain(d) )
+    if ( !paging_mode_external(d) && !is_pv_32bit_domain(d) )
     {
         mfn_t smfn = pagetable_get_mfn(v->arch.paging.shadow.shadow_table[0]);
 
@@ -3321,7 +3345,9 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
 #if SHADOW_PAGING_LEVELS == 3
         {
             mfn_t smfn = pagetable_get_mfn(v->arch.paging.shadow.shadow_table[0]);
+#if GUEST_PAGING_LEVELS != 3
             unsigned int i;
+#endif
 
             for_each_shadow_table(v, i)
             {
@@ -3344,7 +3370,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
     ///
     /// v->arch.cr3
     ///
-    if ( shadow_mode_external(d) )
+    if ( paging_mode_external(d) )
     {
         make_cr3(v, pagetable_get_mfn(v->arch.hvm.monitor_table));
     }
@@ -3361,7 +3387,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
     ///
     /// v->arch.hvm.hw_cr[3]
     ///
-    if ( shadow_mode_external(d) )
+    if ( paging_mode_external(d) )
     {
         ASSERT(is_hvm_domain(d));
 #if SHADOW_PAGING_LEVELS == 3
@@ -3408,9 +3434,7 @@ static pagetable_t cf_check sh_update_cr3(struct vcpu *v, bool noflush)
 int sh_rm_write_access_from_sl1p(struct domain *d, mfn_t gmfn,
                                  mfn_t smfn, unsigned long off)
 {
-#ifdef CONFIG_HVM
     struct vcpu *curr = current;
-#endif
     int r;
     shadow_l1e_t *sl1p, sl1e;
     struct page_info *sp;
@@ -3418,12 +3442,10 @@ int sh_rm_write_access_from_sl1p(struct domain *d, mfn_t gmfn,
     ASSERT(mfn_valid(gmfn));
     ASSERT(mfn_valid(smfn));
 
-#ifdef CONFIG_HVM
     /* Remember if we've been told that this process is being torn down */
-    if ( curr->domain == d && is_hvm_domain(d) )
+    if ( curr->domain == d )
         curr->arch.paging.shadow.pagetable_dying
             = mfn_to_page(gmfn)->pagetable_dying;
-#endif
 
     sp = mfn_to_page(smfn);
 
@@ -3524,16 +3546,25 @@ static int cf_check sh_guess_wrmap(
 }
 #endif
 
+/* Remember the last shadow that we shot a writeable mapping in */
+static always_inline void store_last_writeable_pte_smfn(
+    const struct domain *d, mfn_t sl1mfn)
+{
+#if SHADOW_OPTIMIZATIONS & SHOPT_WRITABLE_HEURISTIC
+    struct vcpu *curr = current;
+
+    if ( curr->domain == d )
+        curr->arch.paging.shadow.last_writeable_pte_smfn = mfn_x(sl1mfn);
+#endif
+}
+
 int cf_check sh_rm_write_access_from_l1(
     struct domain *d, mfn_t sl1mfn, mfn_t readonly_mfn)
 /* Excises all writeable mappings to readonly_mfn from this l1 shadow table */
 {
     shadow_l1e_t *sl1e;
     int done = 0;
-#if SHADOW_OPTIMIZATIONS & SHOPT_WRITABLE_HEURISTIC
-    struct vcpu *curr = current;
     mfn_t base_sl1mfn = sl1mfn; /* Because sl1mfn changes in the foreach */
-#endif
 
     FOREACH_PRESENT_L1E(sl1mfn, sl1e, NULL, done,
     {
@@ -3543,11 +3574,9 @@ int cf_check sh_rm_write_access_from_l1(
             shadow_l1e_t ro_sl1e = shadow_l1e_remove_flags(*sl1e, _PAGE_RW);
 
             shadow_set_l1e(d, sl1e, ro_sl1e, p2m_ram_rw, sl1mfn);
-#if SHADOW_OPTIMIZATIONS & SHOPT_WRITABLE_HEURISTIC
-            /* Remember the last shadow that we shot a writeable mapping in */
-            if ( curr->domain == d )
-                curr->arch.paging.shadow.last_writeable_pte_smfn = mfn_x(base_sl1mfn);
-#endif
+
+            store_last_writeable_pte_smfn(d, base_sl1mfn);
+
             if ( (mfn_to_page(readonly_mfn)->u.inuse.type_info
                   & PGT_count_mask) == 0 )
                 /* This breaks us cleanly out of the FOREACH macro */
@@ -3857,12 +3886,36 @@ static const char *sh_audit_flags(const struct domain *d, int level,
     return NULL;
 }
 
+static always_inline bool audit_magic(
+    const guest_l1e_t *gl1e, mfn_t gl1mfn,
+    const shadow_l1e_t *sl1e, mfn_t sl1mfn)
+{
+    bool done = false;
+
+#if SHADOW_OPTIMIZATIONS & SHOPT_FAST_FAULT_PATH
+    if ( !sh_l1e_is_gnp(*sl1e) )
+    {
+        gfn_t gfn = sh_l1e_mmio_get_gfn(*sl1e);
+
+        ASSERT(sh_l1e_is_mmio(*sl1e));
+
+        if ( !gfn_eq(gfn, guest_l1e_get_gfn(*gl1e)) )
+            AUDIT_FAIL(1,
+                       "shadow MMIO gfn is %" SH_PRI_gfn " but guest gfn is %" SH_PRI_gfn,
+                       gfn_x(gfn), gfn_x(guest_l1e_get_gfn(*gl1e)));
+    }
+    else if ( guest_l1e_get_flags(*gl1e) & _PAGE_PRESENT )
+        AUDIT_FAIL(1, "shadow is GNP magic but guest is present");
+#endif
+
+    return done;
+}
+
 int cf_check sh_audit_l1_table(struct domain *d, mfn_t sl1mfn, mfn_t x)
 {
     guest_l1e_t *gl1e, *gp;
     shadow_l1e_t *sl1e;
-    mfn_t mfn, gmfn, gl1mfn;
-    gfn_t gfn;
+    mfn_t gl1mfn;
     p2m_type_t p2mt;
     const char *s;
     int done = 0;
@@ -3881,28 +3934,10 @@ int cf_check sh_audit_l1_table(struct domain *d, mfn_t sl1mfn, mfn_t x)
 #endif
 
     gl1e = gp = map_domain_page(gl1mfn);
-    FOREACH_PRESENT_L1E(sl1mfn, sl1e, &gl1e, done, {
-
+    FOREACH_PRESENT_L1E(sl1mfn, sl1e, &gl1e, done,
+    {
         if ( sh_l1e_is_magic(*sl1e) )
-        {
-#if (SHADOW_OPTIMIZATIONS & SHOPT_FAST_FAULT_PATH)
-            if ( sh_l1e_is_gnp(*sl1e) )
-            {
-                if ( guest_l1e_get_flags(*gl1e) & _PAGE_PRESENT )
-                    AUDIT_FAIL(1, "shadow is GNP magic but guest is present");
-            }
-            else
-            {
-                ASSERT(sh_l1e_is_mmio(*sl1e));
-                gfn = sh_l1e_mmio_get_gfn(*sl1e);
-                if ( gfn_x(gfn) != gfn_x(guest_l1e_get_gfn(*gl1e)) )
-                    AUDIT_FAIL(1, "shadow MMIO gfn is %" SH_PRI_gfn
-                               " but guest gfn is %" SH_PRI_gfn,
-                               gfn_x(gfn),
-                               gfn_x(guest_l1e_get_gfn(*gl1e)));
-            }
-#endif
-        }
+            done = audit_magic(gl1e, gl1mfn, sl1e, sl1mfn);
         else
         {
             s = sh_audit_flags(d, 1, guest_l1e_get_flags(*gl1e),
@@ -3911,9 +3946,10 @@ int cf_check sh_audit_l1_table(struct domain *d, mfn_t sl1mfn, mfn_t x)
 
             if ( SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_MFNS )
             {
-                gfn = guest_l1e_get_gfn(*gl1e);
-                mfn = shadow_l1e_get_mfn(*sl1e);
-                gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+                gfn_t gfn = guest_l1e_get_gfn(*gl1e);
+                mfn_t mfn = shadow_l1e_get_mfn(*sl1e);
+                mfn_t gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+
                 if ( !p2m_is_grant(p2mt) && !mfn_eq(gmfn, mfn) )
                     AUDIT_FAIL(1, "bad translation: gfn %" SH_PRI_gfn
                                " --> %" PRI_mfn " != mfn %" PRI_mfn,
@@ -4002,6 +4038,17 @@ int cf_check sh_audit_l2_table(struct domain *d, mfn_t sl2mfn, mfn_t x)
 }
 
 #if GUEST_PAGING_LEVELS >= 4
+static always_inline unsigned int type_from_gl3e(
+    const struct domain *d, const guest_l3e_t *gl3e)
+{
+#ifdef CONFIG_PV32
+    if ( guest_index(gl3e) == 3 && is_pv_32bit_domain(d) )
+        return SH_type_l2h_shadow;
+#endif
+
+    return SH_type_l2_shadow;
+}
+
 int cf_check sh_audit_l3_table(struct domain *d, mfn_t sl3mfn, mfn_t x)
 {
     guest_l3e_t *gl3e, *gp;
@@ -4031,14 +4078,10 @@ int cf_check sh_audit_l3_table(struct domain *d, mfn_t sl3mfn, mfn_t x)
 
         if ( SHADOW_AUDIT & SHADOW_AUDIT_ENTRIES_MFNS )
         {
-            unsigned int t = SH_type_l2_shadow;
+            unsigned int t = type_from_gl3e(d, gl3e);
 
             gfn = guest_l3e_get_gfn(*gl3e);
             mfn = shadow_l3e_get_mfn(*sl3e);
-#ifdef CONFIG_PV32
-            if ( guest_index(gl3e) == 3 && is_pv_32bit_domain(d) )
-                t = SH_type_l2h_shadow;
-#endif
             gmfn = get_shadow_status(
                        d, get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt), t);
             if ( !mfn_eq(gmfn, mfn) )
@@ -4117,7 +4160,9 @@ const struct paging_mode sh_paging_mode = {
     .shadow.guess_wrmap            = sh_guess_wrmap,
 #endif
     .shadow.pagetable_dying        = sh_pagetable_dying,
+#ifdef CONFIG_TRACEBUFFER
     .shadow.trace_emul_write_val   = trace_emulate_write_val,
+#endif /* CONFIG_TRACEBUFFER */
 #endif /* CONFIG_HVM */
     .shadow.shadow_levels          = SHADOW_PAGING_LEVELS,
 };

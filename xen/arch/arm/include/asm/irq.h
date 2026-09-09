@@ -4,20 +4,7 @@
 #include <xen/device_tree.h>
 #include <public/device_tree_defs.h>
 
-/*
- * These defines correspond to the Xen internal representation of the
- * IRQ types. We choose to make them the same as the existing device
- * tree definitions for convenience.
- */
-#define IRQ_TYPE_NONE           DT_IRQ_TYPE_NONE
-#define IRQ_TYPE_EDGE_RISING    DT_IRQ_TYPE_EDGE_RISING
-#define IRQ_TYPE_EDGE_FALLING   DT_IRQ_TYPE_EDGE_FALLING
-#define IRQ_TYPE_EDGE_BOTH      DT_IRQ_TYPE_EDGE_BOTH 
-#define IRQ_TYPE_LEVEL_HIGH     DT_IRQ_TYPE_LEVEL_HIGH
-#define IRQ_TYPE_LEVEL_LOW      DT_IRQ_TYPE_LEVEL_LOW
-#define IRQ_TYPE_LEVEL_MASK     DT_IRQ_TYPE_LEVEL_MASK
-#define IRQ_TYPE_SENSE_MASK     DT_IRQ_TYPE_SENSE_MASK
-#define IRQ_TYPE_INVALID        DT_IRQ_TYPE_INVALID
+#include <asm/irq-dt.h>
 
 #define NR_VECTORS 256 /* XXX */
 
@@ -42,7 +29,12 @@ struct arch_irq_desc {
  */
 #define NR_IRQS		1024
 
+#define SPI_MAX_INTID   1019
 #define LPI_OFFSET      8192
+
+#define ESPI_BASE_INTID 4096
+#define ESPI_MAX_INTID  5119
+#define NR_ESPI_IRQS    1024
 
 /* LPIs are always numbered starting at 8192, so 0 is a good invalid case. */
 #define INVALID_LPI     0
@@ -51,7 +43,12 @@ struct arch_irq_desc {
 #define INVALID_IRQ     1023
 
 extern const unsigned int nr_irqs;
+#ifdef CONFIG_GICV3_ESPI
+/* This will cover the eSPI range, to allow assignment of eSPIs to domains. */
+#define nr_static_irqs (ESPI_MAX_INTID + 1)
+#else
 #define nr_static_irqs NR_IRQS
+#endif
 
 struct irq_desc;
 struct irqaction;
@@ -65,6 +62,34 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq);
 static inline bool is_lpi(unsigned int irq)
 {
     return irq >= LPI_OFFSET;
+}
+
+static inline bool is_espi(unsigned int irq)
+{
+#ifdef CONFIG_GICV3_ESPI
+    return irq >= ESPI_BASE_INTID && irq <= ESPI_MAX_INTID;
+#else
+    /*
+     * The function should not be called for eSPIs when CONFIG_GICV3_ESPI is
+     * disabled. Returning false allows the compiler to optimize the code
+     * when the config is disabled, while the assert ensures that out-of-range
+     * array resources are not accessed.
+     */
+    ASSERT(!(irq >= ESPI_BASE_INTID && irq <= ESPI_MAX_INTID));
+    return false;
+#endif
+}
+
+static inline unsigned int espi_intid_to_idx(unsigned int intid)
+{
+    ASSERT(is_espi(intid));
+    return intid - ESPI_BASE_INTID;
+}
+
+static inline unsigned int espi_idx_to_intid(unsigned int idx)
+{
+    ASSERT(idx <= NR_ESPI_IRQS);
+    return idx + ESPI_BASE_INTID;
 }
 
 #define domain_pirq_to_irq(d, pirq) (pirq)

@@ -194,7 +194,7 @@ int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx)
         uregs->rsi    = regs->esi;
         uregs->rdi    = regs->edi;
         uregs->rip    = regs->eip;
-        uregs->rflags = regs->eflags;
+        uregs->rflags = (regs->eflags & X86_EFLAGS_ALL) | X86_EFLAGS_MBS;
 
         v->arch.hvm.guest_cr[0] = regs->cr0;
         v->arch.hvm.guest_cr[3] = regs->cr3;
@@ -245,7 +245,7 @@ int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx)
         uregs->rsi    = regs->rsi;
         uregs->rdi    = regs->rdi;
         uregs->rip    = regs->rip;
-        uregs->rflags = regs->rflags;
+        uregs->rflags = (regs->rflags & X86_EFLAGS_ALL) | X86_EFLAGS_MBS;
 
         v->arch.hvm.guest_cr[0] = regs->cr0;
         v->arch.hvm.guest_cr[3] = regs->cr3;
@@ -287,7 +287,7 @@ int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx)
     hvm_update_guest_cr(v, 4);
     hvm_update_guest_efer(v);
 
-    if ( hvm_paging_enabled(v) && !paging_mode_hap(v->domain) )
+    if ( hvm_paging_enabled(v) && paging_mode_shadow(v->domain) )
     {
         /* Shadow-mode CR3 change. Check PDBR and update refcounts. */
         struct page_info *page = get_page_from_gfn(v->domain,
@@ -312,8 +312,7 @@ int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx)
     /* Sync AP's TSC with BSP's. */
     v->arch.hvm.cache_tsc_offset =
         d->vcpu[0]->arch.hvm.cache_tsc_offset;
-    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset,
-                       d->arch.hvm.sync_tsc);
+    hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset);
 
     paging_update_paging_modes(v);
 

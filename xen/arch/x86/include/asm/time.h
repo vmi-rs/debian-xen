@@ -1,8 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef X86_TIME_H
+#define X86_TIME_H
 
-#ifndef __X86_TIME_H__
-#define __X86_TIME_H__
-
-#include <asm/msr.h>
+#include <asm/tsc.h>
 
 typedef u64 cycles_t;
 
@@ -12,6 +12,8 @@ static inline cycles_t get_cycles(void)
 {
     return rdtsc_ordered();
 }
+
+s_time_t get_s_time_fixed(uint64_t at_tsc);
 
 unsigned long
 mktime (unsigned int year, unsigned int mon,
@@ -36,7 +38,6 @@ uint64_t cf_check acpi_pm_tick_to_ns(uint64_t ticks);
 
 uint64_t tsc_ticks2ns(uint64_t ticks);
 
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs);
 uint64_t gtime_to_gtsc(const struct domain *d, uint64_t time);
 uint64_t gtsc_to_gtime(const struct domain *d, uint64_t tsc);
 
@@ -45,17 +46,20 @@ int tsc_set_info(struct domain *d, uint32_t tsc_mode, uint64_t elapsed_nsec,
 
 void tsc_get_info(struct domain *d, uint32_t *tsc_mode, uint64_t *elapsed_nsec,
                   uint32_t *gtsc_khz, uint32_t *incarnation);
-   
 
 void force_update_vcpu_system_time(struct vcpu *v);
 
 bool clocksource_is_tsc(void);
 int host_tsc_is_safe(void);
-u64 stime2tsc(s_time_t stime);
+
+/*
+ * Note: This function "caps" times ahead of the local CPU's stime stamp,
+ * supplying the corresponding TSC stamp in that case.
+ */
+uint64_t stime2tsc(s_time_t stime);
 
 struct time_scale;
 void set_time_scale(struct time_scale *ts, u64 ticks_per_sec);
-u64 scale_delta(u64 delta, const struct time_scale *scale);
 
 /* Programmable Interval Timer (8254) */
 
@@ -91,4 +95,4 @@ u64 scale_delta(u64 delta, const struct time_scale *scale);
 #define PIT_STATUS_NULL_COUNT (1 << 6)
 /* Lower bits match Timer Control Word. */
 
-#endif /* __X86_TIME_H__ */
+#endif /* X86_TIME_H */

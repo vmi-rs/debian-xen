@@ -36,7 +36,7 @@
 #define TLB_HELPER_LOCAL(name, tlbop)            \
 static inline void name(void)                    \
 {                                                \
-    asm volatile(                                \
+    asm_inline volatile (                        \
         "dsb  nshst;"                            \
         "tlbi "  # tlbop  ";"                    \
         "dsb  nsh;"                              \
@@ -47,7 +47,7 @@ static inline void name(void)                    \
 #define TLB_HELPER(name, tlbop)                       \
 static inline void name(void)                         \
 {                                                     \
-    asm volatile (                                    \
+    asm_inline volatile (                             \
         "dsb  ishst;"                                 \
         "tlbi "  # tlbop  ";"                         \
         ALTERNATIVE(                                  \
@@ -88,14 +88,14 @@ TLB_HELPER_LOCAL(flush_xen_tlb_local, alle2)
 /* Flush TLB of local processor for address va. */
 static inline void __flush_xen_tlb_one_local(vaddr_t va)
 {
-    asm volatile (
+    asm_inline volatile (
         "tlbi vae2, %0" : : "r" (va >> PAGE_SHIFT) : "memory");
 }
 
 /* Flush TLB of all processors in the inner-shareable domain for address va. */
 static inline void __flush_xen_tlb_one(vaddr_t va)
 {
-    asm volatile (
+    asm_inline volatile (
         "tlbi vae2is, %0" : : "r" (va >> PAGE_SHIFT) : "memory");
 }
 
@@ -106,7 +106,7 @@ static inline void __flush_xen_tlb_one(vaddr_t va)
  */
 static inline void __tlb_repeat_sync(void)
 {
-    asm volatile (
+    asm_inline volatile (
         ALTERNATIVE(
             "nop; nop;",
             "tlbi vale2is, xzr;"

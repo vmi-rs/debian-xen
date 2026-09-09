@@ -10,6 +10,7 @@
 #include <xen/guest_access.h>
 
 #include <asm/debugreg.h>
+#include <asm/pv/domain.h>
 
 #include "emulate.h"
 
@@ -28,8 +29,14 @@ int pv_emul_read_descriptor(unsigned int sel, const struct vcpu *v,
           */
          ((sel & 4) && (sel >> 3) >= v->arch.pv.ldt_ents) )
         desc.b = desc.a = 0;
-    else if ( get_unsafe(desc, gdt_ldt_desc_ptr(sel)) )
-        return 0;
+    else
+    {
+        const seg_desc_t *pdesc = gdt_ldt_desc_ptr(sel);
+
+        if ( get_unsafe(desc, pdesc) )
+            return 0;
+    }
+
     if ( !insn_fetch )
         desc.b &= ~_SEGMENT_L;
 
@@ -37,7 +44,7 @@ int pv_emul_read_descriptor(unsigned int sel, const struct vcpu *v,
     if ( !(desc.b & _SEGMENT_L) )
     {
         *base = ((desc.a >> 16) + ((desc.b & 0xff) << 16) +
-                 (desc.b & 0xff000000));
+                 (desc.b & 0xff000000U));
         *limit = (desc.a & 0xffff) | (desc.b & 0x000f0000);
         if ( desc.b & _SEGMENT_G )
             *limit = ((*limit + 1) << 12) - 1;
@@ -120,6 +127,7 @@ void pv_set_reg(struct vcpu *v, unsigned int reg, uint64_t val)
         printk(XENLOG_G_ERR "%s(%pv, 0x%08x, 0x%016"PRIx64") Bad register\n",
                __func__, v, reg, val);
         domain_crash(d);
+        break;
     }
 }
 

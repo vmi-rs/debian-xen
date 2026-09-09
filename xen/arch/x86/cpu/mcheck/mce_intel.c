@@ -1,30 +1,31 @@
-#include <xen/init.h>
-#include <xen/types.h>
-#include <xen/irq.h>
-#include <xen/event.h>
-#include <xen/kernel.h>
+#include <xen/cpu.h>
 #include <xen/delay.h>
+#include <xen/event.h>
+#include <xen/init.h>
+#include <xen/irq.h>
+#include <xen/kernel.h>
+#include <xen/mm.h>
 #include <xen/param.h>
 #include <xen/smp.h>
-#include <xen/mm.h>
-#include <xen/cpu.h>
-#include <asm/processor.h>
-#include <public/sysctl.h>
+
+#include <asm/apic.h>
 #include <asm/intel-family.h>
-#include <asm/system.h>
+#include <asm/mce.h>
 #include <asm/msr.h>
 #include <asm/p2m.h>
-#include <asm/mce.h>
-#include <asm/apic.h>
+#include <asm/processor.h>
+#include <asm/system.h>
 
 #include <acpi/cpufreq/cpufreq.h>
 
-#include "mce.h"
-#include "x86_mca.h"
+#include <public/sysctl.h>
+
 #include "barrier.h"
+#include "mcaction.h"
+#include "mce.h"
 #include "util.h"
 #include "vmce.h"
-#include "mcaction.h"
+#include "x86_mca.h"
 
 static DEFINE_PER_CPU_READ_MOSTLY(struct mca_banks *, mce_banks_owned);
 static bool __read_mostly ser_support;
@@ -86,7 +87,7 @@ static void cf_check intel_thermal_interrupt(void)
 }
 
 /* Thermal monitoring depends on APIC, ACPI and clock modulation */
-static bool intel_thermal_supported(struct cpuinfo_x86 *c)
+static bool intel_thermal_supported(const struct cpuinfo_x86 *c)
 {
     if ( !cpu_has_apic )
         return false;
@@ -109,7 +110,7 @@ static void __init mcheck_intel_therm_init(void)
 }
 
 /* P4/Xeon Thermal regulation detect and init */
-static void intel_init_thermal(struct cpuinfo_x86 *c)
+static void intel_init_thermal(const struct cpuinfo_x86 *c, bool bsp)
 {
     uint64_t msr_content;
     uint32_t val;
@@ -136,14 +137,13 @@ static void intel_init_thermal(struct cpuinfo_x86 *c)
      * BIOS has programmed on AP based on BSP's info we saved (since BIOS
      * is required to set the same value for all threads/cores).
      */
-    if ( (val & APIC_DM_MASK) != APIC_DM_FIXED
-         || (val & APIC_VECTOR_MASK) > 0xf )
+    if ( (val & APIC_DM_MASK) != APIC_DM_FIXED || APIC_VECTOR_VALID(val) )
         apic_write(APIC_LVTTHMR, val);
 
     if ( (msr_content & (1ULL<<3))
          && (val & APIC_DM_MASK) == APIC_DM_SMI )
     {
-        if ( c == &boot_cpu_data )
+        if ( bsp )
             printk(KERN_DEBUG "Thermal monitoring handled by SMI\n");
         return; /* -EBUSY */
     }
@@ -154,7 +154,7 @@ static void intel_init_thermal(struct cpuinfo_x86 *c)
     /* check whether a vector already exists, temporarily masked? */
     if ( val & APIC_VECTOR_MASK )
     {
-        if ( c == &boot_cpu_data )
+        if ( bsp )
             printk(KERN_DEBUG "Thermal LVT vector (%#x) already installed\n",
                    val & APIC_VECTOR_MASK);
         return; /* -EBUSY */
@@ -728,7 +728,7 @@ static bool intel_enable_lmce(void)
      * MSR_IA32_MCG_EXT_CTL.LMCE_EN.
      */
 
-    if ( rdmsr_safe(MSR_IA32_FEATURE_CONTROL, msr_content) )
+    if ( rdmsr_safe(MSR_IA32_FEATURE_CONTROL, &msr_content) )
         return false;
 
     if ( (msr_content & IA32_FEATURE_CONTROL_LOCK) &&
@@ -852,7 +852,7 @@ static void intel_init_mce(bool bsp)
     mce_uhandler_num = ARRAY_SIZE(intel_mce_uhandlers);
 }
 
-static void intel_init_ppin(const struct cpuinfo_x86 *c)
+static void intel_init_ppin(const struct cpuinfo_x86 *c, bool bsp)
 {
     /*
      * Even if testing the presence of the MSR would be enough, we don't
@@ -860,7 +860,7 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
      * other purposes.  Despite the late addition of a CPUID bit (rendering
      * the MSR architectural), keep using the same detection logic there.
      */
-    switch ( c->x86 == 6 ? c->x86_model : 0 )
+    switch ( c->vfm )
     {
         uint64_t val;
 
@@ -871,30 +871,30 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
             return;
         }
         fallthrough;
-    case INTEL_FAM6_IVYBRIDGE_X:
-    case INTEL_FAM6_HASWELL_X:
-    case INTEL_FAM6_BROADWELL_X:
-    case INTEL_FAM6_BROADWELL_D:
-    case INTEL_FAM6_SKYLAKE_X:
-    case INTEL_FAM6_ICELAKE_X:
-    case INTEL_FAM6_ICELAKE_D:
-    case INTEL_FAM6_SAPPHIRERAPIDS_X:
-    case INTEL_FAM6_EMERALDRAPIDS_X:
+    case INTEL_IVYBRIDGE_X:
+    case INTEL_HASWELL_X:
+    case INTEL_BROADWELL_X:
+    case INTEL_BROADWELL_D:
+    case INTEL_SKYLAKE_X:
+    case INTEL_ICELAKE_X:
+    case INTEL_ICELAKE_D:
+    case INTEL_SAPPHIRERAPIDS_X:
+    case INTEL_EMERALDRAPIDS_X:
 
-        if ( (c != &boot_cpu_data && !ppin_msr) ||
-             rdmsr_safe(MSR_PPIN_CTL, val) )
+        if ( (!bsp && !ppin_msr) ||
+             rdmsr_safe(MSR_PPIN_CTL, &val) )
             return;
 
         /* If PPIN is disabled, but not locked, try to enable. */
         if ( !(val & (PPIN_ENABLE | PPIN_LOCKOUT)) )
         {
             wrmsr_safe(MSR_PPIN_CTL, val | PPIN_ENABLE);
-            rdmsr_safe(MSR_PPIN_CTL, val);
+            rdmsrl(MSR_PPIN_CTL, val);
         }
 
         if ( !(val & PPIN_ENABLE) )
             ppin_msr = 0;
-        else if ( c == &boot_cpu_data )
+        else if ( bsp )
             ppin_msr = MSR_PPIN;
 
         break;
@@ -995,9 +995,9 @@ enum mcheck_type intel_mcheck_init(struct cpuinfo_x86 *c, bool bsp)
 
     intel_init_cmci(c);
 
-    intel_init_thermal(c);
+    intel_init_thermal(c, bsp);
 
-    intel_init_ppin(c);
+    intel_init_ppin(c, bsp);
 
     return mcheck_intel;
 }

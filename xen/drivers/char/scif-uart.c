@@ -139,9 +139,8 @@ static void scif_uart_interrupt(int irq, void *data)
     }
 }
 
-static void __init scif_uart_init_preirq(struct serial_port *port)
+static void scif_uart_disable(struct scif_uart *uart)
 {
-    struct scif_uart *uart = port->uart;
     const struct port_params *params = uart->params;
 
     /*
@@ -155,6 +154,14 @@ static void __init scif_uart_init_preirq(struct serial_port *port)
 
     /* Reset TX/RX FIFOs */
     scif_writew(uart, SCIF_SCFCR, SCFCR_RFRST | SCFCR_TFRST);
+}
+
+static void scif_uart_init_preirq(struct serial_port *port)
+{
+    struct scif_uart *uart = port->uart;
+    const struct port_params *params = uart->params;
+
+    scif_uart_disable(uart);
 
     /* Clear all errors and flags */
     scif_readw(uart, params->status_reg);
@@ -180,15 +187,19 @@ static void __init scif_uart_init_postirq(struct serial_port *port)
     uart->irqaction.name    = "scif_uart";
     uart->irqaction.dev_id  = port;
 
-    if ( (rc = setup_irq(uart->irq, 0, &uart->irqaction)) != 0 )
-        dprintk(XENLOG_ERR, "Failed to allocated scif_uart IRQ %d\n",
-                uart->irq);
-
     /* Clear all errors */
     if ( scif_readw(uart, params->status_reg) & params->error_mask )
         scif_writew(uart, params->status_reg, ~params->error_mask);
     if ( scif_readw(uart, params->overrun_reg) & params->overrun_mask )
         scif_writew(uart, params->overrun_reg, ~params->overrun_mask);
+
+    if ( (rc = setup_irq(uart->irq, 0, &uart->irqaction)) != 0 )
+    {
+        dprintk(XENLOG_ERR, "Failed to allocated scif_uart IRQ %u\n",
+                uart->irq);
+        /* Do not unmask interrupts if irq handler wasn't set */
+        return;
+    }
 
     /* Enable TX/RX and Error Interrupts  */
     scif_writew(uart, SCIF_SCSCR, scif_readw(uart, SCIF_SCSCR) |
@@ -271,6 +282,31 @@ static void scif_uart_stop_tx(struct serial_port *port)
     scif_writew(uart, SCIF_SCSCR, scif_readw(uart, SCIF_SCSCR) & ~SCSCR_TIE);
 }
 
+#ifdef CONFIG_SYSTEM_SUSPEND
+
+static void scif_uart_suspend(struct serial_port *port)
+{
+    struct scif_uart *uart = port->uart;
+
+    scif_uart_stop_tx(port);
+    scif_uart_disable(uart);
+}
+
+static void scif_uart_resume(struct serial_port *port)
+{
+    struct scif_uart *uart = port->uart;
+    const struct port_params *params = uart->params;
+    uint16_t ctrl;
+
+    scif_uart_init_preirq(port);
+
+    /* Enable TX/RX and Error Interrupts  */
+    ctrl = scif_readw(uart, SCIF_SCSCR);
+    scif_writew(uart, SCIF_SCSCR, ctrl | params->irq_flags);
+}
+
+#endif /* CONFIG_SYSTEM_SUSPEND */
+
 static struct uart_driver __read_mostly scif_uart_driver = {
     .init_preirq  = scif_uart_init_preirq,
     .init_postirq = scif_uart_init_postirq,
@@ -281,6 +317,10 @@ static struct uart_driver __read_mostly scif_uart_driver = {
     .start_tx     = scif_uart_start_tx,
     .stop_tx      = scif_uart_stop_tx,
     .vuart_info   = scif_vuart_info,
+#ifdef CONFIG_SYSTEM_SUSPEND
+    .suspend      = scif_uart_suspend,
+    .resume       = scif_uart_resume,
+#endif
 };
 
 static const struct dt_device_match scif_uart_dt_match[] __initconst =

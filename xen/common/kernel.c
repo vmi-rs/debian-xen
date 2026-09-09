@@ -67,8 +67,9 @@ static int assign_integer_param(const struct kernel_param *param, uint64_t val)
     return 0;
 }
 
-static int parse_params(const char *cmdline, const struct kernel_param *start,
-                        const struct kernel_param *end)
+static int __init parse_params(
+    const char *cmdline, const struct kernel_param *start,
+    const struct kernel_param *end)
 {
     char opt[MAX_PARAM_SIZE], *optval, *optkey, *q;
     const char *p = cmdline, *key;
@@ -482,13 +483,13 @@ static int __init cf_check buildinfo_init(void)
 }
 __initcall(buildinfo_init);
 
-static HYPFS_DIR_INIT(params, "params");
+static HYPFS_DIR_INIT(params_dir, "params");
 
 static int __init cf_check param_init(void)
 {
     struct param_hypfs *param;
 
-    hypfs_add_dir(&hypfs_root, &params, true);
+    hypfs_add_dir(&hypfs_root, &params_dir, true);
 
     for ( param = __paramhypfs_start; param < __paramhypfs_end; param++ )
     {
@@ -496,7 +497,7 @@ static int __init cf_check param_init(void)
             param->init_leaf(param);
         else if ( param->hypfs.e.type == XEN_HYPFS_TYPE_STRING )
             param->hypfs.e.size = strlen(param->hypfs.u.content) + 1;
-        hypfs_add_leaf(&params, &param->hypfs, true);
+        hypfs_add_leaf(&params_dir, &param->hypfs, true);
     }
 
     return 0;
@@ -509,21 +510,15 @@ static long xenver_varbuf_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     struct xen_varbuf user_str;
     const char *str = NULL;
     size_t sz;
-    int rc;
 
     switch ( cmd )
     {
     case XENVER_build_id:
-    {
-        unsigned int local_sz;
-
-        rc = xen_build_id((const void **)&str, &local_sz);
-        if ( rc )
-            return rc;
-
-        sz = local_sz;
+        str = xen_build_id;
+        sz  = xen_build_id_len;
+        if ( !sz )
+            return -ENODATA;
         goto have_len;
-    }
 
     case XENVER_extraversion2:
         str = xen_extra_version();

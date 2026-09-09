@@ -3,6 +3,10 @@
  * is intended to be included by common/efi/boot.c _only_, and
  * therefore can define arch specific global variables.
  */
+
+#ifndef X86_EFI_EFI_BOOT_H
+#define X86_EFI_EFI_BOOT_H
+
 #include <xen/vga.h>
 
 #include <asm/boot-helpers.h>
@@ -280,18 +284,19 @@ static void __init noreturn efi_arch_post_exit_boot(void)
 }
 
 static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
-                                           EFI_FILE_HANDLE dir_handle,
+                                           EFI_FILE_HANDLE *dir_handle,
                                            const char *section)
 {
 }
 
 static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
-                                          EFI_FILE_HANDLE dir_handle,
+                                          EFI_FILE_HANDLE *dir_handle,
                                           const char *section)
 {
     union string name;
 
-    if ( read_section(image, L"ucode", &ucode, NULL) )
+    if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) ||
+         read_section(image, L"ucode", &ucode, NULL) )
         return;
 
     name.s = get_value(&cfg, section, "ucode");
@@ -299,9 +304,12 @@ static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
         name.s = get_value(&cfg, "global", "ucode");
     if ( name.s )
     {
+        CHAR16 *fname;
+
         microcode_set_module(mbi.mods_count);
         split_string(name.s);
-        read_file(dir_handle, s2w(&name), &ucode, NULL);
+        ensure_dir_handle(image, dir_handle, &fname);
+        read_file(*dir_handle, s2w(&name), &ucode, NULL);
         efi_bs->FreePool(name.w);
     }
 }
@@ -765,7 +773,7 @@ static void __init efi_arch_blexit(void)
         efi_bs->FreePages(ucode.addr, PFN_UP(ucode.size));
 }
 
-static void __init efi_arch_halt(void)
+static void noreturn __init efi_arch_halt(void)
 {
     local_irq_disable();
     for ( ; ; )
@@ -907,6 +915,8 @@ void __init efi_multiboot2(EFI_HANDLE ImageHandle,
 
     efi_exit_boot(ImageHandle, SystemTable);
 }
+
+#endif /* X86_EFI_EFI_BOOT_H */
 
 /*
  * Local variables:

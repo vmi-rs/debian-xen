@@ -1,9 +1,9 @@
 ######################################
-__  __            _  _    ____   ___
-\ \/ /___ _ __   | || |  |___ \ / _ \
- \  // _ \ '_ \  | || |_   __) | | | |
- /  \  __/ | | | |__   _| / __/| |_| |
-/_/\_\___|_| |_|    |_|(_)_____|\___/
+__  __            _  _    ____  ____
+\ \/ /___ _ __   | || |  |___ \|___ \
+ \  // _ \ '_ \  | || |_   __) | __) |
+ /  \  __/ | | | |__   _| / __/ / __/|
+/_/\_\___|_| |_|    |_|(_)_____|_____|
 
 ######################################
 
@@ -38,22 +38,23 @@ provided by your OS distributor:
     * GNU Make v3.80 or later
     * C compiler and linker:
       - For x86:
-        - GCC 4.1.2_20070115 or later
-        - GNU Binutils 2.16.91.0.5 or later
-        or
-        - Clang/LLVM 3.5 or later
-      - For ARM 32-bit:
-        - GCC 4.9 or later
-        - GNU Binutils 2.24 or later
-      - For ARM 64-bit:
         - GCC 5.1 or later
-        - GNU Binutils 2.24 or later
+        - GNU Binutils 2.25 or later
+        or
+        - Clang/LLVM 11 or later
+      - For ARM:
+        - GCC 5.1 or later
+        - GNU Binutils 2.25 or later
+      - For RISC-V 64-bit:
+        - GCC 12.2 or later
+        - GNU Binutils 2.39 or later
     * POSIX compatible awk
     * Development install of zlib (e.g., zlib-dev)
     * Development install of Python 2.7 or later (e.g., python-dev)
     * Development install of curses (e.g., libncurses-dev)
     * Development install of uuid (e.g. uuid-dev)
-    * Development install of yajl (e.g. libyajl-dev)
+    * Development install of json-c 0.15 or later (e.g. libjson-c-dev)
+      or yajl (e.g. libyajl-dev)
     * Development install of libaio (e.g. libaio-dev) version 0.3.107 or
       greater.
     * Development install of GLib v2.0 (e.g. libglib2.0-dev)
@@ -80,7 +81,7 @@ disabled at compile time:
       libnl-3-dev, etc).  Required if network buffering is desired
       when using Remus with libxl.  See docs/README.remus for detailed
       information.
-    * 16-bit x86 assembler, loader and compiler for qemu-traditional / rombios
+    * 16-bit x86 assembler, loader and compiler for rombios
       (dev86 rpm or bin86 & bcc debs)
     * Development install of liblzma for rombios
     * Development install of libbz2, liblzma, liblzo2, and libzstd for DomU

@@ -494,9 +494,32 @@ retry_transaction:
     if (!xs_transaction_end(ctx->xsh, t, 0))
         if (errno == EAGAIN)
             goto retry_transaction;
+
+    if (info->xenstore_feature_mask != ~0U) {
+        unsigned int features;
+
+        if (xs_get_features_supported(ctx->xsh, &features) &&
+            !xs_set_features_domain(ctx->xsh, domid,
+                                    features & info->xenstore_feature_mask)) {
+            LOGED(ERROR, domid, "Failed to set Xenstore features");
+            rc = ERROR_FAIL;
+            goto out;
+        }
+    }
+
     xs_introduce_domain(ctx->xsh, domid, state->store_mfn, state->store_port);
+
+    if (info->xenstore_quota.num_quota) {
+        rc = libxl_xs_quota_domain_set(ctx, domid, &info->xenstore_quota);
+        if (rc) {
+            LOGED(ERROR, domid, "Failed to set Xenstore quota");
+            goto out;
+        }
+    }
+
+ out:
     free(vm_path);
-    return 0;
+    return rc;
 }
 
 static int set_vnuma_info(libxl__gc *gc, uint32_t domid,
@@ -819,6 +842,15 @@ static int hvm_build_set_xs_values(libxl__gc *gc,
             goto err;
     }
 
+    if (info->type == LIBXL_DOMAIN_TYPE_HVM) {
+        path = GCSPRINTF("/local/domain/%d/" HVM_XS_XEN_PLATFORM_PCI_BAR_UC,
+                         domid);
+        ret = libxl__xs_printf(gc, XBT_NULL, path, "%d",
+            libxl_defbool_val(info->u.hvm.xen_platform_pci_bar_uc));
+        if (ret)
+            goto err;
+    }
+
     return 0;
 
 err:
@@ -881,7 +913,6 @@ static int libxl__domain_firmware(libxl__gc *gc,
             switch (info->device_model_version)
             {
             case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN:
-            case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL:
                 firmware = "hvmloader";
                 break;
             default:
@@ -1210,15 +1241,6 @@ out:
     assert(rc != 0);
     if (dom != NULL) xc_dom_release(dom);
     return rc;
-}
-
-int libxl__qemu_traditional_cmd(libxl__gc *gc, uint32_t domid,
-                                const char *cmd)
-{
-    char *path = NULL;
-    uint32_t dm_domid = libxl_get_stubdom_id(CTX, domid);
-    path = DEVICE_MODEL_XS_PATH(gc, dm_domid, domid, "/command");
-    return libxl__xs_printf(gc, XBT_NULL, path, "%s", cmd);
 }
 
 /*==================== Miscellaneous ====================*/

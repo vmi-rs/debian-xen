@@ -23,6 +23,7 @@ RUN <<EOF
 
         # Tools (general)
         ca-certificates
+        cpio
         git-core
         pkg-config
         wget
@@ -37,7 +38,7 @@ RUN <<EOF
         python3-dev
         python3-setuptools
         # Ocaml bindings/oxenstored
-        ocaml-nox
+        ocaml
         ocaml-findlib
     )
 

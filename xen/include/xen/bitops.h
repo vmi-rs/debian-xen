@@ -299,7 +299,7 @@ static always_inline attr_const unsigned int fls64(uint64_t x)
  * A copy of @val is taken internally.
  */
 #define for_each_set_bit(iter, val)                     \
-    for ( typeof(val) __v = (val); __v; __v = 0 )       \
+    for ( auto __v = (val); __v; __v = 0 )              \
         for ( unsigned int (iter);                      \
               __v && ((iter) = ffs_g(__v) - 1, true);   \
               __v &= __v - 1 )
@@ -310,7 +310,7 @@ static always_inline attr_const unsigned int fls64(uint64_t x)
  */
 #define multiple_bits_set(x)                    \
     ({                                          \
-        typeof(x) _v = (x);                     \
+        auto _v = (x);                          \
         (_v & (_v - 1)) != 0;                   \
     })
 
@@ -416,6 +416,12 @@ static inline int get_count_order(unsigned int count)
 static inline uint32_t rol32(uint32_t word, unsigned int shift)
 {
     return (word << shift) | (word >> (32 - shift));
+}
+
+/* ror8 - rotate an 8-bit value right */
+static inline uint8_t ror8(uint8_t value, unsigned int shift)
+{
+    return (value >> shift) | (value << (8 - shift));
 }
 
 /*

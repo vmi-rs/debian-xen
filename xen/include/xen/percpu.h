@@ -29,7 +29,7 @@
 
 #include <asm/percpu.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/types.h>
 #include <asm/current.h>
@@ -43,6 +43,7 @@
 #endif
 
 extern unsigned long __per_cpu_offset[];
+extern char __per_cpu_start[];
 
 #define per_cpu(var, cpu)  \
     (*RELOC_HIDE(&per_cpu__##var, __per_cpu_offset[cpu]))
@@ -57,7 +58,7 @@ extern unsigned long __per_cpu_offset[];
 
 void percpu_init_areas(void);
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 /* Linux compatibility. */
 #define get_cpu_var(var) this_cpu(var)

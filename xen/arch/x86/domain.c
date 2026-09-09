@@ -11,66 +11,71 @@
  *  Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
-#include <xen/init.h>
-#include <xen/lib.h>
-#include <xen/errno.h>
-#include <xen/sched.h>
-#include <xen/domain.h>
-#include <xen/smp.h>
-#include <xen/delay.h>
-#include <xen/softirq.h>
-#include <xen/grant_table.h>
-#include <xen/iocap.h>
-#include <xen/kernel.h>
-#include <xen/hypercall.h>
-#include <xen/multicall.h>
-#include <xen/irq.h>
-#include <xen/event.h>
-#include <xen/console.h>
-#include <xen/percpu.h>
-#include <xen/compat.h>
 #include <xen/acpi.h>
-#include <xen/pci.h>
-#include <xen/paging.h>
+#include <xen/compat.h>
+#include <xen/console.h>
 #include <xen/cpu.h>
-#include <xen/wait.h>
+#include <xen/delay.h>
+#include <xen/domain.h>
+#include <xen/errno.h>
+#include <xen/event.h>
+#include <xen/grant_table.h>
 #include <xen/guest_access.h>
+#include <xen/hypercall.h>
+#include <xen/init.h>
+#include <xen/iocap.h>
+#include <xen/iommu.h>
+#include <xen/irq.h>
+#include <xen/kernel.h>
+#include <xen/lib.h>
 #include <xen/livepatch.h>
-#include <public/arch-x86/cpuid.h>
-#include <public/sysctl.h>
-#include <public/hvm/hvm_vcpu.h>
-#include <asm/regs.h>
-#include <asm/mc146818rtc.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/processor.h>
-#include <asm/desc.h>
-#include <asm/i387.h>
-#include <asm/xstate.h>
+#include <xen/multicall.h>
+#include <xen/numa.h>
+#include <xen/paging.h>
+#include <xen/pci.h>
+#include <xen/percpu.h>
+#include <xen/sched.h>
+#include <xen/smp.h>
+#include <xen/softirq.h>
+#include <xen/wait.h>
+
+#include <asm/amd.h>
+#include <asm/cpu-policy.h>
 #include <asm/cpuidle.h>
-#include <asm/mpspec.h>
-#include <asm/ldt.h>
+#include <asm/debugreg.h>
+#include <asm/desc.h>
+#include <asm/fsgsbase.h>
+#include <asm/guest-msr.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/nestedhvm.h>
-#include <asm/hvm/svm/svm.h>
+#include <asm/hvm/svm.h>
 #include <asm/hvm/viridian.h>
-#include <asm/debugreg.h>
-#include <asm/msr.h>
-#include <asm/spec_ctrl.h>
-#include <asm/traps.h>
-#include <asm/nmi.h>
+#include <asm/i387.h>
+#include <asm/idt.h>
+#include <asm/io.h>
+#include <asm/ldt.h>
+#include <asm/mc146818rtc.h>
 #include <asm/mce.h>
-#include <asm/amd.h>
-#include <xen/numa.h>
-#include <xen/iommu.h>
-#ifdef CONFIG_COMPAT
-#include <compat/vcpu.h>
-#endif
-#include <asm/cpu-policy.h>
+#include <asm/mpspec.h>
+#include <asm/msr.h>
+#include <asm/nmi.h>
+#include <asm/processor.h>
 #include <asm/psr.h>
 #include <asm/pv/domain.h>
 #include <asm/pv/mm.h>
+#include <asm/regs.h>
 #include <asm/spec_ctrl.h>
+#include <asm/system.h>
+#include <asm/traps.h>
+#include <asm/xstate.h>
+
+#include <public/arch-x86/cpuid.h>
+#include <public/hvm/hvm_vcpu.h>
+#include <public/sysctl.h>
+
+#ifdef CONFIG_COMPAT
+#include <compat/vcpu.h>
+#endif
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
 
@@ -113,7 +118,7 @@ void play_dead(void)
     local_irq_disable();
 
     /* Change the NMI handler to a nop (see comment below). */
-    _set_gate_lower(&idt_tables[cpu][X86_EXC_NMI], SYS_DESC_irq_gate, 0,
+    _set_gate_lower(&this_cpu(idt)[X86_EXC_NMI], SYS_DESC_irq_gate, 0,
                     &trap_nop);
 
     /*
@@ -298,7 +303,7 @@ void domain_cpu_policy_changed(struct domain *d)
 
     if ( is_pv_domain(d) )
     {
-        if ( ((levelling_caps & LCAP_1cd) == LCAP_1cd) )
+        if ( levelling_caps & LCAP_1cd )
         {
             uint64_t mask = cpuidmask_defaults._1cd;
             uint32_t ecx = p->basic._1c;
@@ -314,7 +319,7 @@ void domain_cpu_policy_changed(struct domain *d)
             if ( cpu_has_htt )
                 edx |= cpufeat_mask(X86_FEATURE_HTT);
 
-            switch ( boot_cpu_data.x86_vendor )
+            switch ( boot_cpu_data.vendor )
             {
             case X86_VENDOR_INTEL:
                 /*
@@ -363,17 +368,17 @@ void domain_cpu_policy_changed(struct domain *d)
             d->arch.pv.cpuidmasks->_1cd = mask;
         }
 
-        if ( ((levelling_caps & LCAP_6c) == LCAP_6c) )
+        if ( levelling_caps & LCAP_6c )
         {
             uint64_t mask = cpuidmask_defaults._6c;
 
-            if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
+            if ( boot_cpu_data.vendor == X86_VENDOR_AMD )
                 mask &= (~0ULL << 32) | p->basic.raw[6].c;
 
             d->arch.pv.cpuidmasks->_6c = mask;
         }
 
-        if ( ((levelling_caps & LCAP_7ab0) == LCAP_7ab0) )
+        if ( levelling_caps & LCAP_7ab0 )
         {
             uint64_t mask = cpuidmask_defaults._7ab0;
 
@@ -382,7 +387,7 @@ void domain_cpu_policy_changed(struct domain *d)
              * wholesale from the policy, but clamp the features in 7[0].ebx
              * per usual.
              */
-            if ( boot_cpu_data.x86_vendor &
+            if ( boot_cpu_data.vendor &
                  (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
                 mask = (((uint64_t)p->feat.max_subleaf << 32) |
                         ((uint32_t)mask & p->feat._7b0));
@@ -390,18 +395,18 @@ void domain_cpu_policy_changed(struct domain *d)
             d->arch.pv.cpuidmasks->_7ab0 = mask;
         }
 
-        if ( ((levelling_caps & LCAP_Da1) == LCAP_Da1) )
+        if ( levelling_caps & LCAP_Da1 )
         {
             uint64_t mask = cpuidmask_defaults.Da1;
             uint32_t eax = p->xstate.Da1;
 
-            if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
+            if ( boot_cpu_data.vendor == X86_VENDOR_INTEL )
                 mask &= (~0ULL << 32) | eax;
 
             d->arch.pv.cpuidmasks->Da1 = mask;
         }
 
-        if ( ((levelling_caps & LCAP_e1cd) == LCAP_e1cd) )
+        if ( levelling_caps & LCAP_e1cd )
         {
             uint64_t mask = cpuidmask_defaults.e1cd;
             uint32_t ecx = p->extd.e1c;
@@ -422,7 +427,7 @@ void domain_cpu_policy_changed(struct domain *d)
             if ( !(p->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
                 edx &= ~CPUID_COMMON_1D_FEATURES;
 
-            switch ( boot_cpu_data.x86_vendor )
+            switch ( boot_cpu_data.vendor )
             {
             case X86_VENDOR_INTEL:
                 mask &= ((uint64_t)edx << 32) | ecx;
@@ -452,40 +457,14 @@ void domain_cpu_policy_changed(struct domain *d)
         cpu_policy_updated(v);
 
         /* If PMU version is zero then the guest doesn't have VPMU */
-        if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
+        if ( boot_cpu_data.vendor == X86_VENDOR_INTEL &&
              p->basic.pmu_version == 0 )
             vpmu_destroy(v);
     }
 }
 
-#if !defined(CONFIG_BIGMEM) && defined(CONFIG_PDX_COMPRESSION)
-/*
- * The hole may be at or above the 44-bit boundary, so we need to determine
- * the total bit count until reaching 32 significant (not squashed out) bits
- * in PFN representations.
- * Note that the way "bits" gets initialized/updated/bounds-checked guarantees
- * that the function will never return zero, and hence will never be called
- * more than once (which is important due to it being deliberately placed in
- * .init.text).
- */
-static unsigned int __init noinline _domain_struct_bits(void)
+unsigned int arch_domain_struct_memflags(void)
 {
-    unsigned int bits = 32 + PAGE_SHIFT;
-    unsigned int sig = hweight32(~pfn_hole_mask);
-    unsigned int mask = pfn_hole_mask >> 32;
-
-    for ( ; bits < BITS_PER_LONG && sig < 32; ++bits, mask >>= 1 )
-        if ( !(mask & 1) )
-            ++sig;
-
-    return bits;
-}
-#endif
-
-struct domain *alloc_domain_struct(void)
-{
-    struct domain *d;
-
     /*
      * Without CONFIG_BIGMEM, we pack the PDX of the domain structure into
      * a 32-bit field within the page_info structure. Hence the MEMF_bits()
@@ -495,50 +474,23 @@ struct domain *alloc_domain_struct(void)
      * On systems with CONFIG_BIGMEM there's no packing, and so there's no
      * such restriction.
      */
-#if defined(CONFIG_BIGMEM) || !defined(CONFIG_PDX_COMPRESSION)
-    const unsigned int bits = IS_ENABLED(CONFIG_BIGMEM) ? 0 :
-                                                          32 + PAGE_SHIFT;
+#if defined(CONFIG_BIGMEM)
+    const unsigned int bits = 0;
 #else
-    static unsigned int __read_mostly bits;
+    static unsigned int __ro_after_init bits;
 
     if ( unlikely(!bits) )
-         bits = _domain_struct_bits();
+         /*
+          * Get the width for the next pfn, and unconditionally subtract one
+          * from it to ensure the used width will not allocate past the PDX
+          * field limit.
+          */
+         bits = flsl(pdx_to_paddr(1UL <<
+                                  (sizeof(frame_table->v.inuse._domain) * 8)))
+                - 1;
 #endif
 
-    BUILD_BUG_ON(sizeof(*d) > PAGE_SIZE);
-    d = alloc_xenheap_pages(0, MEMF_bits(bits));
-    if ( d != NULL )
-        clear_page(d);
-    return d;
-}
-
-void free_domain_struct(struct domain *d)
-{
-    free_xenheap_page(d);
-}
-
-struct vcpu *alloc_vcpu_struct(const struct domain *d)
-{
-    struct vcpu *v;
-    /*
-     * This structure contains embedded PAE PDPTEs, used when an HVM guest
-     * runs on shadow pagetables outside of 64-bit mode. In this case the CPU
-     * may require that the shadow CR3 points below 4GB, and hence the whole
-     * structure must satisfy this restriction. Thus we specify MEMF_bits(32).
-     */
-    unsigned int memflags =
-        (is_hvm_domain(d) && paging_mode_shadow(d)) ? MEMF_bits(32) : 0;
-
-    BUILD_BUG_ON(sizeof(*v) > PAGE_SIZE);
-    v = alloc_xenheap_pages(0, memflags);
-    if ( v != NULL )
-        clear_page(v);
-    return v;
-}
-
-void free_vcpu_struct(struct vcpu *v)
-{
-    free_xenheap_page(v);
+    return MEMF_bits(bits);
 }
 
 /* Initialise various registers to their architectural INIT/RESET state. */
@@ -584,14 +536,19 @@ int arch_vcpu_create(struct vcpu *v)
 
     if ( is_hvm_domain(d) )
         rc = hvm_vcpu_initialise(v);
-    else if ( !is_idle_domain(d) )
-        rc = pv_vcpu_initialise(v);
-    else
+    else if ( is_idle_domain(d) )
     {
         /* Idle domain */
         v->arch.cr3 = __pa(idle_pg_table);
         rc = 0;
         v->arch.msrs = ZERO_BLOCK_PTR; /* Catch stray misuses */
+    }
+    else if ( IS_ENABLED(CONFIG_PV) )
+        rc = pv_vcpu_initialise(v);
+    else
+    {
+        ASSERT_UNREACHABLE();
+        rc = -EOPNOTSUPP;
     }
 
     if ( rc )
@@ -627,8 +584,10 @@ void arch_vcpu_destroy(struct vcpu *v)
 
     if ( is_hvm_vcpu(v) )
         hvm_vcpu_destroy(v);
-    else
+    else if ( IS_ENABLED(CONFIG_PV) )
         pv_vcpu_destroy(v);
+    else
+        ASSERT_UNREACHABLE();
 }
 
 int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
@@ -637,7 +596,7 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
     bool hap = config->flags & XEN_DOMCTL_CDF_hap;
     bool nested_virt = config->flags & XEN_DOMCTL_CDF_nested_virt;
     unsigned int max_vcpus;
-    unsigned int altp2m_mode = MASK_EXTR(config->altp2m_opts,
+    unsigned int altp2m_mode = MASK_EXTR(config->altp2m.opts,
                                          XEN_DOMCTL_ALTP2M_mode_mask);
 
     if ( hvm ? !hvm_enabled : !IS_ENABLED(CONFIG_PV) )
@@ -665,6 +624,12 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
     if ( hap && !hvm_hap_supported() )
     {
         dprintk(XENLOG_INFO, "HAP requested but not available\n");
+        return -EINVAL;
+    }
+
+    if ( hvm && !hap && !IS_ENABLED(CONFIG_SHADOW_PAGING) )
+    {
+        dprintk(XENLOG_INFO, "Shadow paging requested but not available\n");
         return -EINVAL;
     }
 
@@ -710,6 +675,13 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
         }
     }
 
+    if ( config->flags & XEN_DOMCTL_CDF_trap_unmapped_accesses )
+    {
+        dprintk(XENLOG_INFO, "Unsupported trap_unmapped_accesses flag %#x\n",
+                config->flags);
+        return -EINVAL;
+    }
+
     if ( config->arch.misc_flags & ~XEN_X86_MSR_RELAXED )
     {
         dprintk(XENLOG_INFO, "Invalid arch misc flags %#x\n",
@@ -717,55 +689,125 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
         return -EINVAL;
     }
 
-    if ( config->altp2m_opts & ~XEN_DOMCTL_ALTP2M_mode_mask )
+    if ( config->altp2m.opts & ~XEN_DOMCTL_ALTP2M_mode_mask )
     {
         dprintk(XENLOG_INFO, "Invalid altp2m options selected: %#x\n",
                 config->flags);
         return -EINVAL;
     }
 
-    if ( altp2m_mode && nested_virt )
+    if ( altp2m_mode )
     {
-        dprintk(XENLOG_INFO,
-                "Nested virt and altp2m are not supported together\n");
-        return -EINVAL;
-    }
+        if ( !hvm_altp2m_supported() )
+        {
+            dprintk(XENLOG_INFO, "altp2m is not supported\n");
+            return -EINVAL;
+        }
 
-    if ( altp2m_mode && !hap )
+        if ( !hap )
+        {
+            dprintk(XENLOG_INFO, "altp2m is only supported with HAP\n");
+            return -EINVAL;
+        }
+
+        if ( nested_virt )
+        {
+            dprintk(XENLOG_INFO,
+                    "Nested virt and altp2m are not supported together\n");
+            return -EINVAL;
+        }
+
+        if ( !config->altp2m.nr )
+        {
+            dprintk(XENLOG_INFO,
+                    "altp2m must be requested with altp2m.nr > 0\n");
+            return -EINVAL;
+        }
+
+        if ( config->altp2m.nr > MAX_NR_ALTP2M )
+        {
+            dprintk(XENLOG_INFO, "altp2m.nr must be <= %lu\n", MAX_NR_ALTP2M);
+            return -EINVAL;
+        }
+    }
+    else if ( config->altp2m.nr )
     {
-        dprintk(XENLOG_INFO, "altp2m is only supported with HAP\n");
+        dprintk(XENLOG_INFO, "altp2m.nr must be zero when altp2m is off\n");
         return -EINVAL;
     }
 
     return 0;
 }
 
+/*
+ * Verify that the domain's emulation flags resolve to a supported configuration.
+ *
+ * This ensures we only allow a known, safe subset of emulation combinations
+ * (for both functionality and security). Arbitrary mixes are likely to cause
+ * errors (e.g. null pointer dereferences).
+ *
+ * NB: use the internal X86_EMU_XXX symbols, not the public XEN_X86_EMU_XXX
+ * symbols, to take build-time config options (e.g. CONFIG_HVM) into account
+ * for short-circuited emulations.
+ */
 static bool emulation_flags_ok(const struct domain *d, uint32_t emflags)
 {
+    enum {
+        CAP_PV          = BIT(0, U),
+        CAP_HVM         = BIT(1, U),
+        CAP_HWDOM       = BIT(2, U),
+        CAP_DOMU        = BIT(3, U),
+    };
+    static const struct {
+        unsigned int caps;
+        uint32_t min;
+        uint32_t opt;
+    } configs[] = {
+#ifdef CONFIG_PV
+        /* PV dom0 and domU */
+        {
+            .caps   = CAP_PV | CAP_HWDOM | CAP_DOMU,
+            .opt    = X86_EMU_PIT,
+        },
+#endif /* #ifdef CONFIG_PV */
+
+#ifdef CONFIG_HVM
+        /* PVH dom0 */
+        {
+            .caps   = CAP_HVM | CAP_HWDOM,
+            .min    = X86_EMU_LAPIC | X86_EMU_IOAPIC | X86_EMU_VPCI,
+        },
+
+        /* PVH domU */
+        {
+            .caps   = CAP_HVM | CAP_DOMU,
+            .min    = X86_EMU_LAPIC,
+        },
+
+        /* HVM domU */
+        {
+            .caps   = CAP_HVM | CAP_DOMU,
+            .min    = X86_EMU_ALL & ~(X86_EMU_VPCI | X86_EMU_USE_PIRQ),
+            /* HVM PIRQ feature is user-selectable. */
+            .opt    = X86_EMU_USE_PIRQ,
+        },
+#endif /* #ifdef CONFIG_HVM */
+    };
+    unsigned int i;
+    unsigned int caps = (is_pv_domain(d) ? CAP_PV : CAP_HVM) |
+                        (is_hardware_domain(d) ? CAP_HWDOM : CAP_DOMU);
+
 #ifdef CONFIG_HVM
     /* This doesn't catch !CONFIG_HVM case but it is better than nothing */
     BUILD_BUG_ON(X86_EMU_ALL != XEN_X86_EMU_ALL);
 #endif
 
-    if ( is_hvm_domain(d) )
-    {
-        if ( is_hardware_domain(d) &&
-             emflags != (X86_EMU_VPCI | X86_EMU_LAPIC | X86_EMU_IOAPIC) )
-            return false;
-        if ( !is_hardware_domain(d) &&
-             /* HVM PIRQ feature is user-selectable. */
-             (emflags & ~X86_EMU_USE_PIRQ) !=
-             (X86_EMU_ALL & ~(X86_EMU_VPCI | X86_EMU_USE_PIRQ)) &&
-             emflags != X86_EMU_LAPIC )
-            return false;
-    }
-    else if ( emflags != 0 && emflags != X86_EMU_PIT )
-    {
-        /* PV or classic PVH. */
-        return false;
-    }
+    for ( i = 0; i < ARRAY_SIZE(configs); i++ )
+        if ( (caps & configs[i].caps) == caps &&
+             (emflags & ~configs[i].opt) == configs[i].min )
+            return true;
 
-    return true;
+    return false;
 }
 
 void __init arch_init_idle_domain(struct domain *d)
@@ -795,13 +837,14 @@ int arch_domain_create(struct domain *d,
     {
         if ( !opt_allow_unsafe )
         {
-            printk(XENLOG_G_ERR "Xen does not allow DomU creation on this CPU"
-                   " for security reasons.\n");
+            printk(XENLOG_G_ERR
+                   "%pd: will not create domU on this CPU for security reasons\n",
+                   d);
             return -EPERM;
         }
         printk(XENLOG_G_WARNING
-               "Dom%d may compromise security on this CPU.\n",
-               d->domain_id);
+               "%pd: may compromise security on this CPU\n",
+               d);
     }
 
     emflags = config->arch.emulation_flags;
@@ -811,24 +854,23 @@ int arch_domain_create(struct domain *d,
 
     if ( emflags & ~XEN_X86_EMU_ALL )
     {
-        printk(XENLOG_G_ERR "d%d: Invalid emulation bitmap: %#x\n",
-               d->domain_id, emflags);
+        printk(XENLOG_G_ERR
+               "%pd: invalid emulation bitmap: %#x\n",
+               d, emflags);
         return -EINVAL;
     }
 
     if ( !emulation_flags_ok(d, emflags) )
     {
-        printk(XENLOG_G_ERR "d%d: Xen does not allow %s domain creation "
-               "with the current selection of emulators: %#x\n",
-               d->domain_id, is_hvm_domain(d) ? "HVM" : "PV", emflags);
+        printk(XENLOG_G_ERR
+               "%pd: will not create %s %sdomain with emulators: %#x\n",
+               d,
+               is_hvm_domain(d) ? "HVM" : "PV",
+               is_hardware_domain(d) ? "hardware " : "",
+               emflags);
         return -EOPNOTSUPP;
     }
     d->arch.emulation_flags = emflags;
-
-#ifdef CONFIG_PV32
-    HYPERVISOR_COMPAT_VIRT_START(d) =
-        is_pv_domain(d) ? __HYPERVISOR_COMPAT_VIRT_START : ~0u;
-#endif
 
     spec_ctrl_init_domain(d);
 
@@ -957,6 +999,7 @@ void arch_domain_unpause(struct domain *d)
         viridian_time_domain_thaw(d);
 }
 
+#ifdef CONFIG_HAS_SOFT_RESET
 int arch_domain_soft_reset(struct domain *d)
 {
     struct page_info *page = virt_to_page(d->shared_info), *new_page;
@@ -1058,6 +1101,7 @@ int arch_domain_soft_reset(struct domain *d)
 
     return ret;
 }
+#endif /* CONFIG_HAS_SOFT_RESET */
 
 void arch_domain_creation_finished(struct domain *d)
 {
@@ -1149,6 +1193,14 @@ int arch_set_info_guest(
 
             if ( !__addr_ok(c.nat->ldt_base) )
                 return -EINVAL;
+
+            /*
+             * IRET in Long Mode discards EFLAGS.VM, but in FRED mode ERET
+             * cares that it is zero.
+             *
+             * Guests can't see FRED, so emulate IRET behaviour.
+             */
+            c.nat->user_regs.rflags &= ~X86_EFLAGS_VM;
         }
 #ifdef CONFIG_COMPAT
         else
@@ -1161,6 +1213,18 @@ int arch_set_info_guest(
 
             for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); i++ )
                 fixup_guest_code_selector(d, c.cmp->trap_ctxt[i].cs);
+
+            /*
+             * Under 32bit Xen, PV guests could really use vm86 mode.  Under
+             * 64bit Xen, vm86 mode can't be entered even by PV32 guests.
+             *
+             * For backwards compatibility, compat HYPERCALL_iret will arrange
+             * to deliver #GP at the target of the IRET rather than to fail
+             * the IRET itself, but we can't arrange for the same behaviour
+             * here.  Reject the hypercall as the next best option.
+             */
+            if ( c.cmp->user_regs.eflags & X86_EFLAGS_VM )
+                return -EINVAL;
         }
 #endif
 
@@ -1182,14 +1246,40 @@ int arch_set_info_guest(
          is_pv_64bit_domain(d) )
         v->arch.flags &= ~TF_kernel_mode;
 
-    if ( flags & VGCF_I387_VALID )
+    if ( flags & VGCF_i387_valid )
         vcpu_setup_fpu(v, &c.nat->fpu_ctxt);
     else
         vcpu_reset_fpu(v);
 
+    memset(&v->arch.user_regs, 0, sizeof(v->arch.user_regs));
+
     if ( !compat )
     {
-        memcpy(&v->arch.user_regs, &c.nat->user_regs, sizeof(c.nat->user_regs));
+        v->arch.user_regs.r15               = c.nat->user_regs.r15;
+        v->arch.user_regs.r14               = c.nat->user_regs.r14;
+        v->arch.user_regs.r13               = c.nat->user_regs.r13;
+        v->arch.user_regs.r12               = c.nat->user_regs.r12;
+        v->arch.user_regs.r11               = c.nat->user_regs.r11;
+        v->arch.user_regs.r10               = c.nat->user_regs.r10;
+        v->arch.user_regs.r9                = c.nat->user_regs.r9;
+        v->arch.user_regs.r8                = c.nat->user_regs.r8;
+        v->arch.user_regs.rbx               = c.nat->user_regs.rbx;
+        v->arch.user_regs.rcx               = c.nat->user_regs.rcx;
+        v->arch.user_regs.rdx               = c.nat->user_regs.rdx;
+        v->arch.user_regs.rsi               = c.nat->user_regs.rsi;
+        v->arch.user_regs.rdi               = c.nat->user_regs.rdi;
+        v->arch.user_regs.rbp               = c.nat->user_regs.rbp;
+        v->arch.user_regs.rax               = c.nat->user_regs.rax;
+        v->arch.user_regs.rip               = c.nat->user_regs.rip;
+        v->arch.user_regs.cs                = c.nat->user_regs.cs;
+        v->arch.user_regs.rflags            = (c.nat->user_regs.rflags & X86_EFLAGS_ALL) | X86_EFLAGS_MBS;
+        v->arch.user_regs.rsp               = c.nat->user_regs.rsp;
+        v->arch.user_regs.ss                = c.nat->user_regs.ss;
+        v->arch.pv.es                       = c.nat->user_regs.es;
+        v->arch.pv.ds                       = c.nat->user_regs.ds;
+        v->arch.pv.fs                       = c.nat->user_regs.fs;
+        v->arch.pv.gs                       = c.nat->user_regs.gs;
+
         if ( is_pv_domain(d) )
             memcpy(v->arch.pv.trap_ctxt, c.nat->trap_ctxt,
                    sizeof(c.nat->trap_ctxt));
@@ -1197,7 +1287,23 @@ int arch_set_info_guest(
 #ifdef CONFIG_COMPAT
     else
     {
-        XLAT_cpu_user_regs(&v->arch.user_regs, &c.cmp->user_regs);
+        v->arch.user_regs.ebx               = c.cmp->user_regs.ebx;
+        v->arch.user_regs.ecx               = c.cmp->user_regs.ecx;
+        v->arch.user_regs.edx               = c.cmp->user_regs.edx;
+        v->arch.user_regs.esi               = c.cmp->user_regs.esi;
+        v->arch.user_regs.edi               = c.cmp->user_regs.edi;
+        v->arch.user_regs.ebp               = c.cmp->user_regs.ebp;
+        v->arch.user_regs.eax               = c.cmp->user_regs.eax;
+        v->arch.user_regs.eip               = c.cmp->user_regs.eip;
+        v->arch.user_regs.cs                = c.cmp->user_regs.cs;
+        v->arch.user_regs.eflags            = (c.cmp->user_regs.eflags & X86_EFLAGS_ALL) | X86_EFLAGS_MBS;
+        v->arch.user_regs.esp               = c.cmp->user_regs.esp;
+        v->arch.user_regs.ss                = c.cmp->user_regs.ss;
+        v->arch.pv.es                       = c.cmp->user_regs.es;
+        v->arch.pv.ds                       = c.cmp->user_regs.ds;
+        v->arch.pv.fs                       = c.cmp->user_regs.fs;
+        v->arch.pv.gs                       = c.cmp->user_regs.gs;
+
         if ( is_pv_domain(d) )
         {
             for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); ++i )
@@ -1417,6 +1523,7 @@ int arch_set_info_guest(
         {
         case -EINTR:
             rc = -ERESTART;
+            fallthrough;
         case -ERESTART:
             break;
         case 0:
@@ -1684,7 +1791,6 @@ long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
  */
 static void load_segments(struct vcpu *n)
 {
-    struct cpu_user_regs *uregs = &n->arch.user_regs;
     unsigned long gsb = 0, gss = 0;
     bool compat = is_pv_32bit_vcpu(n);
     bool all_segs_okay = true, fs_gs_done = false;
@@ -1694,16 +1800,17 @@ static void load_segments(struct vcpu *n)
      * @all_segs_okay in function scope, and load NUL into @sel.
      */
 #define TRY_LOAD_SEG(seg, val)                          \
-    asm volatile ( "1: mov %k[_val], %%" #seg "\n\t"    \
-                   "2:\n\t"                             \
-                   ".section .fixup, \"ax\"\n\t"        \
-                   "3: xor %k[ok], %k[ok]\n\t"          \
-                   "   mov %k[ok], %%" #seg "\n\t"      \
-                   "   jmp 2b\n\t"                      \
-                   ".previous\n\t"                      \
-                   _ASM_EXTABLE(1b, 3b)                 \
-                   : [ok] "+r" (all_segs_okay)          \
-                   : [_val] "rm" (val) )
+    asm_inline volatile (                               \
+        "1: mov %k[_val], %%" #seg "\n\t"               \
+        "2:\n\t"                                        \
+        ".section .fixup, \"ax\"\n\t"                   \
+        "3: xor %k[ok], %k[ok]\n\t"                     \
+        "   mov %k[ok], %%" #seg "\n\t"                 \
+        "   jmp 2b\n\t"                                 \
+        ".previous\n\t"                                 \
+        _ASM_EXTABLE(1b, 3b)                            \
+        : [ok] "+r" (all_segs_okay)                     \
+        : [_val] "rm" (val) )
 
     if ( !compat )
     {
@@ -1712,12 +1819,13 @@ static void load_segments(struct vcpu *n)
 
         /*
          * Figure out which way around gsb/gss want to be.  gsb needs to be
-         * the active context, and gss needs to be the inactive context.
+         * the active context, and gss needs to be the inactive context,
+         * unless we're in FRED mode where they're reversed.
          */
-        if ( !(n->arch.flags & TF_kernel_mode) )
+        if ( !(n->arch.flags & TF_kernel_mode) ^ opt_fred )
             SWAP(gsb, gss);
 
-        if ( using_svm() && (uregs->fs | uregs->gs) <= 3 )
+        if ( using_svm() && (n->arch.pv.fs | n->arch.pv.gs) <= 3 )
             fs_gs_done = svm_load_segs(n->arch.pv.ldt_ents, LDT_VIRT_START(n),
                                        n->arch.pv.fs_base, gsb, gss);
     }
@@ -1726,16 +1834,18 @@ static void load_segments(struct vcpu *n)
     {
         load_LDT(n);
 
-        TRY_LOAD_SEG(fs, uregs->fs);
-        TRY_LOAD_SEG(gs, uregs->gs);
+        TRY_LOAD_SEG(fs, n->arch.pv.fs);
+        TRY_LOAD_SEG(gs, n->arch.pv.gs);
     }
 
-    TRY_LOAD_SEG(ds, uregs->ds);
-    TRY_LOAD_SEG(es, uregs->es);
+    TRY_LOAD_SEG(ds, n->arch.pv.ds);
+    TRY_LOAD_SEG(es, n->arch.pv.es);
 
     if ( !fs_gs_done && !compat )
     {
-        if ( read_cr4() & X86_CR4_FSGSBASE )
+        unsigned long cr4 = read_cr4();
+
+        if ( !(cr4 & X86_CR4_FRED) && (cr4 & X86_CR4_FSGSBASE) )
         {
             __wrgsbase(gss);
             __wrfsbase(n->arch.pv.fs_base);
@@ -1744,9 +1854,9 @@ static void load_segments(struct vcpu *n)
         }
         else
         {
-            wrmsrl(MSR_FS_BASE, n->arch.pv.fs_base);
-            wrmsrl(MSR_GS_BASE, gsb);
-            wrmsrl(MSR_SHADOW_GS_BASE, gss);
+            wrmsrns(MSR_FS_BASE, n->arch.pv.fs_base);
+            wrmsrns(MSR_GS_BASE, gsb);
+            wrmsrns(MSR_SHADOW_GS_BASE, gss);
         }
     }
 
@@ -1784,13 +1894,13 @@ static void load_segments(struct vcpu *n)
             }
 
             if ( ret |
-                 put_guest(rflags,      esp - 1) |
-                 put_guest(cs_and_mask, esp - 2) |
-                 put_guest(regs->eip,   esp - 3) |
-                 put_guest(uregs->gs,   esp - 4) |
-                 put_guest(uregs->fs,   esp - 5) |
-                 put_guest(uregs->es,   esp - 6) |
-                 put_guest(uregs->ds,   esp - 7) )
+                 put_guest(rflags,        esp - 1) |
+                 put_guest(cs_and_mask,   esp - 2) |
+                 put_guest(regs->eip,     esp - 3) |
+                 put_guest(n->arch.pv.gs, esp - 4) |
+                 put_guest(n->arch.pv.fs, esp - 5) |
+                 put_guest(n->arch.pv.es, esp - 6) |
+                 put_guest(n->arch.pv.ds, esp - 7) )
                 domain_crash(n->domain,
                              "Error creating compat failsafe callback frame\n");
 
@@ -1816,17 +1926,17 @@ static void load_segments(struct vcpu *n)
         cs_and_mask = (unsigned long)regs->cs |
             ((unsigned long)vcpu_info(n, evtchn_upcall_mask) << 32);
 
-        if ( put_guest(regs->ss,    rsp -  1) |
-             put_guest(regs->rsp,   rsp -  2) |
-             put_guest(rflags,      rsp -  3) |
-             put_guest(cs_and_mask, rsp -  4) |
-             put_guest(regs->rip,   rsp -  5) |
-             put_guest(uregs->gs,   rsp -  6) |
-             put_guest(uregs->fs,   rsp -  7) |
-             put_guest(uregs->es,   rsp -  8) |
-             put_guest(uregs->ds,   rsp -  9) |
-             put_guest(regs->r11,   rsp - 10) |
-             put_guest(regs->rcx,   rsp - 11) )
+        if ( put_guest(regs->ss,      rsp -  1) |
+             put_guest(regs->rsp,     rsp -  2) |
+             put_guest(rflags,        rsp -  3) |
+             put_guest(cs_and_mask,   rsp -  4) |
+             put_guest(regs->rip,     rsp -  5) |
+             put_guest(n->arch.pv.gs, rsp -  6) |
+             put_guest(n->arch.pv.fs, rsp -  7) |
+             put_guest(n->arch.pv.es, rsp -  8) |
+             put_guest(n->arch.pv.ds, rsp -  9) |
+             put_guest(regs->r11,     rsp - 10) |
+             put_guest(regs->rcx,     rsp - 11) )
             domain_crash(n->domain,
                          "Error creating failsafe callback frame\n");
 
@@ -1852,12 +1962,16 @@ static void load_segments(struct vcpu *n)
  * Guests however cannot use SWAPGS, so there is no mechanism to modify the
  * inactive GS base behind Xen's back.  Therefore, Xen's copy of the inactive
  * GS base is still accurate, and doesn't need reading back from hardware.
+ *
+ * Under FRED, hardware automatically swaps GS for us, so SHADOW_GS is the
+ * active GS from the guest's point of view.
  */
 static void save_segments(struct vcpu *v)
 {
-    struct cpu_user_regs *regs = &v->arch.user_regs;
-
-    read_sregs(regs);
+    asm ( "mov %%ds, %0" : "=m" (v->arch.pv.ds) );
+    asm ( "mov %%es, %0" : "=m" (v->arch.pv.es) );
+    asm ( "mov %%fs, %0" : "=m" (v->arch.pv.fs) );
+    asm ( "mov %%gs, %0" : "=m" (v->arch.pv.gs) );
 
     if ( !is_pv_32bit_vcpu(v) )
     {
@@ -1866,12 +1980,12 @@ static void save_segments(struct vcpu *v)
         if ( read_cr4() & X86_CR4_FSGSBASE )
         {
             fs_base = __rdfsbase();
-            gs_base = __rdgsbase();
+            gs_base = opt_fred ? rdmsr(MSR_SHADOW_GS_BASE) : __rdgsbase();
         }
         else
         {
-            rdmsrl(MSR_FS_BASE, fs_base);
-            rdmsrl(MSR_GS_BASE, gs_base);
+            fs_base = rdmsr(MSR_FS_BASE);
+            gs_base = opt_fred ? rdmsr(MSR_SHADOW_GS_BASE) : rdmsr(MSR_GS_BASE);
         }
 
         v->arch.pv.fs_base = fs_base;
@@ -1949,6 +2063,8 @@ static always_inline bool need_full_gdt(const struct domain *d)
 
 static void update_xen_slot_in_full_gdt(const struct vcpu *v, unsigned int cpu)
 {
+    ASSERT(per_cpu(gdt_l1e, cpu).l1); /* Confirm these have been cached. */
+
     l1e_write(pv_gdt_ptes(v) + FIRST_RESERVED_GDT_PAGE,
               !is_pv_32bit_vcpu(v) ? per_cpu(gdt_l1e, cpu)
                                    : per_cpu(compat_gdt_l1e, cpu));
@@ -2017,7 +2133,7 @@ static void __context_switch(void)
             if ( cpu_has_xsaves && is_hvm_vcpu(n) )
                 set_msr_xss(n->arch.msrs->xss.raw);
         }
-        vcpu_restore_fpu_nonlazy(n, false);
+        vcpu_restore_fpu(n);
         nd->arch.ctxt_switch->to(n);
     }
 

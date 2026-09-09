@@ -11,7 +11,6 @@
 
 #include <xen/shared.h>
 
-void vcpu_kick(struct vcpu *v);
 void vcpu_mark_events_pending(struct vcpu *v);
 
 static inline int vcpu_event_delivery_is_enabled(struct vcpu *v)
@@ -41,10 +40,10 @@ static inline void local_event_delivery_enable(void)
     vcpu_info(current, evtchn_upcall_mask) = 0;
 }
 
-/* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
+/* Only global arch specific virq definitions. */
+static inline enum virq_type arch_get_virq_type(unsigned int virq)
 {
-    return true;
+    return VIRQ_GLOBAL;
 }
 
 #ifdef CONFIG_PV_SHIM

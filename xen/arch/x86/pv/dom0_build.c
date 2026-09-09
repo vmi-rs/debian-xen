@@ -355,7 +355,7 @@ static struct page_info * __init alloc_chunk(struct domain *d,
     return page;
 }
 
-static int __init dom0_construct(struct boot_info *bi, struct domain *d)
+static int __init dom0_construct(const struct boot_domain *bd)
 {
     unsigned int i;
     int rc, order, machine;
@@ -371,14 +371,15 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
     struct page_info *page = NULL;
     unsigned int flush_flags = 0;
     start_info_t *si;
+    struct domain *d = bd->d;
     struct vcpu *v = d->vcpu[0];
 
-    struct boot_module *image;
-    struct boot_module *initrd = NULL;
+    struct boot_module *image = bd->kernel;
+    struct boot_module *initrd = bd->initrd;
     void *image_base;
     unsigned long image_len;
     void *image_start;
-    unsigned long initrd_len = 0;
+    unsigned long initrd_len = initrd ? initrd->size : 0;
 
     l4_pgentry_t *l4tab = NULL, *l4start = NULL;
     l3_pgentry_t *l3tab = NULL, *l3start = NULL;
@@ -416,21 +417,12 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
 
     printk(XENLOG_INFO "*** Building a PV Dom%d ***\n", d->domain_id);
 
-    i = first_boot_module_index(bi, BOOTMOD_KERNEL);
-    if ( i >= bi->nr_modules )
+    if ( !image )
         panic("Missing kernel boot module for %pd construction\n", d);
 
-    image = &bi->mods[i];
     image_base = bootstrap_map_bm(image);
     image_len = image->size;
-    image_start = image_base + image->headroom;
-
-    i = first_boot_module_index(bi, BOOTMOD_RAMDISK);
-    if ( i < bi->nr_modules )
-    {
-        initrd = &bi->mods[i];
-        initrd_len = initrd->size;
-    }
+    image_start = image_base + image->arch.headroom;
 
     d->max_pages = ~0U;
 
@@ -523,7 +515,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
                 printk("Dom0 expects too high a hypervisor start address\n");
                 return -ERANGE;
             }
-            HYPERVISOR_COMPAT_VIRT_START(d) =
+            d->arch.pv.hv_compat_vstart =
                 max_t(unsigned int, m2p_compat_vstart, value);
         }
 
@@ -628,8 +620,10 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
         initrd_mfn = paddr_to_pfn(initrd->start);
         mfn = initrd_mfn;
         count = PFN_UP(initrd_len);
-        if ( d->arch.physaddr_bitsize &&
-             ((mfn + count - 1) >> (d->arch.physaddr_bitsize - PAGE_SHIFT)) )
+
+#ifdef CONFIG_PV32
+        if ( d->arch.pv.physaddr_bitsize &&
+             ((mfn + count - 1) >> (d->arch.pv.physaddr_bitsize - PAGE_SHIFT)) )
         {
             order = get_order_from_pages(count);
             page = alloc_domheap_pages(d, order, MEMF_no_scrub);
@@ -652,6 +646,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
             initrd->start = pfn_to_paddr(initrd_mfn);
         }
         else
+#endif
         {
             while ( count-- )
                 if ( assign_pages(mfn_to_page(_mfn(mfn++)), 1, d, 0) )
@@ -661,7 +656,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
              * pages. Tell the boot_module handling that we've freed it, so the
              * memory is left alone.
              */
-            initrd->released = true;
+            initrd->arch.released = true;
         }
 
         iommu_memory_setup(d, "initrd", mfn_to_page(_mfn(initrd_mfn)),
@@ -877,7 +872,7 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
         si->flags    = SIF_PRIVILEGED | SIF_INITDOMAIN;
     if ( !vinitrd_start && initrd_len )
         si->flags   |= SIF_MOD_START_PFN;
-    si->flags       |= (xen_processor_pmbits << 8) & SIF_PM_MASK;
+    si->flags       |= MASK_INSR(xen_processor_pmbits, SIF_PM_MASK);
     si->pt_base      = vpt_start;
     si->nr_pt_frames = nr_pt_pages;
     si->mfn_list     = vphysmap_start;
@@ -971,8 +966,8 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
     }
 
     memset(si->cmd_line, 0, sizeof(si->cmd_line));
-    if ( image->cmdline_pa )
-        strlcpy((char *)si->cmd_line, __va(image->cmdline_pa), sizeof(si->cmd_line));
+    if ( bd->cmdline )
+        strlcpy((char *)si->cmd_line, bd->cmdline, sizeof(si->cmd_line));
 
 #ifdef CONFIG_VIDEO
     if ( !pv_shim && fill_console_start_info((void *)(si + 1)) )
@@ -1010,14 +1005,16 @@ static int __init dom0_construct(struct boot_info *bi, struct domain *d)
      *  [rAX,rBX,rCX,rDX,rDI,rBP,R8-R15 are zero]
      */
     regs = &v->arch.user_regs;
-    regs->ds = regs->es = regs->fs = regs->gs =
-               (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
+    v->arch.pv.ds = (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
+    v->arch.pv.es = (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
+    v->arch.pv.fs = (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
+    v->arch.pv.gs = (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
     regs->ss = (compat ? FLAT_COMPAT_KERNEL_SS : FLAT_KERNEL_SS);
     regs->cs = (compat ? FLAT_COMPAT_KERNEL_CS : FLAT_KERNEL_CS);
     regs->rip = parms.virt_entry;
     regs->rsp = vstack_end;
     regs->rsi = vstartinfo_start;
-    regs->eflags = X86_EFLAGS_IF;
+    regs->eflags = X86_EFLAGS_IF | X86_EFLAGS_MBS;
 
     /*
      * We don't call arch_set_info_guest(), so some initialisation needs doing
@@ -1068,7 +1065,7 @@ out:
     return rc;
 }
 
-int __init dom0_construct_pv(struct boot_info *bi, struct domain *d)
+int __init dom0_construct_pv(const struct boot_domain *bd)
 {
     unsigned long cr4 = read_cr4();
     int rc;
@@ -1086,7 +1083,7 @@ int __init dom0_construct_pv(struct boot_info *bi, struct domain *d)
         write_cr4(cr4 & ~X86_CR4_SMAP);
     }
 
-    rc = dom0_construct(bi, d);
+    rc = dom0_construct(bd);
 
     if ( cr4 & X86_CR4_SMAP )
     {

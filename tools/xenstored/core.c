@@ -35,7 +35,6 @@
 #include <getopt.h>
 #include <signal.h>
 #include <assert.h>
-#include <setjmp.h>
 
 #include <xenevtchn.h>
 #include <xen-tools/xenstore-common.h>
@@ -50,7 +49,6 @@
 #include "control.h"
 #include "lu.h"
 
-extern xenevtchn_handle *xce_handle; /* in domain.c */
 static int xce_pollfd_idx = -1;
 struct pollfd *poll_fds;
 static unsigned int current_array_size;
@@ -468,7 +466,7 @@ int set_fd(int fd, short events)
 		/* Round up to 2^8 boundary, in practice this just
 		 * make newsize larger than current_array_size.
 		 */
-		newsize = ROUNDUP(nr_fds + 1, 8);
+		newsize = ROUNDUP(nr_fds + 1, 1U << 8);
 
 		new_fds = realloc(poll_fds, sizeof(struct pollfd)*newsize);
 		if (!new_fds)
@@ -884,6 +882,16 @@ static int write_node(struct connection *conn, struct node *node,
 	return ret;
 }
 
+/* Check one node permission to match a connection. */
+static bool perm_allows_conn(const struct connection *conn,
+			     const struct xs_permissions *p)
+{
+	if (p->id == conn->id || (conn->target && p->id == conn->target->id))
+		return true;
+
+	return p->id == DOMID_ANY;
+}
+
 unsigned int perm_for_conn(struct connection *conn,
 			   const struct node_perms *perms)
 {
@@ -891,14 +899,13 @@ unsigned int perm_for_conn(struct connection *conn,
 	unsigned int mask = XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER;
 
 	/* Owners and tools get it all... */
-	if (!domain_is_unprivileged(conn) || perms->p[0].id == conn->id
-                || (conn->target && perms->p[0].id == conn->target->id))
+	if (!domain_is_unprivileged(conn) ||
+	    perm_allows_conn(conn, perms->p))
 		return (XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER) & mask;
 
 	for (i = 1; i < perms->num; i++)
 		if (!(perms->p[i].perms & XS_PERM_IGNORE) &&
-		    (perms->p[i].id == conn->id ||
-		     (conn->target && perms->p[i].id == conn->target->id)))
+		    perm_allows_conn(conn, perms->p + i))
 			return perms->p[i].perms & mask;
 
 	return perms->p[0].perms & mask;
@@ -1526,7 +1533,7 @@ static struct node *create_node(struct connection *conn, const void *ctx,
 	if (!node)
 		return NULL;
 
-	if (conn && conn->transaction)
+	if (conn->transaction)
 		ta_node_created(conn->transaction);
 
 	node->data = data;
@@ -1541,7 +1548,7 @@ static struct node *create_node(struct connection *conn, const void *ctx,
 	for (i = node; i; i = i->parent) {
 		/* i->parent is set for each new node, so check quota. */
 		if (i->parent &&
-		    domain_nbentry(conn) >= hard_quotas[ACC_NODES].val) {
+		    domain_quota_add_exceeds(conn->domain, ACC_NODES, 1)) {
 			ret = ENOSPC;
 			goto err;
 		}
@@ -1615,7 +1622,7 @@ static int do_write(const void *ctx, struct connection *conn,
 			return errno;
 	}
 
-	fire_watches(conn, ctx, name, node, false, NULL);
+	fire_watches(conn, ctx, name, node, MATCH_SUBTREE, NULL);
 	send_ack(conn, XS_WRITE);
 
 	return 0;
@@ -1639,7 +1646,7 @@ static int do_mkdir(const void *ctx, struct connection *conn,
 		node = create_node(conn, ctx, name, NULL, 0);
 		if (!node)
 			return errno;
-		fire_watches(conn, ctx, name, node, false, NULL);
+		fire_watches(conn, ctx, name, node, MATCH_SUBTREE, NULL);
 	}
 	send_ack(conn, XS_MKDIR);
 
@@ -1685,7 +1692,7 @@ static int delnode_sub(const void *ctx, struct connection *conn,
 		       struct node *node, void *arg)
 {
 	const char *root = arg;
-	bool watch_exact;
+	enum watch_match watch_match;
 	int ret;
 	const char *db_name;
 
@@ -1705,8 +1712,8 @@ static int delnode_sub(const void *ctx, struct connection *conn,
 	 * This fine as we are single threaded and the next possible read will
 	 * be handled only after the node has been really removed.
 	*/
-	watch_exact = strcmp(root, node->name);
-	fire_watches(conn, ctx, node->name, node, watch_exact, NULL);
+	watch_match = strcmp(root, node->name) ? MATCH_EXACT : MATCH_SUBTREE;
+	fire_watches(conn, ctx, node->name, node, watch_match, NULL);
 
 	return WALK_TREE_RM_CHILDENTRY;
 }
@@ -1834,7 +1841,7 @@ static int do_set_perms(const void *ctx, struct connection *conn,
 	if (!xenstore_strings_to_perms(perms.p, perms.num, permstr))
 		return errno;
 
-	if (domain_alloc_permrefs(&perms))
+	if (domain_alloc_permrefs(conn, &perms))
 		return ENOMEM;
 	if (perms.p[0].perms & XS_PERM_IGNORE)
 		return ENOENT;
@@ -1860,7 +1867,7 @@ static int do_set_perms(const void *ctx, struct connection *conn,
 	if (write_node(conn, node, NODE_MODIFY, false))
 		return errno;
 
-	fire_watches(conn, ctx, name, node, false, &old_perms);
+	fire_watches(conn, ctx, name, node, MATCH_SUBTREE, &old_perms);
 	send_ack(conn, XS_SET_PERMS);
 
 	return 0;
@@ -2033,6 +2040,13 @@ static struct {
 	    { "SET_TARGET",    do_set_target,   XS_FLAG_PRIV },
 	[XS_RESET_WATCHES]     = { "RESET_WATCHES",     do_reset_watches },
 	[XS_DIRECTORY_PART]    = { "DIRECTORY_PART",    send_directory_part },
+	[XS_GET_FEATURE]       = { "GET_FEATURE",       do_get_feature },
+	[XS_SET_FEATURE]       =
+	    { "SET_FEATURE",   do_set_feature,  XS_FLAG_PRIV },
+	[XS_GET_QUOTA]         =
+	    { "GET_QUOTA",     do_get_quota,    XS_FLAG_PRIV },
+	[XS_SET_QUOTA]         =
+	    { "SET_QUOTA",     do_set_quota,    XS_FLAG_PRIV },
 };
 
 static const char *sockmsg_string(enum xsd_sockmsg_type type)
@@ -2265,19 +2279,19 @@ struct connection *get_connection_by_id(unsigned int conn_id)
 }
 
 /* We create initial nodes manually. */
-static void manual_node(const char *name, const char *child)
+static void manual_node_perms(const char *name, const char *child,
+			      struct xs_permissions *perms,
+			      unsigned int n_perms)
 {
 	struct node *node;
-	struct xs_permissions perms = { .id = dom0_domid,
-					.perms = XS_PERM_NONE };
 
 	node = talloc_zero(NULL, struct node);
 	if (!node)
 		barf_perror("Could not allocate initial node %s", name);
 
 	node->name = name;
-	node->perms = &perms;
-	node->hdr.num_perms = 1;
+	node->perms = perms;
+	node->hdr.num_perms = n_perms;
 	node->children = (char *)child;
 	if (child)
 		node->hdr.childlen = strlen(child) + 1;
@@ -2285,6 +2299,14 @@ static void manual_node(const char *name, const char *child)
 	if (write_node(NULL, node, NODE_CREATE, false))
 		barf_perror("Could not create initial node %s", name);
 	talloc_free(node);
+}
+
+static void manual_node(const char *name, const char *child)
+{
+	struct xs_permissions perms = { .id = priv_domid,
+					.perms = XS_PERM_NONE };
+
+	manual_node_perms(name, child, &perms, 1);
 }
 
 static unsigned int hash_from_key_fn(const void *k)
@@ -2306,6 +2328,11 @@ static int keys_equal_fn(const void *key1, const void *key2)
 
 void setup_structure(bool live_update)
 {
+	struct xs_permissions perms[] = {
+		{ .id = priv_domid,	.perms = XS_PERM_NONE },
+		{ .id = DOMID_ANY,	.perms = XS_PERM_READ },
+	};
+
 	nodes = create_hashtable(NULL, "nodes", hash_from_key_fn, keys_equal_fn,
 				 HASHTABLE_FREE_KEY | HASHTABLE_FREE_VALUE);
 	if (!nodes)
@@ -2317,9 +2344,10 @@ void setup_structure(bool live_update)
 		manual_node("/", "tool");
 		manual_node("/tool", "xenstored");
 		manual_node("/tool/xenstored", NULL);
-		manual_node("@releaseDomain", NULL);
+		manual_node_perms("@releaseDomain", NULL,
+				  perms, ARRAY_SIZE(perms));
 		manual_node("@introduceDomain", NULL);
-		domain_nbentry_fix(dom0_domid, 5, true);
+		domain_nbentry_fix(priv_domid, 5);
 	}
 }
 
@@ -2538,7 +2566,10 @@ static void usage(void)
 "                          allowed timeout candidates are:\n"
 "                          watch-event: time a watch-event is kept pending\n"
 "  -K, --keep-orphans      don't delete nodes owned by a domain when the\n"
-"                          domain is deleted (this is a security risk!)\n");
+"                          domain is deleted (this is a security risk!)\n"
+"  -m, --master-domid      specify the domid of the domain where xenstored\n"
+"                          is running.  defaults to 0\n"
+);
 }
 
 
@@ -2566,9 +2597,9 @@ static struct option options[] = {
 #endif
 	{ NULL, 0, NULL, 0 } };
 
-int dom0_domid = 0;
+int store_domid = DOMID_INVALID;
 int dom0_event = 0;
-int priv_domid = 0;
+int priv_domid = DOMID_INVALID;
 domid_t stub_domid = DOMID_INVALID;
 
 static unsigned int get_optval_uint(const char *arg)
@@ -2609,10 +2640,9 @@ static void set_timeout(const char *arg)
 		barf("unknown timeout \"%s\"\n", arg);
 }
 
-static void set_quota(const char *arg, bool soft)
+static void set_quota(const char *arg, unsigned int idx)
 {
 	const char *eq = strchr(arg, '=');
-	struct quota *q = soft ? soft_quotas : hard_quotas;
 	unsigned int val;
 	unsigned int i;
 
@@ -2621,13 +2651,19 @@ static void set_quota(const char *arg, bool soft)
 	val = get_optval_uint(eq + 1);
 
 	for (i = 0; i < ACC_N; i++) {
-		if (what_matches(arg, q[i].name)) {
-			q[i].val = val;
+		if (what_matches(arg, quota_adm[i].name) &&
+		    quotas[i].val[idx] != Q_VAL_DISABLED) {
+			quotas[i].val[idx] = val;
 			return;
 		}
 	}
 
 	barf("unknown quota \"%s\"\n", arg);
+}
+
+static void set_one_quota(const char *arg, unsigned int idx, enum accitem what)
+{
+	quotas[what].val[idx] = get_optval_uint(arg);
 }
 
 /* Sorted by bit values of TRACE_* flags. Flag is (1u << index). */
@@ -2683,7 +2719,7 @@ int main(int argc, char *argv[])
 				  options, NULL)) != -1) {
 		switch (opt) {
 		case 'E':
-			hard_quotas[ACC_NODES].val = get_optval_uint(optarg);
+			set_one_quota(optarg, Q_IDX_HARD, ACC_NODES);
 			break;
 		case 'F':
 			pidfile = optarg;
@@ -2695,10 +2731,10 @@ int main(int argc, char *argv[])
 			dofork = false;
 			break;
 		case 'S':
-			hard_quotas[ACC_NODESZ].val = get_optval_uint(optarg);
+			set_one_quota(optarg, Q_IDX_HARD, ACC_NODESZ);
 			break;
 		case 't':
-			hard_quotas[ACC_TRANS].val = get_optval_uint(optarg);
+			set_one_quota(optarg, Q_IDX_HARD, ACC_TRANS);
 			break;
 		case 'T':
 			tracefile = optarg;
@@ -2711,22 +2747,22 @@ int main(int argc, char *argv[])
 			keep_orphans = true;
 			break;
 		case 'W':
-			hard_quotas[ACC_WATCH].val = get_optval_uint(optarg);
+			set_one_quota(optarg, Q_IDX_HARD, ACC_WATCH);
 			break;
 		case 'A':
-			hard_quotas[ACC_NPERM].val = get_optval_uint(optarg);
+			set_one_quota(optarg, Q_IDX_HARD, ACC_NPERM);
 			break;
 		case 'M':
-			hard_quotas[ACC_PATHLEN].val = get_optval_uint(optarg);
-			hard_quotas[ACC_PATHLEN].val =
+			set_one_quota(optarg, Q_IDX_HARD, ACC_PATHLEN);
+			quotas[ACC_PATHLEN].val[Q_IDX_HARD] =
 				 min((unsigned int)XENSTORE_REL_PATH_MAX,
-				     hard_quotas[ACC_PATHLEN].val);
+				     quotas[ACC_PATHLEN].val[Q_IDX_HARD]);
 			break;
 		case 'Q':
-			set_quota(optarg, false);
+			set_quota(optarg, Q_IDX_HARD);
 			break;
 		case 'q':
-			set_quota(optarg, true);
+			set_quota(optarg, Q_IDX_SOFT);
 			break;
 		case 'w':
 			set_timeout(optarg);
@@ -2735,7 +2771,7 @@ int main(int argc, char *argv[])
 			dom0_event = get_optval_uint(optarg);
 			break;
 		case 'm':
-			dom0_domid = get_optval_uint(optarg);
+			store_domid = get_optval_uint(optarg);
 			break;
 		case 'p':
 			priv_domid = get_optval_uint(optarg);
@@ -2759,7 +2795,7 @@ int main(int argc, char *argv[])
 	/* Listen to hypervisor. */
 	if (!live_update) {
 		domain_init(-1);
-		dom0_init();
+		init_domains(false);
 	}
 
 	/* redirect to /dev/null now we're ready to accept connections */
@@ -2773,13 +2809,13 @@ int main(int argc, char *argv[])
 	if (tracefile)
 		tracefile = absolute_filename(NULL, tracefile);
 
+	stubdom_init(live_update);
+
 #ifndef NO_LIVE_UPDATE
 	/* Read state in case of live update. */
 	if (live_update)
 		lu_read_state();
 #endif
-
-	stubdom_init();
 
 	check_store();
 
@@ -3031,7 +3067,7 @@ static int dump_state_node(const void *ctx, struct connection *conn,
 	head.length += node->hdr.num_perms * sizeof(*sn.perms);
 	head.length += pathlen;
 	head.length += node->hdr.datalen;
-	head.length = ROUNDUP(head.length, 3);
+	head.length = ROUNDUP(head.length, 8);
 
 	if (fwrite(&head, sizeof(head), 1, fp) != 1)
 		return dump_state_node_err(data, "Dump node head error");
@@ -3105,6 +3141,7 @@ void read_state_global(const void *ctx, const void *state)
 	set_socket_fd(glb->socket_fd);
 
 	domain_init(glb->evtchn_fd);
+	init_domains(true);
 }
 
 static void add_buffered_data(struct buffered_data *bdata,

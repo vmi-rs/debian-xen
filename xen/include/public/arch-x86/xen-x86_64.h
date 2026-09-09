@@ -103,9 +103,8 @@
 /* Guest exited in SYSCALL context? Return to guest with SYSRET? */
 #define _VGCF_in_syscall 8
 #define VGCF_in_syscall  (1<<_VGCF_in_syscall)
-#define VGCF_IN_SYSCALL  VGCF_in_syscall
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 struct iret_context {
     /* Top of stack (%rsp at point of hypercall). */
@@ -159,6 +158,10 @@ struct iret_context {
 #define __DECL_REG_HI(num)    uint64_t r ## num
 #endif
 
+#ifdef __XEN__
+#define cpu_user_regs guest_user_regs
+#endif
+
 struct cpu_user_regs {
     __DECL_REG_HI(15);
     __DECL_REG_HI(14);
@@ -189,8 +192,13 @@ struct cpu_user_regs {
     uint16_t fs, _pad5[3];
     uint16_t gs, _pad6[3];
 };
+
+#ifdef __XEN__
+#undef cpu_user_regs
+#else
 typedef struct cpu_user_regs cpu_user_regs_t;
 DEFINE_XEN_GUEST_HANDLE(cpu_user_regs_t);
+#endif
 
 #undef __DECL_REG
 #undef __DECL_REG_LOHI
@@ -209,7 +217,7 @@ typedef struct arch_vcpu_info arch_vcpu_info_t;
 
 typedef unsigned long xen_callback_t;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __XEN_PUBLIC_ARCH_X86_XEN_X86_64_H__ */
 

@@ -14,6 +14,9 @@
 /* Holds the bit size of IPAs in p2m tables.  */
 extern unsigned int p2m_ipa_bits;
 
+/* Common-code alias; ARM keeps the IPA spelling internally */
+#define p2m_gpa_bits p2m_ipa_bits
+
 #define MAX_VMID_8_BIT  (1UL << 8)
 #define MAX_VMID_16_BIT (1UL << 16)
 
@@ -48,8 +51,13 @@ struct p2m_domain {
     /* Current VMID in use */
     uint16_t vmid;
 
+#ifdef CONFIG_MMU
     /* Current Translation Table Base Register for the p2m */
     uint64_t vttbr;
+#else
+    /* Current Virtualization System Control Register for the p2m */
+    register_t vsctlr;
+#endif
 
     /* Highest guest frame that's ever been mapped in the p2m */
     gfn_t max_mapped_gfn;
@@ -137,6 +145,11 @@ typedef enum {
     p2m_max_real_type,  /* Types after this won't be store in the p2m */
 } p2m_type_t;
 
+static inline p2m_type_t arch_dt_passthrough_p2m_type(void)
+{
+    return p2m_mmio_direct_dev;
+}
+
 /* We use bitmaps and mask to handle groups of types */
 #define p2m_to_mask(_t) (1UL << (_t))
 
@@ -168,7 +181,7 @@ typedef enum {
 #if defined(CONFIG_MMU)
 # include <asm/mmu/p2m.h>
 #else
-# error "Unknown memory management layout"
+# include <asm/mpu/p2m.h>
 #endif
 
 static inline bool arch_acquire_resource_check(struct domain *d)
@@ -178,12 +191,6 @@ static inline bool arch_acquire_resource_check(struct domain *d)
      * is supported on Arm.
      */
     return true;
-}
-
-static inline
-void p2m_altp2m_check(struct vcpu *v, uint16_t idx)
-{
-    /* Not supported on ARM. */
 }
 
 /*
@@ -298,8 +305,7 @@ void p2m_domain_creation_finished(struct domain *d);
  */
 int p2m_cache_flush_range(struct domain *d, gfn_t *pstart, gfn_t end);
 
-void p2m_set_way_flush(struct vcpu *v, struct cpu_user_regs *regs,
-                       const union hsr hsr);
+void p2m_set_way_flush(struct vcpu *v, struct cpu_user_regs *regs);
 
 void p2m_toggle_cache(struct vcpu *v, bool was_enabled);
 

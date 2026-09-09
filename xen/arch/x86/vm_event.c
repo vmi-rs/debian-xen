@@ -72,7 +72,7 @@ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v,
 
     if ( rsp->flags & VM_EVENT_FLAG_TOGGLE_SINGLESTEP )
         hvm_toggle_singlestep(v);
-    else
+    else if ( IS_ENABLED(CONFIG_ALTP2M) )
         hvm_fast_singlestep(v, rsp->u.fast_singlestep.p2midx);
 }
 
@@ -253,7 +253,9 @@ void vm_event_fill_regs(vm_event_request_t *req)
     req->data.regs.x86.shadow_gs = ctxt.shadow_gs;
     req->data.regs.x86.dr6 = ctxt.dr6;
 
-    if ( hvm_vmtrace_output_position(curr, &req->data.regs.x86.vmtrace_pos) != 1 )
+    if ( IS_ENABLED(CONFIG_VMTRACE) &&
+         hvm_vmtrace_output_position(curr,
+                                     &req->data.regs.x86.vmtrace_pos) != 1 )
         req->data.regs.x86.vmtrace_pos = ~0;
 #endif
 }
@@ -303,12 +305,12 @@ void vm_event_emulate_check(struct vcpu *v, vm_event_response_t *rsp)
 #endif
 }
 
+#ifdef CONFIG_VMTRACE
 void vm_event_reset_vmtrace(struct vcpu *v)
 {
-#ifdef CONFIG_HVM
     hvm_vmtrace_reset(v);
-#endif
 }
+#endif
 
 /*
  * Local variables:

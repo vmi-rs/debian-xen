@@ -12,7 +12,8 @@
 #include <xen/softirq.h>
 #include <xen/wait.h>
 
-#include <asm/alternative.h>
+#include <public/sched.h>
+
 #include <asm/arm64/sve.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
@@ -25,12 +26,15 @@
 #include <asm/platform.h>
 #include <asm/procinfo.h>
 #include <asm/regs.h>
+#include <asm/suspend.h>
+#include <asm/firmware/sci.h>
 #include <asm/tee/tee.h>
 #include <asm/vfp.h>
 #include <asm/vgic.h>
+#include <asm/vpci.h>
+#include <asm/vpsci.h>
 #include <asm/vtimer.h>
 
-#include "vpci.h"
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
@@ -287,7 +291,7 @@ static void schedule_tail(struct vcpu *prev)
 extern void noreturn return_to_new_vcpu32(void);
 extern void noreturn return_to_new_vcpu64(void);
 
-static void continue_new_vcpu(struct vcpu *prev)
+static void noreturn continue_new_vcpu(struct vcpu *prev)
 {
     current->arch.actlr = READ_SYSREG(ACTLR_EL1);
     processor_vcpu_initialise(current);
@@ -333,20 +337,7 @@ void sync_local_execstate(void)
 
 void sync_vcpu_execstate(struct vcpu *v)
 {
-    /*
-     * We don't support lazy switching.
-     *
-     * However the context may have been saved from a remote pCPU so we
-     * need a barrier to ensure it is observed before continuing.
-     *
-     * Per vcpu_context_saved(), the context can be observed when
-     * v->is_running is false (the caller should check it before calling
-     * this function).
-     *
-     * Note this is a full barrier to also prevent update of the context
-     * to happen before it was observed.
-     */
-    smp_mb();
+    /* Nothing to do -- no lazy switching */
 }
 
 #define NEXT_ARG(fmt, args)                                                 \
@@ -380,7 +371,11 @@ unsigned long hypercall_create_continuation(
     if ( mcs->flags & MCSF_in_multicall )
     {
         for ( i = 0; *p != '\0'; i++ )
-            mcs->call.args[i] = NEXT_ARG(p, args);
+        {
+            if ( i >= ARRAY_SIZE(mcs->call.args) )
+                goto bad_fmt;
+            array_access_nospec(mcs->call.args, i) = NEXT_ARG(p, args);
+        }
 
         /* Return value gets written back to mcs->call.result */
         rc = mcs->call.result;
@@ -405,7 +400,7 @@ unsigned long hypercall_create_continuation(
                 case 2: regs->x2 = arg; break;
                 case 3: regs->x3 = arg; break;
                 case 4: regs->x4 = arg; break;
-                case 5: regs->x5 = arg; break;
+                default: goto bad_fmt;
                 }
             }
 
@@ -428,7 +423,7 @@ unsigned long hypercall_create_continuation(
                 case 2: regs->r2 = arg; break;
                 case 3: regs->r3 = arg; break;
                 case 4: regs->r4 = arg; break;
-                case 5: regs->r5 = arg; break;
+                default: goto bad_fmt;
                 }
             }
 
@@ -464,58 +459,9 @@ void startup_cpu_idle_loop(void)
     reset_stack_and_jump(idle_loop);
 }
 
-struct domain *alloc_domain_struct(void)
-{
-    struct domain *d;
-    BUILD_BUG_ON(sizeof(*d) > PAGE_SIZE);
-    d = alloc_xenheap_pages(0, 0);
-    if ( d == NULL )
-        return NULL;
-
-    clear_page(d);
-    return d;
-}
-
-void free_domain_struct(struct domain *d)
-{
-    free_xenheap_page(d);
-}
-
 void dump_pageframe_info(struct domain *d)
 {
 
-}
-
-/*
- * The new VGIC has a bigger per-IRQ structure, so we need more than one
- * page on ARM64. Cowardly increase the limit in this case.
- */
-#if defined(CONFIG_NEW_VGIC) && defined(CONFIG_ARM_64)
-#define MAX_PAGES_PER_VCPU  2
-#else
-#define MAX_PAGES_PER_VCPU  1
-#endif
-
-struct vcpu *alloc_vcpu_struct(const struct domain *d)
-{
-    struct vcpu *v;
-
-    BUILD_BUG_ON(sizeof(*v) > MAX_PAGES_PER_VCPU * PAGE_SIZE);
-    v = alloc_xenheap_pages(get_order_from_bytes(sizeof(*v)), 0);
-    if ( v != NULL )
-    {
-        unsigned int i;
-
-        for ( i = 0; i < DIV_ROUND_UP(sizeof(*v), PAGE_SIZE); i++ )
-            clear_page((void *)v + i * PAGE_SIZE);
-    }
-
-    return v;
-}
-
-void free_vcpu_struct(struct vcpu *v)
-{
-    free_xenheap_pages(v, get_order_from_bytes(sizeof(*v)));
 }
 
 int arch_vcpu_create(struct vcpu *v)
@@ -592,17 +538,46 @@ void vcpu_switch_to_aarch64_mode(struct vcpu *v)
     v->arch.hcr_el2 |= HCR_RW;
 }
 
+static bool v8r_el1_msa_domain_sanitise_config(
+    const struct xen_domctl_createdomain *config)
+{
+    switch ( config->arch.v8r_el1_msa )
+    {
+    case XEN_DOMCTL_CONFIG_ARM_V8R_EL1_MSA_NONE:
+        return !IS_ENABLED(CONFIG_MPU);
+
+    case XEN_DOMCTL_CONFIG_ARM_V8R_EL1_MSA_PMSA:
+        return IS_ENABLED(CONFIG_MPU);
+
+    case XEN_DOMCTL_CONFIG_ARM_V8R_EL1_MSA_VMSA:
+        return IS_ENABLED(CONFIG_MPU) && IS_ENABLED(CONFIG_ARM_64);
+
+    default:
+        return false;
+    }
+}
+
 int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
 {
     unsigned int max_vcpus;
     unsigned int flags_required = (XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap);
-    unsigned int flags_optional = (XEN_DOMCTL_CDF_iommu | XEN_DOMCTL_CDF_vpmu);
+    unsigned int flags_optional = (XEN_DOMCTL_CDF_iommu | XEN_DOMCTL_CDF_vpmu |
+                                   XEN_DOMCTL_CDF_xs_domain |
+                                   XEN_DOMCTL_CDF_trap_unmapped_accesses );
     unsigned int sve_vl_bits = sve_decode_vl(config->arch.sve_vl);
 
     if ( (config->flags & ~flags_optional) != flags_required )
     {
         dprintk(XENLOG_INFO, "Unsupported configuration %#x\n",
                 config->flags);
+        return -EINVAL;
+    }
+
+    /* Check config structure padding */
+    if ( config->arch.pad )
+    {
+        dprintk(XENLOG_INFO,
+                "Invalid domain configuration during domain creation\n");
         return -EINVAL;
     }
 
@@ -676,13 +651,19 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
         return -EINVAL;
     }
 
-    if ( config->altp2m_opts )
+    if ( config->altp2m.opts || config->altp2m.nr )
     {
         dprintk(XENLOG_INFO, "Altp2m not supported\n");
         return -EINVAL;
     }
 
-    return 0;
+    if ( !v8r_el1_msa_domain_sanitise_config(config) )
+    {
+        dprintk(XENLOG_INFO, "Unsupported v8r_el1_msa value\n");
+        return -EINVAL;
+    }
+
+    return sci_domain_sanitise_config(config);
 }
 
 int arch_domain_create(struct domain *d,
@@ -774,6 +755,13 @@ int arch_domain_create(struct domain *d,
     d->arch.sve_vl = config->arch.sve_vl;
 #endif
 
+#ifdef CONFIG_MPU
+    d->arch.v8r_el1_msa = config->arch.v8r_el1_msa;
+#endif
+
+    if ( (rc = sci_domain_init(d, config)) != 0 )
+        goto fail;
+
     return 0;
 
 fail:
@@ -823,8 +811,18 @@ int arch_domain_teardown(struct domain *d)
     return 0;
 }
 
+static void resume_ctx_reset(struct resume_info *ctx)
+{
+    if ( ctx->ctxt )
+        free_vcpu_guest_context(ctx->ctxt);
+
+    memset(ctx, 0, sizeof(*ctx));
+}
+
 void arch_domain_destroy(struct domain *d)
 {
+    resume_ctx_reset(&d->arch.resume_ctx);
+
     tee_free_domain_ctx(d);
     /* IOMMU page table is shared with P2M, always call
      * iommu_domain_destroy() before p2m_final_teardown().
@@ -834,6 +832,7 @@ void arch_domain_destroy(struct domain *d)
     domain_vgic_free(d);
     domain_vuart_free(d);
     free_xenheap_page(d->shared_info);
+    sci_domain_destroy(d);
 #ifdef CONFIG_ACPI
     free_xenheap_pages(d->arch.efi_acpi_table,
                        get_order_from_bytes(d->arch.efi_acpi_len));
@@ -853,14 +852,31 @@ void arch_domain_unpause(struct domain *d)
 {
 }
 
-int arch_domain_soft_reset(struct domain *d)
-{
-    return -ENOSYS;
-}
-
 void arch_domain_creation_finished(struct domain *d)
 {
     p2m_domain_creation_finished(d);
+}
+
+void arch_domain_resume(struct domain *d)
+{
+    struct resume_info *ctx = &d->arch.resume_ctx;
+
+    /*
+     * It is still possible to call domain_shutdown() with a suspend reason
+     * via some hypercalls, such as SCHEDOP_shutdown or SCHEDOP_remote_shutdown.
+     * In these cases, the resume context will be empty, so there is no
+     * suspend-specific state to restore.
+     */
+    if ( !ctx->wake_cpu )
+        return;
+
+    ASSERT(d->shutdown_code == SHUTDOWN_suspend);
+
+    domain_lock(d);
+    arch_vcpu_apply_guest_context(ctx->wake_cpu, ctx->ctxt);
+    domain_unlock(d);
+
+    resume_ctx_reset(ctx);
 }
 
 static int is_guest_pv32_psr(uint32_t psr)
@@ -905,15 +921,32 @@ static int is_guest_pv64_psr(uint64_t psr)
 }
 #endif
 
+void arch_vcpu_apply_guest_context(struct vcpu *v,
+                                   const struct vcpu_guest_context *ctxt)
+{
+    vcpu_regs_user_to_hyp(v, &ctxt->user_regs);
+
+    v->arch.sctlr = ctxt->sctlr;
+    v->arch.ttbr0 = ctxt->ttbr0;
+    v->arch.ttbr1 = ctxt->ttbr1;
+    v->arch.ttbcr = ctxt->ttbcr;
+
+    v->is_initialised = 1;
+
+    if ( ctxt->flags & VGCF_online )
+        clear_bit(_VPF_down, &v->pause_flags);
+    else
+        set_bit(_VPF_down, &v->pause_flags);
+}
+
 /*
  * Initialise vCPU state. The context may be supplied by an external entity, so
  * we need to validate it.
  */
-int arch_set_info_guest(
-    struct vcpu *v, vcpu_guest_context_u c)
+int arch_vcpu_validate_guest_context(const struct vcpu *v,
+                                     const struct vcpu_guest_context *ctxt)
 {
-    struct vcpu_guest_context *ctxt = c.nat;
-    struct vcpu_guest_core_regs *regs = &c.nat->user_regs;
+    const struct vcpu_guest_core_regs *regs = &ctxt->user_regs;
 
     if ( is_32bit_domain(v->domain) )
     {
@@ -942,19 +975,24 @@ int arch_set_info_guest(
     }
 #endif
 
-    vcpu_regs_user_to_hyp(v, regs);
+    return 0;
+}
 
-    v->arch.sctlr = ctxt->sctlr;
-    v->arch.ttbr0 = ctxt->ttbr0;
-    v->arch.ttbr1 = ctxt->ttbr1;
-    v->arch.ttbcr = ctxt->ttbcr;
+/*
+ * Initialise vCPU state. The context may be supplied by an external entity, so
+ * we need to validate it.
+ */
+int arch_set_info_guest(
+    struct vcpu *v, vcpu_guest_context_u c)
+{
+    struct vcpu_guest_context *ctxt = c.nat;
+    int rc;
 
-    v->is_initialised = 1;
+    rc = arch_vcpu_validate_guest_context(v, ctxt);
+    if ( rc )
+        return rc;
 
-    if ( ctxt->flags & VGCF_online )
-        clear_bit(_VPF_down, &v->pause_flags);
-    else
-        set_bit(_VPF_down, &v->pause_flags);
+    arch_vcpu_apply_guest_context(v, ctxt);
 
     return 0;
 }
@@ -1020,6 +1058,7 @@ static int relinquish_memory(struct domain *d, struct page_list_head *list)
  */
 enum {
     PROG_pci = 1,
+    PROG_sci,
     PROG_tee,
     PROG_xen,
     PROG_page,
@@ -1066,6 +1105,11 @@ int domain_relinquish_resources(struct domain *d)
         if ( ret )
             return ret;
 #endif
+
+    PROGRESS(sci):
+        ret = sci_relinquish_resources(d);
+        if ( ret )
+            return ret;
 
     PROGRESS(tee):
         ret = tee_relinquish_resources(d);

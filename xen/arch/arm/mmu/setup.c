@@ -59,7 +59,7 @@ DEFINE_BOOT_PAGE_TABLE(xen_fixmap);
 static DEFINE_PAGE_TABLES(xen_xenmap, XEN_NR_ENTRIES(2));
 
 /* Limits of the Xen heap */
-mfn_t directmap_mfn_start __read_mostly = INVALID_MFN_INITIALIZER;
+mfn_t directmap_mfn_start __read_mostly = INVALID_MFN;
 mfn_t directmap_mfn_end __read_mostly;
 vaddr_t directmap_virt_end __read_mostly;
 #ifdef CONFIG_ARM_64
@@ -213,6 +213,21 @@ void __init remove_early_mappings(void)
     BUG_ON(rc);
 }
 
+void __init modify_after_init_mappings(void)
+{
+    /*
+     * We have finished booting. Mark the section .data.ro_after_init
+     * read-only.
+     */
+    int rc = modify_xen_mappings((unsigned long)&__ro_after_init_start,
+                                 (unsigned long)&__ro_after_init_end,
+                                 PAGE_HYPERVISOR_RO);
+
+    if ( rc )
+        panic("Unable to mark the .data.ro_after_init section read-only (rc = %d)\n",
+              rc);
+}
+
 /*
  * After boot, Xen page-tables should not contain mapping that are both
  * Writable and eXecutables.
@@ -246,7 +261,7 @@ paddr_t __init consider_modules(paddr_t s, paddr_t e,
 #ifdef CONFIG_STATIC_SHM
     const struct membanks *shmem = bootinfo_get_shmem();
 #endif
-    const struct bootmodules *mi = &bootinfo.modules;
+    const struct boot_modules *mi = &bootinfo.modules;
     int i;
     int nr;
 
@@ -273,8 +288,8 @@ paddr_t __init consider_modules(paddr_t s, paddr_t e,
     }
 
     /*
-     * i is the current bootmodule we are evaluating, across all
-     * possible kinds of bootmodules.
+     * i is the current boot_module we are evaluating, across all
+     * possible kinds of boot_modules.
      *
      * When retrieving the corresponding reserved-memory addresses, we
      * need to index the reserved_mem bank starting from 0, and only counting
@@ -328,8 +343,8 @@ static void __init create_llc_coloring_mappings(void)
 {
     lpae_t pte;
     unsigned int i;
-    struct bootmodule *xen_bootmodule = boot_module_find_by_kind(BOOTMOD_XEN);
-    mfn_t start_mfn = maddr_to_mfn(xen_bootmodule->start), mfn;
+    struct boot_module *xen_boot_module = boot_module_find_by_kind(BOOTMOD_XEN);
+    mfn_t start_mfn = maddr_to_mfn(xen_boot_module->start), mfn;
 
     for_each_xen_colored_mfn ( start_mfn, mfn, i )
     {
@@ -479,9 +494,6 @@ void free_init_memory(void)
 {
     paddr_t pa = virt_to_maddr(__init_begin);
     unsigned long len = __init_end - __init_begin;
-    uint32_t insn;
-    unsigned int i, nr = len / sizeof(insn);
-    uint32_t *p;
     int rc;
 
     rc = modify_xen_mappings((unsigned long)__init_begin,
@@ -495,15 +507,8 @@ void free_init_memory(void)
      */
     invalidate_icache_local();
 
-#ifdef CONFIG_ARM_32
-    /* udf instruction i.e (see A8.8.247 in ARM DDI 0406C.c) */
-    insn = 0xe7f000f0;
-#else
-    insn = AARCH64_BREAK_FAULT;
-#endif
-    p = (uint32_t *)__init_begin;
-    for ( i = 0; i < nr; i++ )
-        *(p + i) = insn;
+    /* Zeroing the memory before returning it */
+    memset(__init_begin, 0, len);
 
     rc = destroy_xen_mappings((unsigned long)__init_begin,
                               (unsigned long)__init_end);

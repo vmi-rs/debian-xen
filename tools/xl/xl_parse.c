@@ -12,6 +12,8 @@
  * GNU Lesser General Public License for more details.
  */
 
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -1284,6 +1286,64 @@ out:
     if (rc) exit(EXIT_FAILURE);
 }
 
+static int parse_arm_sci_config(XLU_Config *cfg, libxl_arm_sci *arm_sci,
+                                const char *str)
+{
+    int ret = 0;
+    char *buf2, *ptr;
+    char *oparg;
+
+    if (NULL == (buf2 = ptr = strdup(str)))
+        return ERROR_NOMEM;
+
+    ptr = strtok(buf2, ",");
+    while (ptr != NULL)
+    {
+        if (MATCH_OPTION("type", ptr, oparg)) {
+            ret = libxl_arm_sci_type_from_string(oparg, &arm_sci->type);
+            if (ret) {
+                fprintf(stderr, "Unknown ARM_SCI type: %s\n", oparg);
+                ret = ERROR_INVAL;
+                goto out;
+            }
+        }
+
+        ptr = strtok(NULL, ",");
+    }
+
+out:
+    free(buf2);
+    return ret;
+}
+
+int parse_xsquota_item(const char *buf, struct libxl_xs_quota_item *item)
+{
+    const char *eq;
+    char *endptr;
+    unsigned long val;
+
+    eq = strchr(buf, '=');
+    if (!eq) {
+        fprintf(stderr, "Quota specification \"%s\" lacks \"=\".\n", buf);
+        return ERROR_INVAL;
+    }
+    errno = 0;
+    item->name = strndup(buf, eq - buf);
+    if (!item->name)
+        return ERROR_NOMEM;
+    val = strtoul(eq + 1, &endptr, 0);
+    if (errno || !eq[1] || *endptr || (unsigned int)val != val) {
+        fprintf(stderr,
+                "Quota specification \"%s\" uses illegal value \"%s\".\n",
+                buf, eq + 1);
+        return ERROR_INVAL;
+    }
+
+    item->val = val;
+
+    return 0;
+}
+
 void parse_config_data(const char *config_source,
                        const char *config_data,
                        int config_len,
@@ -1296,7 +1356,7 @@ void parse_config_data(const char *config_source,
     XLU_ConfigList *cpus, *vbds, *nics, *pcis, *cvfbs, *cpuids, *vtpms,
                    *usbctrls, *usbdevs, *p9devs, *vdispls, *pvcallsifs_devs;
     XLU_ConfigList *channels, *ioports, *irqs, *iomem, *viridian, *dtdevs,
-                   *mca_caps, *smbios, *llc_colors;
+                   *mca_caps, *smbios, *llc_colors, *xs_quota;
     int num_ioports, num_irqs, num_iomem, num_cpus, num_viridian, num_mca_caps;
     int num_smbios;
     int pci_power_mgmt = 0;
@@ -1305,6 +1365,7 @@ void parse_config_data(const char *config_source,
     int pci_seize = 0;
     int i, e;
     int num_llc_colors;
+    int num_xs_quota;
     char *kernel_basename;
 
     libxl_domain_create_info *c_info = &d_config->c_info;
@@ -1409,6 +1470,25 @@ void parse_config_data(const char *config_source,
     if (!xlu_cfg_get_string (config, "pool", &buf, 0))
         xlu_cfg_replace_string(config, "pool", &c_info->pool_name, 0);
 
+    if (!xlu_cfg_get_long (config, "xenstore_feature_mask", &l, 0))
+        b_info->xenstore_feature_mask = l;
+
+    if (!xlu_cfg_get_list(config, "xenstore_quota", &xs_quota, &num_xs_quota, 0)) {
+        b_info->xenstore_quota.num_quota = num_xs_quota;
+        b_info->xenstore_quota.quota = xcalloc(num_xs_quota, sizeof(* b_info->xenstore_quota.quota));
+
+        for (i = 0; i < num_xs_quota; i++) {
+           buf = xlu_cfg_get_listitem(xs_quota, i);
+           if (!buf) {
+                fprintf(stderr,
+                        "xl: Can't get element %d in Xenstore quota list\n", i);
+                exit(1);
+            }
+            if (parse_xsquota_item(buf, b_info->xenstore_quota.quota + i))
+                exit(1);
+        }
+    }
+
     libxl_domain_build_info_init_type(b_info, c_info->type);
 
     if (b_info->type == LIBXL_DOMAIN_TYPE_PVH) {
@@ -1485,14 +1565,22 @@ void parse_config_data(const char *config_source,
 
     if (!xlu_cfg_get_long (config, "vcpus", &l, 0)) {
         vcpus = l;
-        if (libxl_cpu_bitmap_alloc(ctx, &b_info->avail_vcpus, l)) {
-            fprintf(stderr, "Unable to allocate cpumap\n");
-            exit(1);
-        }
-        libxl_bitmap_set_none(&b_info->avail_vcpus);
-        while (l-- > 0)
-            libxl_bitmap_set((&b_info->avail_vcpus), l);
     }
+    if (vcpus < 1) {
+        /*
+         * Default to 1 vCPU, libxl is already assuming this
+         * when vcpus == 0 and parse_vcpu_affinity() also assume there's at
+         * least one vcpu.
+         */
+        vcpus = 1;
+    }
+    if (libxl_cpu_bitmap_alloc(ctx, &b_info->avail_vcpus, vcpus)) {
+        fprintf(stderr, "Unable to allocate cpumap\n");
+        exit(1);
+    }
+    libxl_bitmap_set_none(&b_info->avail_vcpus);
+    for (long vcpu = vcpus; vcpu-- > 0;)
+        libxl_bitmap_set((&b_info->avail_vcpus), vcpu);
 
     if (!xlu_cfg_get_long (config, "maxvcpus", &l, 0))
         b_info->max_vcpus = l;
@@ -2097,6 +2185,15 @@ void parse_config_data(const char *config_source,
                     buf);
             exit (1);
         }
+    }
+
+    if (!xlu_cfg_get_long(config, "altp2m_count", &l, 1)) {
+        if (l != (uint16_t)l) {
+            fprintf(stderr, "ERROR: invalid value %ld for \"altp2m_count\"\n", l);
+            exit (1);
+        }
+
+        b_info->altp2m_count = l;
     }
 
     if (!xlu_cfg_get_long(config, "vmtrace_buf_kb", &l, 1) && l) {
@@ -2733,10 +2830,7 @@ skip_usbdev:
     xlu_cfg_replace_string (config, "device_model_override",
                             &b_info->device_model, 0);
     if (!xlu_cfg_get_string (config, "device_model_version", &buf, 0)) {
-        if (!strcmp(buf, "qemu-xen-traditional")) {
-            b_info->device_model_version
-                = LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL;
-        } else if (!strcmp(buf, "qemu-xen")) {
+        if (!strcmp(buf, "qemu-xen")) {
             b_info->device_model_version
                 = LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN;
         } else {
@@ -2920,6 +3014,8 @@ skip_usbdev:
         xlu_cfg_replace_string (config, "soundhw", &b_info->u.hvm.soundhw, 0);
         xlu_cfg_get_defbool(config, "xen_platform_pci",
                             &b_info->u.hvm.xen_platform_pci, 0);
+        xlu_cfg_get_defbool(config, "xen_platform_pci_bar_uc",
+                            &b_info->u.hvm.xen_platform_pci_bar_uc, 0);
 
         if(b_info->u.hvm.vnc.listen
            && b_info->u.hvm.vnc.display
@@ -2974,6 +3070,15 @@ skip_usbdev:
 
     if (!xlu_cfg_get_long (config, "nr_spis", &l, 0))
         b_info->arch_arm.nr_spis = l;
+
+    xlu_cfg_get_defbool(config, "trap_unmapped_accesses",
+                        &b_info->trap_unmapped_accesses, 0);
+
+    if (!xlu_cfg_get_string(config, "arm_sci", &buf, 1)) {
+        if (parse_arm_sci_config(config, &b_info->arch_arm.arm_sci, buf)) {
+            exit(EXIT_FAILURE);
+        }
+    }
 
     parse_vkb_list(config, d_config);
 

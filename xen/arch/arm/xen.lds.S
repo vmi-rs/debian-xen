@@ -6,8 +6,6 @@
 #include <xen/lib.h>
 #include <xen/xen.lds.h>
 #include <asm/page.h>
-#undef ENTRY
-#undef ALIGN
 
 ENTRY(start)
 
@@ -47,7 +45,6 @@ SECTIONS
        *(.text.*)
 #endif
 
-       *(.fixup)
        *(.gnu.warning)
        _etext = .;             /* End of text section */
   } :text = 0x9090
@@ -60,6 +57,7 @@ SECTIONS
 
        *(.rodata)
        *(.rodata.*)
+       VPCI_ARRAY
        *(.data.rel.ro)
        *(.data.rel.ro.*)
 
@@ -67,8 +65,6 @@ SECTIONS
        __proc_info_start = .;
        *(.proc.info)
        __proc_info_end = .;
-
-       VPCI_ARRAY
   } :text
 
 #if defined(BUILD_ID)
@@ -90,27 +86,14 @@ SECTIONS
   } : text
 
   .data.read_mostly : {
-       /* Exception table */
-       __start___ex_table = .;
-       *(.ex_table)
-       __stop___ex_table = .;
-
-       /* Pre-exception table */
-       __start___pre_ex_table = .;
-       *(.ex_table.pre)
-       __stop___pre_ex_table = .;
-
        *(.data.read_mostly)
   } :text
 
   . = ALIGN(SMP_CACHE_BYTES);
   .data : {                    /* Data */
        *(.data.page_aligned)
-       . = ALIGN(8);
-       __start_schedulers_array = .;
-       *(.data.schedulers)
-       __end_schedulers_array = .;
 
+       SCHEDULER_ARRAY
        HYPFS_PARAM
 
        *(.data .data.*)
@@ -209,6 +192,8 @@ SECTIONS
   ELF_DETAILS_SECTIONS
 }
 
+PROVIDE(cpu_present_map = cpu_possible_map);
+
 /*
  * The assembly code use _start and XEN_VIRT_START interchangeably to
  * match the context.
@@ -239,4 +224,6 @@ ASSERT(IS_ALIGNED(__bss_start,      POINTER_ALIGN), "__bss_start is misaligned")
 ASSERT(IS_ALIGNED(__bss_end,        POINTER_ALIGN), "__bss_end is misaligned")
 /* To simplify the logic in head.S, we want to _end to be page aligned */
 ASSERT(IS_ALIGNED(_end,             PAGE_SIZE), "_end is not page aligned")
+#ifdef CONFIG_MMU
 ASSERT((_end - _start) <= XEN_VIRT_SIZE, "Xen is too big")
+#endif

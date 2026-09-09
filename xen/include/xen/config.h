@@ -13,7 +13,7 @@
 
 #include <xen/kconfig.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <xen/compiler.h>
 
 #if defined(CONFIG_ENFORCE_UNIQUE_SYMBOLS) || defined(__clang__)
@@ -82,10 +82,6 @@
 #define __force
 #define __bitwise
 
-#define KB(_kb)     (_AC(_kb, ULL) << 10)
-#define MB(_mb)     (_AC(_mb, ULL) << 20)
-#define GB(_gb)     (_AC(_gb, ULL) << 30)
-
 /* allow existing code to work with Kconfig variable */
 #define NR_CPUS CONFIG_NR_CPUS
 
@@ -96,6 +92,24 @@
 #ifndef ZERO_BLOCK_PTR
 /* Return value for zero-size allocation, distinguished from NULL. */
 #define ZERO_BLOCK_PTR ((void *)-1L)
+#endif
+
+#define BYTES_PER_LONG  __SIZEOF_LONG__
+
+#define BITS_PER_BYTE   __CHAR_BIT__
+#define BITS_PER_INT    (BITS_PER_BYTE * __SIZEOF_INT__)
+#define BITS_PER_LONG   (BITS_PER_BYTE * BYTES_PER_LONG)
+#define BITS_PER_LLONG  (BITS_PER_BYTE * __SIZEOF_LONG_LONG__)
+
+/* It is assumed that sizeof(void *) == __alignof(void *) */
+#define POINTER_ALIGN   __SIZEOF_POINTER__
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+# define __LITTLE_ENDIAN
+# define __LITTLE_ENDIAN_BITFIELD
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+# define __BIG_ENDIAN
+# define __BIG_ENDIAN_BITFIELD
 #endif
 
 #endif /* __XEN_CONFIG_H__ */

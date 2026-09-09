@@ -10,6 +10,12 @@
 #ifndef __X86_PV_MM_H__
 #define __X86_PV_MM_H__
 
+#include <xen/stdbool.h>
+
+struct cpu_user_regs;
+struct page_info;
+struct vcpu;
+
 #ifdef CONFIG_PV
 
 int pv_ro_page_fault(unsigned long addr, struct cpu_user_regs *regs);
@@ -18,7 +24,7 @@ int pv_set_gdt(struct vcpu *v, const unsigned long frames[],
                unsigned int entries);
 void pv_destroy_gdt(struct vcpu *v);
 
-bool pv_map_ldt_shadow_page(unsigned int off);
+bool pv_map_ldt_shadow_page(unsigned int offset);
 bool pv_destroy_ldt(struct vcpu *v);
 
 int validate_segdesc_page(struct page_info *page);
@@ -26,7 +32,7 @@ int validate_segdesc_page(struct page_info *page);
 #else
 
 #include <xen/errno.h>
-#include <xen/lib.h>
+#include <xen/bug.h>
 
 static inline int pv_ro_page_fault(unsigned long addr,
                                    struct cpu_user_regs *regs)
@@ -40,7 +46,7 @@ static inline int pv_set_gdt(struct vcpu *v, const unsigned long frames[],
 { ASSERT_UNREACHABLE(); return -EINVAL; }
 static inline void pv_destroy_gdt(struct vcpu *v) { ASSERT_UNREACHABLE(); }
 
-static inline bool pv_map_ldt_shadow_page(unsigned int off) { return false; }
+static inline bool pv_map_ldt_shadow_page(unsigned int offset) { return false; }
 static inline bool pv_destroy_ldt(struct vcpu *v)
 { ASSERT_UNREACHABLE(); return false; }
 

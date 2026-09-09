@@ -195,7 +195,7 @@ static void mcequirk_amd_apply(enum mcequirk_amd_flags flags)
         break;
 
     case MCEQUIRK_F10_GART:
-        if ( rdmsr_safe(MSR_AMD64_MCx_MASK(4), val) == 0 )
+        if ( rdmsr_safe(MSR_AMD64_MCx_MASK(4), &val) == 0 )
             wrmsr_safe(MSR_AMD64_MCx_MASK(4), val | (1 << 10));
         break;
 
@@ -318,7 +318,7 @@ amd_mcheck_init(const struct cpuinfo_x86 *c, bool bsp)
         mcequirk_amd_apply(quirkflag);
 
     if ( cpu_has(c, X86_FEATURE_AMD_PPIN) &&
-         (c == &boot_cpu_data || ppin_msr) )
+         (bsp || ppin_msr) )
     {
         uint64_t val;
 
@@ -333,7 +333,7 @@ amd_mcheck_init(const struct cpuinfo_x86 *c, bool bsp)
 
         if ( !(val & PPIN_ENABLE) )
             ppin_msr = 0;
-        else if ( c == &boot_cpu_data )
+        else if ( bsp )
             ppin_msr = MSR_AMD_PPIN;
     }
 

@@ -3,7 +3,7 @@
 
 #include <xen/macros.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <xen/inttypes.h>
 #include <xen/stdarg.h>
@@ -47,6 +47,8 @@ int parse_signed_integer(const char *name, const char *s, const char *e,
  */
 int cmdline_strcmp(const char *frag, const char *name);
 
+void print_version(void);
+
 #ifdef CONFIG_DEBUG_TRACE
 extern void debugtrace_dump(void);
 extern void debugtrace_printk(const char *fmt, ...)
@@ -80,7 +82,8 @@ extern void guest_printk(const struct domain *d, const char *fmt, ...)
     __attribute__ ((format (printf, 2, 3)));
 extern void noreturn panic(const char *fmt, ...)
     __attribute__ ((format (printf, 1, 2)));
-extern int __printk_ratelimit(int ratelimit_ms, int ratelimit_burst);
+extern int __printk_ratelimit(unsigned int ratelimit_ms,
+                              unsigned int ratelimit_burst);
 extern int printk_ratelimit(void);
 
 #define gprintk(lvl, fmt, args...) \
@@ -133,8 +136,6 @@ unsigned long long simple_strtoull(
 
 unsigned long long parse_size_and_unit(const char *s, const char **ps);
 
-uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c);
-
 /*
  * A slightly more typesafe variant of cmpxchg() when the entities dealt with
  * are pointers.
@@ -162,49 +163,6 @@ void cf_check dump_execstate(const struct cpu_user_regs *regs);
 
 void init_constructors(void);
 
-/*
- * bsearch - binary search an array of elements
- * @key: pointer to item being searched for
- * @base: pointer to first element to search
- * @num: number of elements
- * @size: size of each element
- * @cmp: pointer to comparison function
- *
- * This function does a binary search on the given array.  The
- * contents of the array should already be in ascending sorted order
- * under the provided comparison function.
- *
- * Note that the key need not have the same type as the elements in
- * the array, e.g. key could be a string and the comparison function
- * could compare the string with the struct's name field.  However, if
- * the key and elements in the array are of the same type, you can use
- * the same comparison function for both sort() and bsearch().
- */
-#ifndef BSEARCH_IMPLEMENTATION
-extern gnu_inline
-#endif
-void *bsearch(const void *key, const void *base, size_t num, size_t size,
-              int (*cmp)(const void *key, const void *elt))
-{
-    size_t start = 0, end = num;
-    int result;
-
-    while ( start < end )
-    {
-        size_t mid = start + (end - start) / 2;
-
-        result = cmp(key, base + mid * size);
-        if ( result < 0 )
-            end = mid;
-        else if ( result > 0 )
-            start = mid + 1;
-        else
-            return (void *)base + mid * size;
-    }
-
-    return NULL;
-}
-
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __LIB_H__ */

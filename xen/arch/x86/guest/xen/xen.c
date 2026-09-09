@@ -40,7 +40,7 @@ DEFINE_PER_CPU(struct vcpu_info *, vcpu_info);
  *     0 vmcall
  *   > 0 vmmcall
  */
-int8_t __initdata early_hypercall_insn = -1;
+int8_t asmlinkage __initdata early_hypercall_insn = -1;
 
 /*
  * Called once during the first hypercall to figure out which instruction to
@@ -120,7 +120,7 @@ static void map_shared_info(void)
 
     /* Mask all upcalls */
     for ( i = 0; i < ARRAY_SIZE(XEN_shared_info->evtchn_mask); i++ )
-        write_atomic(&XEN_shared_info->evtchn_mask[i], ~0ul);
+        write_atomic(&XEN_shared_info->evtchn_mask[i], ~0UL);
 }
 
 static int map_vcpuinfo(void)
@@ -203,11 +203,11 @@ static void __init init_memmap(void)
 
 static void cf_check xen_evtchn_upcall(void)
 {
-    struct vcpu_info *vcpu_info = this_cpu(vcpu_info);
+    struct vcpu_info *vi = this_cpu(vcpu_info);
     unsigned long pending;
 
-    vcpu_info->evtchn_upcall_pending = 0;
-    pending = xchg(&vcpu_info->evtchn_pending_sel, 0);
+    vi->evtchn_upcall_pending = 0;
+    pending = xchg(&vi->evtchn_pending_sel, 0);
 
     while ( pending )
     {
@@ -233,15 +233,11 @@ static void cf_check xen_evtchn_upcall(void)
     ack_APIC_irq();
 }
 
+static uint8_t __ro_after_init evtchn_upcall_vector;
+
 static int init_evtchn(void)
 {
-    static uint8_t evtchn_upcall_vector;
     int rc;
-
-    if ( !evtchn_upcall_vector )
-        alloc_direct_apic_vector(&evtchn_upcall_vector, xen_evtchn_upcall);
-
-    ASSERT(evtchn_upcall_vector);
 
     rc = xen_hypercall_set_evtchn_upcall_vector(this_cpu(vcpu_id),
                                                 evtchn_upcall_vector);
@@ -251,6 +247,10 @@ static int init_evtchn(void)
         return rc;
     }
 
+    /*
+     * HVM_PARAM_CALLBACK_IRQ is not moved on migrate, so has to be set up
+     * again on resume.
+     */
     if ( smp_processor_id() == 0 )
     {
         struct xen_hvm_param a = {
@@ -292,6 +292,8 @@ static void __init cf_check setup(void)
                "unable to map vCPU info, limiting vCPUs to: %u\n",
                XEN_LEGACY_MAX_VCPUS);
     }
+
+    alloc_direct_apic_vector(&evtchn_upcall_vector, xen_evtchn_upcall);
 
     BUG_ON(init_evtchn());
 }

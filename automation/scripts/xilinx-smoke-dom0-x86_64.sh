@@ -15,19 +15,21 @@ WORKDIR="${PWD}"
 TEST="$1"
 PASS_MSG="Test passed: ${TEST}"
 XEN_CMD_DOM0="dom0=pvh dom0_max_vcpus=4 dom0_mem=4G"
-XEN_CMD_XEN="sched=null loglvl=all guest_loglvl=all console_timestamps=boot ucode=scan"
+XEN_CMD_XEN="sched=null loglvl=all guest_loglvl=all console_timestamps=boot watchdog"
 XEN_CMD_EXTRA=""
 DOM0_CMD=""
 DOMU_CMD=""
 DOMU_CFG='
 type = "pvh"
 name = "domU"
-kernel = "/boot/vmlinuz"
+kernel = "/boot/vmlinuz-domU"
 ramdisk = "/boot/initrd-domU"
 extra = "root=/dev/ram0 console=hvc0"
 memory = 512
 '
 DOMU_CFG_EXTRA=""
+dom0_rootfs_extra_comp=()
+dom0_rootfs_extra_uncomp=()
 
 # Select test variant.
 if [ "${TEST}" = "ping" ]; then
@@ -71,6 +73,7 @@ do
   sleep 1
 done | argo-exec -p 28333 -d 0 -- /bin/echo
 "
+    dom0_rootfs_extra_comp+=(binaries/argo.cpio.gz)
     DOM0_CMD="
 insmod /lib/modules/\$(uname -r)/updates/xen-argo.ko
 xl -vvv create /etc/xen/domU.cfg
@@ -103,13 +106,26 @@ find . | cpio -R 0:0 -H newc -o | gzip >> ../binaries/domU-rootfs.cpio.gz
 cd ..
 rm -rf rootfs
 
-# Dom0 rootfs
-cp binaries/ucode.cpio binaries/dom0-rootfs.cpio.gz
-cat binaries/rootfs.cpio.gz >> binaries/dom0-rootfs.cpio.gz
-cat binaries/xen-tools.cpio.gz >> binaries/dom0-rootfs.cpio.gz
-if [[ "${TEST}" == argo ]]; then
-    cat binaries/argo.cpio.gz >> binaries/dom0-rootfs.cpio.gz
-fi
+# Package domU kernel+rootfs in /boot for dom0 (uncompressed)
+mkdir -p rootfs/boot
+cd rootfs
+cp ../binaries/bzImage boot/vmlinuz-domU
+cp ../binaries/domU-rootfs.cpio.gz boot/initrd-domU
+find . | cpio -R 0:0 -H newc -o > ../binaries/domU-in-dom0.cpio
+cd ..
+rm -rf rootfs
+
+# Dom0 rootfs.  The order of concatenation is important; ucode wants to come
+# first, and all uncompressed must be ahead of compressed.
+dom0_rootfs_parts=(
+    binaries/ucode.cpio
+    binaries/domU-in-dom0.cpio
+    "${dom0_rootfs_extra_uncomp[@]}"
+    binaries/rootfs.cpio.gz
+    binaries/xen-tools.cpio.gz
+    "${dom0_rootfs_extra_comp[@]}"
+)
+cat "${dom0_rootfs_parts[@]}" > binaries/dom0-rootfs.cpio.gz
 
 # test-local configuration
 mkdir -p rootfs
@@ -125,8 +141,6 @@ echo "${DOMU_CFG}${DOMU_CFG_EXTRA}" > etc/xen/domU.cfg
 echo "XENCONSOLED_TRACE=all" >> etc/default/xencommons
 echo "QEMU_XEN=/bin/false" >> etc/default/xencommons
 mkdir -p var/log/xen/console
-cp ../binaries/bzImage boot/vmlinuz
-cp ../binaries/domU-rootfs.cpio.gz boot/initrd-domU
 find . | cpio -R 0:0 -H newc -o | gzip >> ../binaries/dom0-rootfs.cpio.gz
 cd ..
 
@@ -159,7 +173,7 @@ export BOOT_MSG="Latest ChangeSet: "
 export TEST_CMD="cat ${SERIAL_DEV}"
 export TEST_LOG="smoke.serial"
 
-./automation/scripts/console.exp | sed 's/\r\+$//'
+./automation/scripts/console.exp |& sed 's/\r\+$//'
 TEST_RESULT=$?
 sh "/scratch/gitlab-runner/${TEST_BOARD}.sh" 2
 exit ${TEST_RESULT}

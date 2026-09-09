@@ -9,15 +9,18 @@
 #ifndef __ASM_X86_HVM_HVM_H__
 #define __ASM_X86_HVM_HVM_H__
 
+#include <xen/alternative-call.h>
 #include <xen/mm.h>
 
-#include <asm/alternative.h>
 #include <asm/asm_defns.h>
 #include <asm/current.h>
-#include <asm/x86_emulate.h>
 #include <asm/hvm/asid.h>
+#include <asm/msr-index.h>
+#include <asm/x86_emulate.h>
 
 struct pirq; /* needed by pi_update_irte */
+struct hvm_hw_cpu;
+struct xen_domctl_createdomain;
 
 #ifdef CONFIG_HVM_FEP
 /* Permit use of the Forced Emulation Prefix in HVM guests */
@@ -159,12 +162,10 @@ struct hvm_function_table {
 
     void (*cpuid_policy_changed)(struct vcpu *v);
 
-    void (*fpu_leave)(struct vcpu *v);
-
     int  (*get_guest_pat)(struct vcpu *v, uint64_t *gpat);
     int  (*set_guest_pat)(struct vcpu *v, uint64_t gpat);
 
-    void (*set_tsc_offset)(struct vcpu *v, u64 offset, u64 at_tsc);
+    void (*set_tsc_offset)(struct vcpu *v, uint64_t offset);
 
     void (*inject_event)(const struct x86_event *event);
 
@@ -185,13 +186,16 @@ struct hvm_function_table {
 
     /* Instruction intercepts: non-void return values are X86EMUL codes. */
     void (*wbinvd_intercept)(void);
-    void (*fpu_dirty_intercept)(void);
     int (*msr_read_intercept)(unsigned int msr, uint64_t *msr_content);
     int (*msr_write_intercept)(unsigned int msr, uint64_t msr_content);
     void (*handle_cd)(struct vcpu *v, unsigned long value);
     void (*set_info_guest)(struct vcpu *v);
     void (*set_rdtsc_exiting)(struct vcpu *v, bool enable);
+
+#ifdef CONFIG_VM_EVENT
     void (*set_descriptor_access_exiting)(struct vcpu *v, bool enable);
+    void (*enable_msr_interception)(struct domain *d, uint32_t msr);
+#endif
 
     /* Nested HVM */
     int (*nhvm_vcpu_initialise)(struct vcpu *v);
@@ -223,20 +227,22 @@ struct hvm_function_table {
                                 paddr_t *L1_gpa, unsigned int *page_order,
                                 uint8_t *p2m_acc, struct npfec npfec);
 
-    void (*enable_msr_interception)(struct domain *d, uint32_t msr);
-
+#ifdef CONFIG_ALTP2M
     /* Alternate p2m */
     void (*altp2m_vcpu_update_p2m)(struct vcpu *v);
     void (*altp2m_vcpu_update_vmfunc_ve)(struct vcpu *v);
     bool (*altp2m_vcpu_emulate_ve)(struct vcpu *v);
     int (*altp2m_vcpu_emulate_vmfunc)(const struct cpu_user_regs *regs);
+#endif
 
+#ifdef CONFIG_VMTRACE
     /* vmtrace */
     int (*vmtrace_control)(struct vcpu *v, bool enable, bool reset);
     int (*vmtrace_output_position)(struct vcpu *v, uint64_t *pos);
     int (*vmtrace_set_option)(struct vcpu *v, uint64_t key, uint64_t value);
     int (*vmtrace_get_option)(struct vcpu *v, uint64_t key, uint64_t *value);
     int (*vmtrace_reset)(struct vcpu *v);
+#endif
 
     uint64_t (*get_reg)(struct vcpu *v, unsigned int reg);
     void (*set_reg)(struct vcpu *v, unsigned int reg, uint64_t val);
@@ -260,6 +266,9 @@ extern int8_t hvm_port80_allowed;
 extern const struct hvm_function_table *start_svm(void);
 extern const struct hvm_function_table *start_vmx(void);
 
+void svm_fill_funcs(void);
+void vmx_fill_funcs(void);
+
 int hvm_domain_initialise(struct domain *d,
                           const struct xen_domctl_createdomain *config);
 void hvm_domain_relinquish_resources(struct domain *d);
@@ -281,7 +290,6 @@ u64 hvm_scale_tsc(const struct domain *d, u64 tsc);
 u64 hvm_get_tsc_scaling_ratio(u32 gtsc_khz);
 
 void hvm_init_guest_time(struct domain *d);
-void hvm_set_guest_time(struct vcpu *v, u64 guest_time);
 uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc);
 
 int vmsi_deliver(
@@ -387,6 +395,9 @@ static inline bool using_svm(void)
     return IS_ENABLED(CONFIG_AMD_SVM) && cpu_has_svm;
 }
 
+#define hvm_is_in_uc_mode(d) \
+    (using_vmx() && (d)->arch.hvm.vmx.in_uc_mode)
+
 #ifdef CONFIG_HVM
 
 #define hvm_get_guest_tsc(v) hvm_get_guest_tsc_fixed(v, 0)
@@ -427,10 +438,17 @@ static inline bool using_svm(void)
 
 #define hvm_long_mode_active(v) (!!((v)->arch.hvm.guest_efer & EFER_LMA))
 
+#ifdef CONFIG_VM_EVENT
 static inline bool hvm_has_set_descriptor_access_exiting(void)
 {
     return hvm_funcs.set_descriptor_access_exiting;
 }
+
+static inline void hvm_enable_msr_interception(struct domain *d, uint32_t msr)
+{
+    alternative_vcall(hvm_funcs.enable_msr_interception, d, msr);
+}
+#endif /* CONFIG_VM_EVENT */
 
 static inline void hvm_domain_creation_finished(struct domain *d)
 {
@@ -474,10 +492,9 @@ static inline void hvm_cpuid_policy_changed(struct vcpu *v)
     alternative_vcall(hvm_funcs.cpuid_policy_changed, v);
 }
 
-static inline void hvm_set_tsc_offset(struct vcpu *v, uint64_t offset,
-                                      uint64_t at_tsc)
+static inline void hvm_set_tsc_offset(struct vcpu *v, uint64_t offset)
 {
-    alternative_vcall(hvm_funcs.set_tsc_offset, v, offset, at_tsc);
+    alternative_vcall(hvm_funcs.set_tsc_offset, v, offset);
 }
 
 /*
@@ -504,7 +521,8 @@ hvm_get_cpl(struct vcpu *v)
     (has_hvm_params(d) ? (d)->arch.hvm.params[HVM_PARAM_VIRIDIAN] : 0)
 
 #define is_viridian_domain(d) \
-    (is_hvm_domain(d) && (viridian_feature_mask(d) & HVMPV_base_freq))
+    (IS_ENABLED(CONFIG_VIRIDIAN) && \
+     is_hvm_domain(d) && (viridian_feature_mask(d) & HVMPV_base_freq))
 
 #define is_viridian_vcpu(v) \
     is_viridian_domain((v)->domain)
@@ -621,10 +639,6 @@ static inline void hvm_sanitize_regs_fields(struct cpu_user_regs *regs,
     regs->saved_upcall_mask = 0xbf;
     regs->cs = 0xbeef;
     regs->ss = 0xbeef;
-    regs->ds = 0xbeef;
-    regs->es = 0xbeef;
-    regs->fs = 0xbeef;
-    regs->gs = 0xbeef;
 #endif
 }
 
@@ -677,11 +691,6 @@ static inline int nhvm_hap_walk_L1_p2m(
         v, L2_gpa, L1_gpa, page_order, p2m_acc, npfec);
 }
 
-static inline void hvm_enable_msr_interception(struct domain *d, uint32_t msr)
-{
-    alternative_vcall(hvm_funcs.enable_msr_interception, d, msr);
-}
-
 static inline bool hvm_is_singlestep_supported(void)
 {
     return hvm_funcs.caps.singlestep;
@@ -704,6 +713,7 @@ static inline bool hvm_nested_virt_supported(void)
     return hvm_funcs.caps.nested_virt;
 }
 
+#ifdef CONFIG_ALTP2M
 /* updates the current hardware p2m */
 static inline void altp2m_vcpu_update_p2m(struct vcpu *v)
 {
@@ -728,7 +738,11 @@ static inline bool altp2m_vcpu_emulate_ve(struct vcpu *v)
     }
     return false;
 }
+#else /* !CONFIG_ALTP2M */
+bool altp2m_vcpu_emulate_ve(struct vcpu *v);
+#endif /* CONFIG_ALTP2M */
 
+#ifdef CONFIG_VMTRACE
 static inline int hvm_vmtrace_control(struct vcpu *v, bool enable, bool reset)
 {
     if ( hvm_funcs.vmtrace_control )
@@ -763,11 +777,20 @@ static inline int hvm_vmtrace_get_option(
 
     return -EOPNOTSUPP;
 }
+#else
+/*
+ * Function declaration(s) here are used without definition(s) to make compiler
+ * happy when VMTRACE=n, compiler DCE will eliminate unused code.
+ */
+int hvm_vmtrace_output_position(struct vcpu *v, uint64_t *pos);
+#endif
 
 static inline int hvm_vmtrace_reset(struct vcpu *v)
 {
+#ifdef CONFIG_VMTRACE
     if ( hvm_funcs.vmtrace_reset )
         return alternative_call(hvm_funcs.vmtrace_reset, v);
+#endif
 
     return -EOPNOTSUPP;
 }
@@ -838,7 +861,7 @@ static inline void hvm_sync_pir_to_irr(struct vcpu *v)
  */
 int hvm_guest_x86_mode(struct vcpu *v);
 void hvm_cpuid_policy_changed(struct vcpu *v);
-void hvm_set_tsc_offset(struct vcpu *v, uint64_t offset, uint64_t at_tsc);
+void hvm_set_tsc_offset(struct vcpu *v, uint64_t offset);
 
 /* End of prototype list */
 
@@ -923,28 +946,6 @@ static inline void hvm_inject_hw_exception(unsigned int vector, int errcode)
 static inline bool hvm_has_set_descriptor_access_exiting(void)
 {
     return false;
-}
-
-static inline int hvm_vmtrace_control(struct vcpu *v, bool enable, bool reset)
-{
-    return -EOPNOTSUPP;
-}
-
-static inline int hvm_vmtrace_output_position(struct vcpu *v, uint64_t *pos)
-{
-    return -EOPNOTSUPP;
-}
-
-static inline int hvm_vmtrace_set_option(
-    struct vcpu *v, uint64_t key, uint64_t value)
-{
-    return -EOPNOTSUPP;
-}
-
-static inline int hvm_vmtrace_get_option(
-    struct vcpu *v, uint64_t key, uint64_t *value)
-{
-    return -EOPNOTSUPP;
 }
 
 static inline uint64_t hvm_get_reg(struct vcpu *v, unsigned int reg)

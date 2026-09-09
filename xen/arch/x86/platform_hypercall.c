@@ -27,6 +27,7 @@
 #include <asm/current.h>
 #include <public/platform.h>
 #include <acpi/cpufreq/processor_perf.h>
+#include <asm/cpu-policy.h>
 #include <asm/edd.h>
 #include <asm/microcode.h>
 #include <asm/mtrr.h>
@@ -86,6 +87,28 @@ static bool msr_read_allowed(unsigned int msr)
 
     case MSR_MCU_OPT_CTRL:
         return cpu_has_srbds_ctrl;
+
+    case MSR_IA32_THERM_STATUS:
+        return host_cpu_policy.basic.acpi;
+
+    /*
+     * This MSR is present on most Intel Core-family CPUs since Nehalem but is not an
+     * architectural MSR. No CPUID bit enumerates this MSR.
+     *
+     * This MSR exposes "temperature target" that is needed to compute the CPU
+     * temperature. The "temperature target" is a model specific value, and this MSR is
+     * the only known method of getting the one used for the CPU. On some CPU models with
+     * Intel SST-PP, the "temperature target" can vary over time.
+     *
+     * We assume all Intel CPUs with DTS may support this MSR; but reads can fail in case
+     * the platform doesn't actually support this MSR.
+     */
+    case MSR_TEMPERATURE_TARGET:
+        return boot_cpu_data.vendor == X86_VENDOR_INTEL &&
+               host_cpu_policy.basic.digital_temp_sensor;
+
+    case MSR_PACKAGE_THERM_STATUS:
+        return host_cpu_policy.basic.pkg_therm_mgmt;
     }
 
     if ( ppin_msr && msr == ppin_msr )
@@ -186,7 +209,7 @@ void cf_check resource_access(void *info)
                 if ( unlikely(read_tsc) )
                     local_irq_save(flags);
 
-                ret = rdmsr_safe(entry->idx, entry->val);
+                ret = rdmsr_safe(entry->idx, &entry->val);
 
                 if ( unlikely(read_tsc) )
                 {
@@ -311,9 +334,13 @@ ret_t do_platform_op(
     {
         XEN_GUEST_HANDLE(const_void) data;
 
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) )
+            break;
+
         guest_from_compat_handle(data, op->u.microcode.data);
 
-        ret = microcode_update(data, op->u.microcode.length, 0);
+        ret = ucode_update_hcall(data, op->u.microcode.length, 0);
         break;
     }
 
@@ -321,10 +348,14 @@ ret_t do_platform_op(
     {
         XEN_GUEST_HANDLE(const_void) data;
 
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_MICROCODE_LOADING) )
+            break;
+
         guest_from_compat_handle(data, op->u.microcode2.data);
 
-        ret = microcode_update(data, op->u.microcode2.length,
-                               op->u.microcode2.flags);
+        ret = ucode_update_hcall(data, op->u.microcode2.length,
+                                 op->u.microcode2.flags);
         break;
     }
 
@@ -415,10 +446,9 @@ ret_t do_platform_op(
         }
         case XEN_FW_VBEDDC_INFO:
             ret = -ESRCH;
-#ifdef CONFIG_VIDEO
-            if ( op->u.firmware_info.index != 0 )
-                break;
-            if ( *(u32 *)bootsym(boot_edid_info) == 0x13131313 )
+            if ( !IS_ENABLED(CONFIG_VIDEO) ||
+                 op->u.firmware_info.index != 0 ||
+                 *(uint32_t *)bootsym(boot_edid_info) == 0x13131313 )
                 break;
 
             op->u.firmware_info.u.vbeddc_info.capabilities =
@@ -434,7 +464,6 @@ ret_t do_platform_op(
                  copy_to_compat(op->u.firmware_info.u.vbeddc_info.edid,
                                 bootsym(boot_edid_info), 128) )
                 ret = -EFAULT;
-#endif
             break;
         case XEN_FW_EFI_INFO:
             ret = efi_get_info(op->u.firmware_info.index,
@@ -539,9 +568,16 @@ ret_t do_platform_op(
         case XEN_PM_PX:
             if ( !(xen_processor_pmbits & XEN_PROCESSOR_PM_PX) )
             {
-                ret = -ENOSYS;
+                /*
+                 * Neglect Px-info when registered cpufreq driver
+                 * isn't in Px mode
+                 */
+                ret = 0;
                 break;
             }
+            /* Xen doesn't support mixed mode */
+            ASSERT(!(xen_processor_pmbits & XEN_PROCESSOR_PM_CPPC));
+
             ret = set_px_pminfo(op->u.set_pminfo.id, &op->u.set_pminfo.u.perf);
             break;
  
@@ -571,6 +607,23 @@ ret_t do_platform_op(
             ret = acpi_set_pdc_bits(op->u.set_pminfo.id, pdc);
             break;
         }
+
+        case XEN_PM_CPPC:
+            if ( !(xen_processor_pmbits & XEN_PROCESSOR_PM_CPPC) )
+            {
+                /*
+                 * Neglect CPPC-info when registered cpufreq driver
+                 * isn't in CPPC mode
+                 */
+                ret = 0;
+                break;
+            }
+            /* Xen doesn't support mixed mode */
+            ASSERT(!(xen_processor_pmbits & XEN_PROCESSOR_PM_PX));
+
+            ret = set_cppc_pminfo(op->u.set_pminfo.id,
+                                  &op->u.set_pminfo.u.cppc_data);
+            break;
 
         default:
             ret = -EINVAL;
@@ -635,9 +688,9 @@ ret_t do_platform_op(
             const struct cpuinfo_x86 *c = &cpu_data[ver->xen_cpuid];
 
             memcpy(ver->vendor_id, c->x86_vendor_id, sizeof(ver->vendor_id));
-            ver->family = c->x86;
-            ver->model = c->x86_model;
-            ver->stepping = c->x86_mask;
+            ver->family = c->family;
+            ver->model = c->model;
+            ver->stepping = c->stepping;
         }
 
         ver->max_present = cpumask_last(&cpu_present_map);
@@ -865,20 +918,19 @@ ret_t do_platform_op(
         break;
     }
 
-#ifdef CONFIG_VIDEO
     case XENPF_get_dom0_console:
         BUILD_BUG_ON(sizeof(op->u.dom0_console) > sizeof(op->u.pad));
-        ret = sizeof(op->u.dom0_console);
-        if ( !fill_console_start_info(&op->u.dom0_console) )
-        {
-            ret = -ENODEV;
+
+        ret = -ENODEV;
+        if ( !IS_ENABLED(CONFIG_VIDEO) ||
+             !fill_console_start_info(&op->u.dom0_console) )
             break;
-        }
+
+        ret = sizeof(op->u.dom0_console);
 
         if ( copy_field_to_guest(u_xenpf_op, op, u.dom0_console) )
             ret = -EFAULT;
         break;
-#endif
 
     default:
         ret = -ENOSYS;

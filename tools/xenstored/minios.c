@@ -41,20 +41,31 @@ struct connection *add_socket_connection(int fd)
 	barf("socket based connection without sockets");
 }
 
-evtchn_port_t get_xenbus_evtchn(void)
+/*
+ * minios stubdom looks up dom0's event channel from the command line
+ * (--event).  The stubdom's own event channel is returned directly.
+ *
+ * Any other existing domains from dom0less/Hyperlaunch will have
+ * the event channel in the xenstore page, so lookup here isn't necessary.
+ * --event would not be set, so it would default to 0.
+ */
+evtchn_port_t get_domain_evtchn(unsigned int domid)
 {
-	return dom0_event;
+	if (domid == stub_domid)
+		return xenbus_evtchn;
+	else if (domid == priv_domid)
+		return dom0_event;
+
+	return 0;
 }
 
 void *xenbus_map(void)
 {
-	return xengnttab_map_grant_ref(*xgt_handle, xenbus_master_domid(),
-			GNTTAB_RESERVED_XENSTORE, PROT_READ|PROT_WRITE);
+	return xenstore_buf;
 }
 
 void unmap_xenbus(void *interface)
 {
-	xengnttab_unmap(*xgt_handle, interface, 1);
 }
 
 void early_init(bool live_update, bool dofork, const char *pidfile)
@@ -83,6 +94,16 @@ int get_socket_fd(void)
 
 void set_socket_fd(int fd)
 {
+}
+
+xenevtchn_handle *evtchn_fdopen(int fd)
+{
+	return xenevtchn_open(NULL, XENEVTCHN_NO_CLOEXEC);
+}
+
+int evtchn_rebind(int port)
+{
+	return xenevtchn_bind(xce_handle, port);
 }
 
 static void mount_thread(void *p)
@@ -121,15 +142,21 @@ static void mount_thread(void *p)
 		free(err);
 	}
 
-	p9_device = init_9pfront(0, XENSTORE_LIB_DIR);
+	p9_device = init_9pfront2(0, XENSTORE_LIB_DIR, INIT9P_FLAG_KEXEC);
 
 	/* Start logging if selected. */
 	reopen_log();
 }
 
-void mount_9pfs(void)
+void mount_9pfs(bool live_update)
 {
-	create_thread("mount-9pfs", mount_thread, NULL);
+	if (!live_update)
+		create_thread("mount-9pfs", mount_thread, NULL);
+	else {
+		p9_device = init_9pfront2(0, XENSTORE_LIB_DIR,
+					  INIT9P_FLAG_REINIT);
+		reopen_log();
+	}
 }
 
 const char *xenstore_rundir(void)

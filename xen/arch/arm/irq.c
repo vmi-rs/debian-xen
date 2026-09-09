@@ -19,7 +19,9 @@
 #include <asm/gic.h>
 #include <asm/vgic.h>
 
-const unsigned int nr_irqs = NR_IRQS;
+const unsigned int nr_irqs = IS_ENABLED(CONFIG_GICV3_ESPI) ?
+                                        (ESPI_MAX_INTID + 1) :
+                                        NR_IRQS;
 
 static unsigned int local_irqs_type[NR_LOCAL_IRQS];
 static DEFINE_SPINLOCK(local_irqs_type_lock);
@@ -45,13 +47,53 @@ void irq_end_none(struct irq_desc *irq)
     gic_hw_ops->gic_host_irq_type->end(irq);
 }
 
-static irq_desc_t irq_desc[NR_IRQS];
+static irq_desc_t irq_desc[NR_IRQS - NR_LOCAL_IRQS];
+#ifdef CONFIG_GICV3_ESPI
+/* TODO: Consider allocating an array dynamically */
+static irq_desc_t espi_desc[NR_ESPI_IRQS];
+
+static struct irq_desc *espi_to_desc(unsigned int irq)
+{
+    return &espi_desc[espi_intid_to_idx(irq)];
+}
+
+static int __init init_espi_data(void)
+{
+    unsigned int irq;
+
+    for ( irq = ESPI_BASE_INTID; irq <= ESPI_MAX_INTID; irq++ )
+    {
+        struct irq_desc *desc = irq_to_desc(irq);
+        int rc = init_one_irq_desc(desc);
+
+        if ( rc )
+            return rc;
+
+        desc->irq = irq;
+        desc->action  = NULL;
+    }
+
+    return 0;
+}
+#else
+
+static int __init init_espi_data(void)
+{
+    return 0;
+}
+#endif
+
 static DEFINE_PER_CPU(irq_desc_t[NR_LOCAL_IRQS], local_irq_desc);
 
 struct irq_desc *__irq_to_desc(unsigned int irq)
 {
     if ( irq < NR_LOCAL_IRQS )
         return &this_cpu(local_irq_desc)[irq];
+
+#ifdef CONFIG_GICV3_ESPI
+    if ( is_espi(irq) )
+        return espi_to_desc(irq);
+#endif
 
     return &irq_desc[irq-NR_LOCAL_IRQS];
 }
@@ -79,7 +121,7 @@ static int __init init_irq_data(void)
         desc->action  = NULL;
     }
 
-    return 0;
+    return init_espi_data();
 }
 
 static int init_local_irq_data(unsigned int cpu)
@@ -94,7 +136,10 @@ static int init_local_irq_data(unsigned int cpu)
         int rc = init_one_irq_desc(desc);
 
         if ( rc )
+        {
+            spin_unlock(&local_irqs_type_lock);
             return rc;
+        }
 
         desc->irq = irq;
         desc->action  = NULL;
@@ -415,7 +460,7 @@ err:
 bool is_assignable_irq(unsigned int irq)
 {
     /* For now, we can only route SPIs to the guest */
-    return (irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines());
+    return gic_is_spi(irq);
 }
 
 /*
@@ -442,11 +487,10 @@ int route_irq_to_guest(struct domain *d, unsigned int virq,
     unsigned long flags;
     int retval = 0;
 
-    if ( virq >= vgic_num_irqs(d) )
+    if ( !vgic_is_valid_line(d, virq) )
     {
         printk(XENLOG_G_ERR
-               "the vIRQ number %u is too high for domain %u (max = %u)\n",
-               irq, d->domain_id, vgic_num_irqs(d));
+               "invalid vIRQ number %u for domain %pd\n", irq, d);
         return -EINVAL;
     }
 
@@ -560,7 +604,7 @@ int release_guest_irq(struct domain *d, unsigned int virq)
     int ret;
 
     /* Only SPIs are supported */
-    if ( virq < NR_LOCAL_IRQS || virq >= vgic_num_irqs(d) )
+    if ( !vgic_is_spi(d, virq) )
         return -EINVAL;
 
     desc = vgic_get_hw_irq_desc(d, NULL, virq);
@@ -593,35 +637,6 @@ unlock:
     spin_unlock_irqrestore(&desc->lock, flags);
 
     return ret;
-}
-
-/*
- * pirq event channels. We don't use these on ARM, instead we use the
- * features of the GIC to inject virtualised normal interrupts.
- */
-struct pirq *alloc_pirq_struct(struct domain *d)
-{
-    return NULL;
-}
-
-/*
- * These are all unreachable given an alloc_pirq_struct
- * which returns NULL, all callers try to lookup struct pirq first
- * which will fail.
- */
-int pirq_guest_bind(struct vcpu *v, struct pirq *pirq, int will_share)
-{
-    BUG();
-}
-
-void pirq_guest_unbind(struct domain *d, struct pirq *pirq)
-{
-    BUG();
-}
-
-void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
-{
-    BUG();
 }
 
 static bool irq_validate_new_type(unsigned int curr, unsigned int new)

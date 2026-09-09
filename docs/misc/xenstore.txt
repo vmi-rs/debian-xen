@@ -86,6 +86,67 @@ parts of xenstore inaccessible to some clients.  In any case passing
 bulk data through xenstore is not recommended as the performance
 properties are poor.
 
+---------- Defined Xenstore message types ----------
+
+Below is a table with all defined Xenstore message types (type name
+and its associated numerical value).
+
+Some types are optional to be supported by a specific Xenstore
+implementation.  If an optional type is not supported by a Xenstore
+implementation, Xen tools will continue to work, maybe with slightly
+reduced functionality.  A mandatory type not being supported will
+result in severely reduced functionality, like inability to create
+domains.  In case a type is optional, this is stated in the table with
+the lost functionality in case Xenstore doesn't support that type.
+Any not supported type sent to Xenstore will result in an error response
+with the "ENOSYS" error.
+
+CONTROL               0    optional
+    If not supported, xenstore-control command will not work.
+    DEBUG is a deprecated alias of CONTROL.
+DIRECTORY             1
+READ                  2
+GET_PERMS             3
+WATCH                 4
+UNWATCH               5
+TRANSACTION_START     6
+TRANSACTION_END       7
+INTRODUCE             8
+RELEASE               9
+GET_DOMAIN_PATH      10
+WRITE                11
+MKDIR                12
+RM                   13
+SET_PERMS            14
+WATCH_EVENT          15
+    Not valid in client sent messages.
+    Only valid in Xenstore replies.
+ERROR                16
+    Not valid in client sent messages.
+    Only valid in Xenstore replies.
+IS_DOMAIN_INTRODUCED 17
+RESUME               18
+SET_TARGET           19
+RESTRICT             20    no longer supported
+    RESTRICT has been removed, the type value 20 is invalid.
+RESET_WATCHES        21
+DIRECTORY_PART       22    optional
+    If not supported, the output of xenstore-ls might be incomplete
+    with a node's sub-node list exceeding the maximum payload size
+    (e.g. the "/local/domain" node with more than ca. 1000 domains
+    active).
+GET_FEATURE          23    optional
+SET_FEATURE          24    optional
+    SET_FEATURE requires GET_FEATURE to be supported.
+    If unsupported, setting availability of Xenstore features per
+    domain is not possible.
+GET_QUOTA            25    optional
+SET_QUOTA            26    optional
+    SET_QUOTA requires GET_QUOTA to be supported.
+    If unsupported, setting of Xenstore quota per domain is not
+    possible.
+INVALID           65535
+    Guaranteed invalid type (never supported).
 
 ---------- Xenstore protocol details - introduction ----------
 
@@ -205,7 +266,8 @@ WATCH			<wpath>|<token>|[<depth>|]?
 	decimal value of 0 or larger): it denotes the directory levels
 	below <wpath> to consider for a match ("0" would not match for
 	a child of <wpath>, "1" would match only for a direct child,
-	etc.).
+	etc.).  The depth specification is possible only, if the
+	XENSTORE_SERVER_FEATURE_WATCHDEPTH feature is available.
 
 	<wpath> can be a <path> to watch or @<wspecial>.  In the
 	latter case <wspecial> may have any syntax but it matches
@@ -223,6 +285,8 @@ WATCH			<wpath>|<token>|[<depth>|]?
 	values are not supported.
 	For @releaseDomain it is possible to watch only for a specific
 	domain by specifying @releaseDomain/<domid> for the path.
+	This requires the XENSTORE_SERVER_FEATURE_WATCHDEPTH to be
+	available.
 
 	When a watch is first set up it is triggered once straight
 	away, with <path> equal to <wpath>.  Watches may be triggered
@@ -286,18 +350,31 @@ TRANSACTION_END		F|
 INTRODUCE		<domid>|<gfn>|<evtchn>|?
 	Notifies xenstored to communicate with this domain.
 
-	INTRODUCE is currently only used by xend (during domain
+	INTRODUCE is currently only used by xen tools (during domain
 	startup and various forms of restore and resume), and
 	xenstored prevents its use other than by dom0.
 
 	<domid> must be a real domain id (not 0 and not a special
 	DOMID_... value).  <gfn> must be a page in that domain
-	represented in signed decimal (!).  <evtchn> must be event
-	channel is an unbound event channel in <domid> (likewise in
-	decimal), on which xenstored will call bind_interdomain.
+	represented in signed decimal (!).  <evtchn> is an unbound
+	event channel in <domid> (likewise in decimal), on which
+	xenstored will call bind_interdomain.
+
 	Violations of these rules may result in undefined behaviour;
 	for example passing a high-bit-set 32-bit gfn as an unsigned
 	decimal will attempt to use 0x7fffffff instead (!).
+
+	The <gfn> field is used by xenstoreds which use foreign
+	mapping to access the ring page.
+
+	Alternatively, Grant 1 (GNTTAB_RESERVED_XENSTORE) is reserved
+	for the same purpose, and is populated by the domain builder
+	on behalf of the guest.  This mechanism is preferred because
+	it reduces the permissions that xenstored needs in order to
+	function.
+
+	Both <gfn> and Grant 1 need to agree, because implementations
+	of xenstored will use one and ignore the other.
 
 RELEASE			<domid>|
 	Manually requests that xenstored disconnect from the domain.
@@ -353,13 +430,14 @@ SET_FEATURE		<domid>|<value>|
 	to set a bit for a feature not being supported by the running
 	Xenstore will be denied. Providing no <domid> with the
 	GET_FEATURE command will return the features which are supported
-	by Xenstore.
+	by Xenstore for the domain issuing the command.
 
 	SET_FEATURE for a domain will be rejected after the INTRODUCE
-	command for this domain has been sent to xenstored.
+	command for this domain has been sent to xenstored. This has the
+	effect that dom0 will always have all supported features enabled.
 
-	xenstored prevents the use of GET_FEATURE and SET_FEATURE other
-	than by dom0.
+	xenstored prevents the use of GET_FEATURE with a domid specified
+	and SET_FEATURE other than by dom0.
 
 GET_QUOTA		[[<domid>|]<quota>|]	<value>|
 SET_QUOTA		[<domid>|]<quota>|<value>|

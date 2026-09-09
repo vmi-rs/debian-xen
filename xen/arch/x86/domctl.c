@@ -4,39 +4,42 @@
  * Copyright (c) 2002-2006, K A Fraser
  */
 
-#include <xen/types.h>
+#include <xen/compat.h>
+#include <xen/console.h>
+#include <xen/domain.h>
+#include <xen/domain_page.h>
+#include <xen/event.h>
+#include <xen/guest_access.h>
+#include <xen/hypercall.h>
+#include <xen/iocap.h>
+#include <xen/iommu.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
-#include <xen/guest_access.h>
-#include <xen/compat.h>
-#include <xen/pci.h>
-#include <public/domctl.h>
-#include <xen/sched.h>
-#include <xen/domain.h>
-#include <xen/event.h>
-#include <xen/domain_page.h>
-#include <asm/msr.h>
-#include <xen/trace.h>
-#include <xen/console.h>
-#include <xen/iocap.h>
 #include <xen/paging.h>
+#include <xen/pci.h>
+#include <xen/sched.h>
+#include <xen/trace.h>
+#include <xen/types.h>
+#include <xen/vm_event.h>
 
+#include <asm/acpi.h>
+#include <asm/cpu-policy.h>
 #include <asm/gdbsx.h>
-#include <asm/irq.h>
+#include <asm/guest-msr.h>
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
-#include <asm/processor.h>
-#include <asm/acpi.h> /* for hvm_acpi_power_button */
-#include <xen/hypercall.h> /* for arch_do_domctl */
-#include <xsm/xsm.h>
-#include <xen/iommu.h>
-#include <xen/vm_event.h>
-#include <public/vm_event.h>
-#include <asm/mem_sharing.h>
-#include <asm/xstate.h>
-#include <asm/psr.h>
-#include <asm/cpu-policy.h>
 #include <asm/io_apic.h>
+#include <asm/irq.h>
+#include <asm/mem_sharing.h>
+#include <asm/msr.h>
+#include <asm/processor.h>
+#include <asm/psr.h>
+#include <asm/xstate.h>
+
+#include <xsm/xsm.h>
+
+#include <public/domctl.h>
+#include <public/vm_event.h>
 
 static int update_domain_cpu_policy(struct domain *d,
                                     xen_domctl_cpu_policy_t *xdpc)
@@ -151,6 +154,7 @@ void arch_get_domain_info(const struct domain *d,
 static int do_vmtrace_op(struct domain *d, struct xen_domctl_vmtrace_op *op,
                          XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
+#ifdef CONFIG_VMTRACE
     struct vcpu *v;
     int rc;
 
@@ -195,6 +199,9 @@ static int do_vmtrace_op(struct domain *d, struct xen_domctl_vmtrace_op *op,
     vcpu_unpause(v);
 
     return rc;
+#else
+    return -EOPNOTSUPP;
+#endif
 }
 
 #define MAX_IOPORTS 0x10000
@@ -213,6 +220,10 @@ long arch_do_domctl(
     {
 
     case XEN_DOMCTL_shadow_op:
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_PAGING) )
+            break;
+
         ret = paging_domctl(d, &domctl->u.shadow_op, u_domctl, 0);
         if ( ret == -ERESTART )
             return hypercall_create_continuation(
@@ -242,6 +253,36 @@ long arch_do_domctl(
             ret = ioports_permit_access(d, fp, fp + np - 1);
         else
             ret = ioports_deny_access(d, fp, fp + np - 1);
+
+        iocaps_double_unlock(d, true);
+        break;
+    }
+
+    case XEN_DOMCTL_irq_permission:
+    {
+        unsigned int pirq = domctl->u.irq_permission.pirq, irq;
+        bool allow = domctl->u.irq_permission.allow_access;
+
+        ret = -EINVAL;
+        if ( pirq >= currd->nr_pirqs )
+            break;
+
+        irq = domain_pirq_to_irq(currd, pirq);
+
+        ret = -EPERM;
+        if ( irq )
+            ret = xsm_irq_permission(XSM_PRIV, d, irq, allow);
+        if ( ret )
+            break;
+
+        iocaps_double_lock(d, true);
+
+        if ( !irq_access_permitted(currd, irq) )
+            ret = -EPERM;
+        else if ( allow )
+            ret = irq_permit_access(d, irq);
+        else
+            ret = irq_deny_access(d, irq);
 
         iocaps_double_unlock(d, true);
         break;
@@ -289,6 +330,10 @@ long arch_do_domctl(
 
         /* Games to allow this code block to handle a compat guest. */
         void __user *guest_handle = domctl->u.getpageframeinfo3.array.p;
+
+        ret = xsm_domctl(XSM_PRIV, d, domctl);
+        if ( ret )
+            break;
 
         if ( unlikely(num > 1024) ||
              unlikely(num != domctl->u.getpageframeinfo3.num) )
@@ -864,10 +909,13 @@ long arch_do_domctl(
         }
         break;
 
-#ifdef CONFIG_HVM
     case XEN_DOMCTL_debug_op:
     {
         struct vcpu *v;
+
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_HVM) )
+            break;
 
         ret = -EINVAL;
         if ( (domctl->u.debug_op.vcpu >= d->max_vcpus) ||
@@ -882,7 +930,6 @@ long arch_do_domctl(
         ret = hvm_debug_op(v, domctl->u.debug_op.op);
         break;
     }
-#endif
 
     case XEN_DOMCTL_gdbsx_guestmemio:
     case XEN_DOMCTL_gdbsx_pausevcpu:
@@ -1033,7 +1080,6 @@ long arch_do_domctl(
 
                 v->arch.xcr0 = _xcr0;
                 v->arch.xcr0_accum = _xcr0_accum;
-                v->arch.nonlazy_xstate_used = _xcr0_accum & XSTATE_NONLAZY;
                 compress_xsave_states(v, _xsave_area,
                                       evc->size - PV_XSAVE_HDR_SIZE);
 
@@ -1055,15 +1101,18 @@ long arch_do_domctl(
         break;
     }
 
-#ifdef CONFIG_MEM_SHARING
     case XEN_DOMCTL_mem_sharing_op:
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_MEM_SHARING) )
+            break;
+
         ret = mem_sharing_domctl(d, &domctl->u.mem_sharing_op);
         break;
-#endif
 
-#if P2M_AUDIT
     case XEN_DOMCTL_audit_p2m:
-        if ( d == currd )
+        if ( !P2M_AUDIT )
+            ret = -EOPNOTSUPP;
+        else if ( d == currd )
             ret = -EPERM;
         else
         {
@@ -1074,7 +1123,6 @@ long arch_do_domctl(
             copyback = true;
         }
         break;
-#endif /* P2M_AUDIT */
 
     case XEN_DOMCTL_set_broken_page_p2m:
     {
@@ -1262,9 +1310,12 @@ long arch_do_domctl(
         break;
 
     case XEN_DOMCTL_psr_alloc:
+        ret = -EOPNOTSUPP;
+        if ( !IS_ENABLED(CONFIG_X86_PSR) )
+            break;
+
         switch ( domctl->u.psr_alloc.cmd )
         {
-#ifdef CONFIG_X86_PSR
         case XEN_DOMCTL_PSR_SET_L3_CBM:
             ret = psr_set_val(d, domctl->u.psr_alloc.target,
                               domctl->u.psr_alloc.data,
@@ -1326,8 +1377,6 @@ long arch_do_domctl(
             break;
 
 #undef domctl_psr_get_val
-
-#endif /* CONFIG_X86_PSR */
 
         default:
             ret = -EOPNOTSUPP;
@@ -1410,28 +1459,53 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     unsigned int i;
     const struct domain *d = v->domain;
     bool compat = is_pv_32bit_domain(d);
+    const struct xsave_struct *xsave_area;
 #ifdef CONFIG_COMPAT
 #define c(fld) (!compat ? (c.nat->fld) : (c.cmp->fld))
 #else
 #define c(fld) (c.nat->fld)
 #endif
 
-    BUILD_BUG_ON(sizeof(c.nat->fpu_ctxt) !=
-                 sizeof(v->arch.xsave_area->fpu_sse));
-    memcpy(&c.nat->fpu_ctxt, &v->arch.xsave_area->fpu_sse,
-           sizeof(c.nat->fpu_ctxt));
+    xsave_area = VCPU_MAP_XSAVE_AREA(v);
+    BUILD_BUG_ON(sizeof(c.nat->fpu_ctxt) != sizeof(xsave_area->fpu_sse));
+    memcpy(&c.nat->fpu_ctxt, &xsave_area->fpu_sse, sizeof(c.nat->fpu_ctxt));
+    VCPU_UNMAP_XSAVE_AREA(v, xsave_area);
 
     if ( is_pv_domain(d) )
-        c(flags = v->arch.pv.vgc_flags & ~(VGCF_i387_valid|VGCF_in_kernel));
+        c(flags = v->arch.pv.vgc_flags & ~VGCF_in_kernel);
     else
         c(flags = 0);
-    if ( v->fpu_initialised )
-        c(flags |= VGCF_i387_valid);
+    c(flags |= VGCF_i387_valid);
     if ( !(v->pause_flags & VPF_down) )
         c(flags |= VGCF_online);
     if ( !compat )
     {
-        memcpy(&c.nat->user_regs, &v->arch.user_regs, sizeof(c.nat->user_regs));
+        /* Backing memory is pre-zeroed. */
+        c.nat->user_regs.r15               = v->arch.user_regs.r15;
+        c.nat->user_regs.r14               = v->arch.user_regs.r14;
+        c.nat->user_regs.r13               = v->arch.user_regs.r13;
+        c.nat->user_regs.r12               = v->arch.user_regs.r12;
+        c.nat->user_regs.r11               = v->arch.user_regs.r11;
+        c.nat->user_regs.r10               = v->arch.user_regs.r10;
+        c.nat->user_regs.r9                = v->arch.user_regs.r9;
+        c.nat->user_regs.r8                = v->arch.user_regs.r8;
+        c.nat->user_regs.rbx               = v->arch.user_regs.rbx;
+        c.nat->user_regs.rcx               = v->arch.user_regs.rcx;
+        c.nat->user_regs.rdx               = v->arch.user_regs.rdx;
+        c.nat->user_regs.rsi               = v->arch.user_regs.rsi;
+        c.nat->user_regs.rdi               = v->arch.user_regs.rdi;
+        c.nat->user_regs.rbp               = v->arch.user_regs.rbp;
+        c.nat->user_regs.rax               = v->arch.user_regs.rax;
+        c.nat->user_regs.rip               = v->arch.user_regs.rip;
+        c.nat->user_regs.cs                = v->arch.user_regs.cs;
+        c.nat->user_regs.rflags            = v->arch.user_regs.rflags;
+        c.nat->user_regs.rsp               = v->arch.user_regs.rsp;
+        c.nat->user_regs.ss                = v->arch.user_regs.ss;
+        c.nat->user_regs.es                = v->arch.pv.es;
+        c.nat->user_regs.ds                = v->arch.pv.ds;
+        c.nat->user_regs.fs                = v->arch.pv.fs;
+        c.nat->user_regs.gs                = v->arch.pv.gs;
+
         if ( is_pv_domain(d) )
             memcpy(c.nat->trap_ctxt, v->arch.pv.trap_ctxt,
                    sizeof(c.nat->trap_ctxt));
@@ -1439,7 +1513,24 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 #ifdef CONFIG_COMPAT
     else
     {
-        XLAT_cpu_user_regs(&c.cmp->user_regs, &v->arch.user_regs);
+        /* Backing memory is pre-zeroed. */
+        c.cmp->user_regs.ebx               = v->arch.user_regs.ebx;
+        c.cmp->user_regs.ecx               = v->arch.user_regs.ecx;
+        c.cmp->user_regs.edx               = v->arch.user_regs.edx;
+        c.cmp->user_regs.esi               = v->arch.user_regs.esi;
+        c.cmp->user_regs.edi               = v->arch.user_regs.edi;
+        c.cmp->user_regs.ebp               = v->arch.user_regs.ebp;
+        c.cmp->user_regs.eax               = v->arch.user_regs.eax;
+        c.cmp->user_regs.eip               = v->arch.user_regs.eip;
+        c.cmp->user_regs.cs                = v->arch.user_regs.cs;
+        c.cmp->user_regs.eflags            = v->arch.user_regs.eflags;
+        c.cmp->user_regs.esp               = v->arch.user_regs.esp;
+        c.cmp->user_regs.ss                = v->arch.user_regs.ss;
+        c.cmp->user_regs.es                = v->arch.pv.es;
+        c.cmp->user_regs.ds                = v->arch.pv.ds;
+        c.cmp->user_regs.fs                = v->arch.pv.fs;
+        c.cmp->user_regs.gs                = v->arch.pv.gs;
+
         if ( is_pv_domain(d) )
         {
             for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); ++i )

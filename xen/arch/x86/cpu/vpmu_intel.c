@@ -9,7 +9,6 @@
 
 #include <xen/err.h>
 #include <xen/sched.h>
-#include <xen/xenoprof.h>
 #include <asm/system.h>
 #include <asm/regs.h>
 #include <asm/apic.h>
@@ -441,9 +440,6 @@ static int cf_check core2_vpmu_alloc_resource(struct vcpu *v)
     struct xen_pmu_intel_ctxt *core2_vpmu_cxt = NULL;
     uint64_t *p = NULL;
 
-    if ( !acquire_pmu_ownership(PMU_OWNER_HVM) )
-        return 0;
-
     if ( is_vmx_vcpu(v) )
     {
         if ( vmx_add_host_load_msr(v, MSR_CORE_PERF_GLOBAL_CTRL, 0) )
@@ -487,7 +483,6 @@ static int cf_check core2_vpmu_alloc_resource(struct vcpu *v)
     return 1;
 
 out_err:
-    release_pmu_ownership(PMU_OWNER_HVM);
 
     xfree(core2_vpmu_cxt);
     xfree(p);
@@ -814,7 +809,6 @@ static void cf_check core2_vpmu_destroy(struct vcpu *v)
     vpmu->priv_context = NULL;
     if ( is_vmx_vcpu(v) && cpu_has_vmx_msr_bitmap )
         core2_vpmu_unset_msr_bitmap(v);
-    release_pmu_ownership(PMU_OWNER_HVM);
     vpmu_clear(vpmu);
 }
 
@@ -923,7 +917,7 @@ const struct arch_vpmu_ops *__init core2_vpmu_init(void)
         return ERR_PTR(-EINVAL);
     }
 
-    if ( current_cpu_data.x86 != 6 )
+    if ( current_cpu_data.family != 6 )
     {
         printk(XENLOG_WARNING "VPMU: only family 6 is supported\n");
         return ERR_PTR(-EINVAL);
@@ -964,7 +958,7 @@ const struct arch_vpmu_ops *__init core2_vpmu_init(void)
               sizeof(struct xen_pmu_cntr_pair) * arch_pmc_cnt;
 
     /* TODO: It's clearly incorrect for this to quirk all Intel Fam6 CPUs. */
-    pmc_quirk = current_cpu_data.x86 == 6;
+    pmc_quirk = current_cpu_data.family == 6;
 
     if ( sizeof(struct xen_pmu_data) + sizeof(uint64_t) * fixed_pmc_cnt +
          sizeof(struct xen_pmu_cntr_pair) * arch_pmc_cnt > PAGE_SIZE )

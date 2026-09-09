@@ -91,10 +91,10 @@ static int __init pvh_populate_memory_range(struct domain *d,
                                             unsigned long start,
                                             unsigned long nr_pages)
 {
-    struct {
+    static const struct {
         unsigned long align;
         unsigned int order;
-    } static const __initconst orders[] = {
+    } orders[] __initconst = {
         /* NB: must be sorted by decreasing size. */
         { .align = PFN_DOWN(GB(1)), .order = PAGE_ORDER_1G },
         { .align = PFN_DOWN(MB(2)), .order = PAGE_ORDER_2M },
@@ -473,7 +473,7 @@ static int __init pvh_populate_p2m(struct domain *d)
         }
     }
 
-    if ( cpu_has_vmx && paging_mode_hap(d) && !vmx_unrestricted_guest(v) )
+    if ( using_vmx() && paging_mode_hap(d) && !vmx_unrestricted_guest(v) )
     {
         /*
          * Since Dom0 cannot be migrated, we will only setup the
@@ -644,14 +644,16 @@ static bool __init check_and_adjust_load_address(
 }
 
 static int __init pvh_load_kernel(
-    struct domain *d, struct boot_module *image, struct boot_module *initrd,
-    paddr_t *entry, paddr_t *start_info_addr)
+    const struct boot_domain *bd, paddr_t *entry, paddr_t *start_info_addr)
 {
+    struct domain *d = bd->d;
+    struct boot_module *image = bd->kernel;
+    struct boot_module *initrd = bd->initrd;
     void *image_base = bootstrap_map_bm(image);
-    void *image_start = image_base + image->headroom;
+    void *image_start = image_base + image->arch.headroom;
     unsigned long image_len = image->size;
     unsigned long initrd_len = initrd ? initrd->size : 0;
-    const char *cmdline = image->cmdline_pa ? __va(image->cmdline_pa) : NULL;
+    size_t cmdline_len = bd->cmdline ? strlen(bd->cmdline) + 1 : 0;
     const char *initrd_cmdline = NULL;
     struct elf_binary elf;
     struct elf_dom_parms parms;
@@ -722,9 +724,9 @@ static int __init pvh_load_kernel(
     {
         size_t initrd_space = elf_round_up(&elf, initrd_len);
 
-        if ( initrd->cmdline_pa )
+        if ( initrd->arch.cmdline_pa )
         {
-            initrd_cmdline = __va(initrd->cmdline_pa);
+            initrd_cmdline = __va(initrd->arch.cmdline_pa);
             if ( !*initrd_cmdline )
                 initrd_cmdline = NULL;
         }
@@ -737,9 +739,7 @@ static int __init pvh_load_kernel(
             initrd = NULL;
     }
 
-    if ( cmdline )
-        extra_space += ROUNDUP(strlen(cmdline) + 1,
-                               elf_64bit(&elf) ? 8 : 4);
+    extra_space += elf_round_up(&elf, cmdline_len);
 
     last_addr = find_memory(d, &elf, extra_space);
     if ( last_addr == INVALID_PADDR )
@@ -780,21 +780,21 @@ static int __init pvh_load_kernel(
     /* Free temporary buffers. */
     free_boot_modules();
 
-    if ( cmdline != NULL )
+    rc = hvm_copy_to_guest_phys(last_addr, bd->cmdline, cmdline_len, v);
+    if ( rc )
     {
-        rc = hvm_copy_to_guest_phys(last_addr, cmdline, strlen(cmdline) + 1, v);
-        if ( rc )
-        {
-            printk("Unable to copy guest command line\n");
-            return rc;
-        }
-        start_info.cmdline_paddr = last_addr;
-        /*
-         * Round up to 32/64 bits (depending on the guest kernel bitness) so
-         * the modlist/start_info is aligned.
-         */
-        last_addr += ROUNDUP(strlen(cmdline) + 1, elf_64bit(&elf) ? 8 : 4);
+        printk("Unable to copy guest command line\n");
+        return rc;
     }
+
+    start_info.cmdline_paddr = cmdline_len ? last_addr : 0;
+
+    /*
+     * Round up to 32/64 bits (depending on the guest kernel bitness) so
+     * the modlist/start_info is aligned.
+     */
+    last_addr += elf_round_up(&elf, cmdline_len);
+
     if ( initrd != NULL )
     {
         rc = hvm_copy_to_guest_phys(last_addr, &mod, sizeof(mod), v);
@@ -893,19 +893,18 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     struct acpi_madt_local_x2apic *x2apic;
     acpi_status status;
     unsigned long size;
-    unsigned int i, max_vcpus;
+    unsigned int i;
     int rc;
 
     /* Count number of interrupt overrides in the MADT. */
     acpi_table_parse_madt(ACPI_MADT_TYPE_INTERRUPT_OVERRIDE,
                           acpi_count_intr_ovr, UINT_MAX);
 
-    max_vcpus = dom0_max_vcpus();
     /* Calculate the size of the crafted MADT. */
     size = sizeof(*madt);
     size += sizeof(*io_apic) * nr_ioapics;
     size += sizeof(*intsrcovr) * acpi_intr_overrides;
-    size += sizeof(*x2apic) * max_vcpus;
+    size += sizeof(*x2apic) * d->max_vcpus;
 
     madt = xzalloc_bytes(size);
     if ( !madt )
@@ -945,7 +944,7 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     }
 
     x2apic = (void *)io_apic;
-    for ( i = 0; i < max_vcpus; i++ )
+    for ( i = 0; i < d->max_vcpus; i++ )
     {
         x2apic->header.type = ACPI_MADT_TYPE_LOCAL_X2APIC;
         x2apic->header.length = sizeof(*x2apic);
@@ -1332,25 +1331,16 @@ static void __init pvh_setup_mmcfg(struct domain *d)
     }
 }
 
-int __init dom0_construct_pvh(struct boot_info *bi, struct domain *d)
+int __init dom0_construct_pvh(const struct boot_domain *bd)
 {
     paddr_t entry, start_info;
-    struct boot_module *image;
-    struct boot_module *initrd = NULL;
-    unsigned int idx;
+    struct domain *d = bd->d;
     int rc;
 
     printk(XENLOG_INFO "*** Building a PVH Dom%d ***\n", d->domain_id);
 
-    idx = first_boot_module_index(bi, BOOTMOD_KERNEL);
-    if ( idx >= bi->nr_modules )
+    if ( bd->kernel == NULL )
         panic("Missing kernel boot module for %pd construction\n", d);
-
-    image = &bi->mods[idx];
-
-    idx = first_boot_module_index(bi, BOOTMOD_RAMDISK);
-    if ( idx < bi->nr_modules )
-        initrd = &bi->mods[idx];
 
     if ( is_hardware_domain(d) )
     {
@@ -1389,7 +1379,7 @@ int __init dom0_construct_pvh(struct boot_info *bi, struct domain *d)
         return rc;
     }
 
-    rc = pvh_load_kernel(d, image, initrd, &entry, &start_info);
+    rc = pvh_load_kernel(bd, &entry, &start_info);
     if ( rc )
     {
         printk("Failed to load Dom0 kernel\n");

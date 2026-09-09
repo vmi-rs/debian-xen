@@ -179,11 +179,8 @@ int compat_set_gdt(
 int compat_update_descriptor(
     uint32_t pa_lo, uint32_t pa_hi, uint32_t desc_lo, uint32_t desc_hi)
 {
-    seg_desc_t d;
-
-    d.raw = ((uint64_t)desc_hi << 32) | desc_lo;
-
-    return do_update_descriptor(pa_lo | ((uint64_t)pa_hi << 32), d);
+    return do_update_descriptor(pa_lo | ((uint64_t)pa_hi << 32),
+                                desc_lo | ((uint64_t)desc_hi << 32));
 }
 
 #endif /* CONFIG_PV32 */
@@ -216,7 +213,7 @@ static bool check_descriptor(const struct domain *dom, seg_desc_t *d)
              * 0xf6800000. Extend these to allow access to the larger read-only
              * M2P table available in 32on64 mode.
              */
-            base = (b & 0xff000000) | ((b & 0xff) << 16) | (a >> 16);
+            base = (b & 0xff000000U) | ((b & 0xff) << 16) | (a >> 16);
 
             limit = (b & 0xf0000) | (a & 0xffff);
             limit++; /* We add one because limit is inclusive. */
@@ -288,9 +285,10 @@ int validate_segdesc_page(struct page_info *page)
     return i == 512 ? 0 : -EINVAL;
 }
 
-long do_update_descriptor(uint64_t gaddr, seg_desc_t d)
+long do_update_descriptor(uint64_t gaddr, uint64_t desc)
 {
     struct domain *currd = current->domain;
+    seg_desc_t d = { .raw = desc };
     gfn_t gfn = gaddr_to_gfn(gaddr);
     mfn_t mfn;
     seg_desc_t *entry;

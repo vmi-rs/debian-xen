@@ -520,6 +520,16 @@ SveType1920 SveType = 1920
 SveType2048 SveType = 2048
 )
 
+type ArmSciType int
+const(
+ArmSciTypeNone ArmSciType = 0
+ArmSciTypeScmiSmc ArmSciType = 1
+)
+
+type ArmSci struct {
+Type ArmSciType
+}
+
 type RdmReserve struct {
 Strategy RdmReserveStrategy
 Policy RdmReservePolicy
@@ -532,6 +542,15 @@ Altp2MModeMixed Altp2MMode = 1
 Altp2MModeExternal Altp2MMode = 2
 Altp2MModeLimited Altp2MMode = 3
 )
+
+type XsQuotaItem struct {
+Name string
+Val uint32
+}
+
+type XsQuotaList struct {
+Quota []XsQuotaItem
+}
 
 type DomainBuildInfo struct {
 MaxVcpus int
@@ -599,13 +618,18 @@ GicVersion GicVersion
 Vuart VuartType
 SveVl SveType
 NrSpis uint32
+ArmSci ArmSci
 }
 ArchX86 struct {
 MsrRelaxed Defbool
 }
 Altp2M Altp2MMode
+Altp2MCount uint32
 VmtraceBufKb int
 Vpmu Defbool
+TrapUnmappedAccesses Defbool
+XenstoreFeatureMask uint32
+XenstoreQuota XsQuotaList
 }
 
 type DomainBuildInfoTypeUnion interface {
@@ -653,6 +677,7 @@ Usbdevice string
 VkbDevice Defbool
 Soundhw string
 XenPlatformPci Defbool
+XenPlatformPciBarUc Defbool
 UsbdeviceList StringList
 VendorDevice VendorDevice
 MsVmGenid MsVmGenid

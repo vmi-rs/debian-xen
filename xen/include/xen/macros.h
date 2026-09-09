@@ -38,11 +38,12 @@
 #define __STR(...) #__VA_ARGS__
 #define STR(...) __STR(__VA_ARGS__)
 
-#ifndef __ASSEMBLY__
+#define KB(_kb)     (_AC(_kb, ULL) << 10)
+#define MB(_mb)     (_AC(_mb, ULL) << 20)
+#define GB(_gb)     (_AC(_gb, ULL) << 30)
 
-/* All clang versions supported by Xen have _Static_assert. */
-#if defined(__clang__) || \
-    (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#ifndef __ASSEMBLER__
+
 /* Force a compilation error if condition is true */
 #define BUILD_BUG_ON(cond) ({ _Static_assert(!(cond), "!(" #cond ")"); })
 
@@ -54,11 +55,6 @@
  */
 #define BUILD_BUG_ON_ZERO(cond) \
     (sizeof(struct { char c; _Static_assert(!(cond), "!(" #cond ")"); }) & 0)
-#else
-#define BUILD_BUG_ON_ZERO(cond) \
-    (sizeof(struct { unsigned u : !(cond); }) & 0)
-#define BUILD_BUG_ON(cond) ((void)BUILD_BUG_ON_ZERO(cond))
-#endif
 
 /*
  * Force a compilation error.  This is for code which, in the normal case,
@@ -71,18 +67,18 @@
 /* Hide a value from the optimiser. */
 #define HIDE(x)                                 \
     ({                                          \
-        typeof(x) _x = (x);                     \
+        auto _x = (x);                          \
         asm volatile ( "" : "+r" (_x) );        \
         _x;                                     \
     })
 
 #define ABS(x) ({                              \
-    typeof(x) x_ = (x);                        \
+    auto x_ = (x);                             \
     (x_ < 0) ? -x_ : x_;                       \
 })
 
 #define SWAP(a, b) \
-   do { typeof(a) t_ = (a); (a) = (b); (b) = t_; } while ( 0 )
+   do { auto t_ = (a); (a) = (b); (b) = t_; } while ( 0 )
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]) + __must_be_array(x))
 
@@ -102,6 +98,21 @@
  */
 #define sizeof_field(type, member) sizeof(((type *)NULL)->member)
 
+#define endof_field(type, member) (offsetof(type, member) + sizeof_field(type, member))
+
+/**
+ * container_of - cast a member of a structure out to the containing structure
+ *
+ * @ptr:	the pointer to the member.
+ * @type:	the type of the container struct this is embedded in.
+ * @member:	the name of the member within the struct.
+ */
+#define container_of(ptr, type, member)                         \
+    ({                                                          \
+        typeof_field(type, member) *__mptr = (ptr);             \
+        (type *)((void *)__mptr - offsetof(type, member));      \
+    })
+
 /* Cast an arbitrary integer to a pointer. */
 #define _p(x) ((void *)(unsigned long)(x))
 
@@ -110,15 +121,15 @@
  */
 #define min(x, y)                               \
     ({                                          \
-        const typeof(x) _x = (x);               \
-        const typeof(y) _y = (y);               \
+        const auto _x = (x);                    \
+        const auto _y = (y);                    \
         (void)(&_x == &_y); /* typecheck */     \
         _x < _y ? _x : _y;                      \
     })
 #define max(x, y)                               \
     ({                                          \
-        const typeof(x) _x = (x);               \
-        const typeof(y) _y = (y);               \
+        const auto _x = (x);                    \
+        const auto _y = (y);                    \
         (void)(&_x == &_y); /* typecheck */     \
         _x > _y ? _x : _y;                      \
     })
@@ -146,7 +157,7 @@
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __MACROS_H__ */
 

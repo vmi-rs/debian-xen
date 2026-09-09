@@ -40,15 +40,18 @@ enum accitem {
 	ACC_N,			/* Number of elements per domain. */
 };
 
-struct quota {
+extern struct quotaadm {
 	const char *name;
 	const char *descr;
-	unsigned int val;
-	unsigned int max;
-};
+} quota_adm[ACC_N];
 
-extern struct quota hard_quotas[ACC_N];
-extern struct quota soft_quotas[ACC_N];
+extern struct quota {
+	unsigned int val[2];
+#define Q_IDX_HARD      0
+#define Q_IDX_SOFT      1
+#define Q_VAL_DISABLED  UINT_MAX
+	unsigned int max;
+} quotas[ACC_N];
 
 void handle_event(void);
 
@@ -82,10 +85,23 @@ int do_get_domain_path(const void *ctx, struct connection *conn,
 int do_reset_watches(const void *ctx, struct connection *conn,
 		     struct buffered_data *in);
 
+/* Get global or per domain server features */
+int do_get_feature(const void *ctx, struct connection *conn,
+		   struct buffered_data *in);
+
+/* Set per domain server features */
+int do_set_feature(const void *ctx, struct connection *conn,
+		   struct buffered_data *in);
+
+int do_get_quota(const void *ctx, struct connection *conn,
+		 struct buffered_data *in);
+int do_set_quota(const void *ctx, struct connection *conn,
+		 struct buffered_data *in);
+
 void domain_early_init(void);
 void domain_init(int evtfd);
-void dom0_init(void);
-void stubdom_init(void);
+void init_domains(bool live_update);
+void stubdom_init(bool live_update);
 void domain_deinit(void);
 void ignore_connection(struct connection *conn, unsigned int err);
 
@@ -100,13 +116,13 @@ const char *get_implicit_path(const struct connection *conn);
  */
 int domain_adjust_node_perms(struct node *node);
 
-int domain_alloc_permrefs(struct node_perms *perms);
+int domain_alloc_permrefs(const struct connection *conn,
+			  struct node_perms *perms);
 
 /* Quota manipulation */
 int domain_nbentry_inc(struct connection *conn, unsigned int domid);
 int domain_nbentry_dec(struct connection *conn, unsigned int domid);
-int domain_nbentry_fix(unsigned int domid, int num, bool update);
-unsigned int domain_nbentry(struct connection *conn);
+int domain_nbentry_fix(unsigned int domid, int num);
 int domain_memory_add(struct connection *conn, unsigned int domid, int mem,
 		      bool no_quota_check);
 
@@ -133,12 +149,10 @@ static inline void domain_memory_add_nochk(struct connection *conn,
 }
 void domain_watch_inc(struct connection *conn);
 void domain_watch_dec(struct connection *conn);
-int domain_watch(struct connection *conn);
 void domain_outstanding_inc(struct connection *conn);
 void domain_outstanding_dec(struct connection *conn, unsigned int domid);
 void domain_transaction_inc(struct connection *conn);
 void domain_transaction_dec(struct connection *conn);
-unsigned int domain_transaction_get(struct connection *conn);
 int domain_get_quota(const void *ctx, struct connection *conn,
 		     unsigned int domid);
 
@@ -153,6 +167,7 @@ int domain_max_global_acc(const void *ctx, struct connection *conn);
 void domain_reset_global_acc(void);
 bool domain_max_chk(const struct connection *conn, enum accitem what,
 		    unsigned int val);
+bool domain_quota_add_exceeds(struct domain *d, enum accitem what, int add);
 
 extern long wrl_ntransactions;
 
@@ -162,11 +177,18 @@ void wrl_apply_debit_direct(struct connection *conn);
 void wrl_apply_debit_trans_commit(struct connection *conn);
 
 const char *dump_state_connections(FILE *fp);
+const char *dump_state_domains(FILE *fp);
+const char *dump_state_glb_quota(FILE *fp);
 
 void read_state_connection(const void *ctx, const void *state);
+void read_state_domain(const void *ctx, const void *state,
+		       unsigned int version);
+void read_state_glb_quota(const void *ctx, const void *state);
 
 struct hashtable *domain_check_acc_init(void);
 void domain_check_acc_add(const struct node *node, struct hashtable *domains);
 void domain_check_acc(struct hashtable *domains);
+
+bool feature_available(const struct connection *conn, unsigned int feature);
 
 #endif /* _XENSTORED_DOMAIN_H */

@@ -36,7 +36,7 @@
 bool __read_mostly opt_noirqbalance;
 boolean_param("noirqbalance", opt_noirqbalance);
 
-unsigned int __read_mostly nr_irqs_gsi = 16;
+unsigned int __read_mostly nr_irqs_gsi = NR_ISA_IRQS;
 unsigned int __read_mostly nr_irqs;
 integer_param("nr_irqs", nr_irqs);
 
@@ -51,7 +51,7 @@ static vmask_t global_used_vector_map;
 
 struct irq_desc __read_mostly *irq_desc = NULL;
 
-static DECLARE_BITMAP(used_vectors, X86_NR_VECTORS);
+static DECLARE_BITMAP(used_vectors, X86_IDT_VECTORS) __ro_after_init;
 
 static DEFINE_SPINLOCK(vector_lock);
 
@@ -155,7 +155,7 @@ static int __init _bind_irq_vector(struct irq_desc *desc, int vector,
     cpumask_t online_mask;
     int cpu;
 
-    BUG_ON((unsigned)vector >= X86_NR_VECTORS);
+    BUG_ON((unsigned)vector >= X86_IDT_VECTORS);
 
     cpumask_and(&online_mask, cpu_mask, &cpu_online_map);
     if (cpumask_empty(&online_mask))
@@ -423,7 +423,7 @@ int __init init_irq_data(void)
     struct irq_desc *desc;
     int irq, vector;
 
-    for ( vector = 0; vector < X86_NR_VECTORS; ++vector )
+    for ( vector = 0; vector < X86_IDT_VECTORS; ++vector )
         this_cpu(vector_irq)[vector] = INT_MIN;
 
     irq_desc = xzalloc_array(struct irq_desc, nr_irqs);
@@ -450,12 +450,12 @@ int __init init_irq_data(void)
 
 #ifdef CONFIG_PV
     /* Never allocate the Linux/BSD fast-trap vector. */
-    set_bit(LEGACY_SYSCALL_VECTOR, used_vectors);
+    __set_bit(LEGACY_SYSCALL_VECTOR, used_vectors);
 #endif
 
 #ifdef CONFIG_PV32
     /* Never allocate the hypercall vector. */
-    set_bit(HYPERCALL_VECTOR, used_vectors);
+    __set_bit(HYPERCALL_VECTOR, used_vectors);
 #endif
     
     /*
@@ -547,6 +547,20 @@ static int _assign_irq_vector(struct irq_desc *desc, const cpumask_t *mask)
         cpumask_t tmp_mask;
 
         cpumask_and(&tmp_mask, mask, &cpu_online_map);
+
+        /*
+         * High priority vectors are reserved on all CPUs, hence moving them
+         * just requires changing the target CPU.  There's no need for vector
+         * allocation on the destination.
+         */
+        if ( old_vector >= FIRST_HIPRIORITY_VECTOR &&
+             old_vector <= LAST_HIPRIORITY_VECTOR )
+        {
+            cpumask_copy(desc->arch.cpu_mask,
+                         cpumask_of(cpumask_any(&tmp_mask)));
+            return 0;
+        }
+
         if (cpumask_intersects(&tmp_mask, desc->arch.cpu_mask)) {
             desc->arch.vector = old_vector;
             return 0;
@@ -621,15 +635,11 @@ static int _assign_irq_vector(struct irq_desc *desc, const cpumask_t *mask)
 
     for_each_cpu(cpu, mask)
     {
-        const cpumask_t *vec_mask;
-        int new_cpu;
         int vector, offset;
 
         /* Only try and allocate irqs on cpus that are present. */
         if (!cpu_online(cpu))
             continue;
-
-        vec_mask = vector_allocation_cpumask(cpu);
 
         vector = current_vector;
         offset = current_offset;
@@ -650,13 +660,13 @@ next:
             && test_bit(vector, irq_used_vectors) )
             goto next;
 
-        if ( cpumask_test_cpu(0, vec_mask) &&
+        if ( !cpu &&
              vector >= FIRST_LEGACY_VECTOR && vector <= LAST_LEGACY_VECTOR )
             goto next;
 
-        for_each_cpu(new_cpu, vec_mask)
-            if (per_cpu(vector_irq, new_cpu)[vector] >= 0)
-                goto next;
+        if ( per_cpu(vector_irq, cpu)[vector] >= 0 )
+            goto next;
+
         /* Found one! */
         current_vector = vector;
         current_offset = offset;
@@ -688,12 +698,11 @@ next:
                 release_old_vec(desc);
         }
 
-        trace_irq_mask(TRC_HW_IRQ_ASSIGN_VECTOR, irq, vector, vec_mask);
+        trace_irq_mask(TRC_HW_IRQ_ASSIGN_VECTOR, irq, vector, cpumask_of(cpu));
 
-        for_each_cpu(new_cpu, vec_mask)
-            per_cpu(vector_irq, new_cpu)[vector] = irq;
+        per_cpu(vector_irq, cpu)[vector] = irq;
         desc->arch.vector = vector;
-        cpumask_copy(desc->arch.cpu_mask, vec_mask);
+        cpumask_copy(desc->arch.cpu_mask, cpumask_of(cpu));
 
         desc->arch.used = IRQ_USED;
         ASSERT((desc->arch.used_vectors == NULL)
@@ -751,7 +760,7 @@ void setup_vector_irq(unsigned int cpu)
     unsigned int irq, vector;
 
     /* Clear vector_irq */
-    for ( vector = 0; vector < X86_NR_VECTORS; ++vector )
+    for ( vector = 0; vector < X86_IDT_VECTORS; ++vector )
         per_cpu(vector_irq, cpu)[vector] = INT_MIN;
     /* Mark the inuse vectors */
     for ( irq = 0; irq < nr_irqs; ++irq )
@@ -761,12 +770,16 @@ void setup_vector_irq(unsigned int cpu)
         if ( !irq_desc_initialized(desc) )
             continue;
         vector = irq_to_vector(irq);
-        if ( vector >= FIRST_HIPRIORITY_VECTOR &&
-             vector <= LAST_HIPRIORITY_VECTOR )
-            cpumask_set_cpu(cpu, desc->arch.cpu_mask);
-        else if ( !cpumask_test_cpu(cpu, desc->arch.cpu_mask) )
-            continue;
-        per_cpu(vector_irq, cpu)[vector] = irq;
+        if ( cpumask_test_cpu(cpu, desc->arch.cpu_mask) ||
+             /*
+              * High-priority vectors are reserved on all CPUs.  Set
+              * the vector to IRQ assignment on all CPUs, even if the
+              * interrupt is not targeting this CPU.  That makes
+              * shuffling those interrupts around CPUs easier.
+              */
+             (vector >= FIRST_HIPRIORITY_VECTOR &&
+              vector <= LAST_HIPRIORITY_VECTOR) )
+            per_cpu(vector_irq, cpu)[vector] = irq;
     }
 }
 
@@ -978,7 +991,7 @@ uint8_t alloc_hipriority_vector(void)
     return next++;
 }
 
-static void (*direct_apic_vector[X86_NR_VECTORS])(void);
+static void (*direct_apic_vector[X86_IDT_VECTORS])(void);
 void set_direct_apic_vector(uint8_t vector, void (*handler)(void))
 {
     BUG_ON(direct_apic_vector[vector] != NULL);
@@ -1338,7 +1351,8 @@ static void clear_domain_irq_pirq(struct domain *d, int irq, struct pirq *pirq)
 static void cleanup_domain_irq_pirq(struct domain *d, int irq,
                                     struct pirq *pirq)
 {
-    pirq_cleanup_check(pirq, d);
+    if ( !pirq->evtchn )
+        pirq_cleanup_check(pirq, d);
     radix_tree_delete(&d->arch.irq_pirq, irq);
 }
 
@@ -1396,7 +1410,7 @@ struct pirq *alloc_pirq_struct(struct domain *d)
     return pirq;
 }
 
-void (pirq_cleanup_check)(struct pirq *pirq, struct domain *d)
+void pirq_cleanup_check(struct pirq *pirq, struct domain *d)
 {
     /*
      * Check whether all fields have their default values, and delete
@@ -1538,7 +1552,7 @@ void desc_guest_eoi(struct irq_desc *desc, struct pirq *pirq)
 int pirq_guest_unmask(struct domain *d)
 {
     unsigned int pirq = 0, n, i;
-    struct pirq *pirqs[16];
+    struct pirq *pirqs[NR_ISA_IRQS];
 
     do {
         n = radix_tree_gang_lookup(&d->pirq_tree, (void **)pirqs, pirq,
@@ -1997,8 +2011,8 @@ void do_IRQ(struct cpu_user_regs *regs)
                      * interrupts have been delivered to CPUs
                      * different than the BSP.
                      */
-                    (boot_cpu_data.x86_vendor & (X86_VENDOR_AMD |
-                                                 X86_VENDOR_HYGON))) &&
+                    (boot_cpu_data.vendor & (X86_VENDOR_AMD |
+                                             X86_VENDOR_HYGON))) &&
                    bogus_8259A_irq(vector - FIRST_LEGACY_VECTOR)) )
             {
                 printk("CPU%u: No irq handler for vector %02x (IRQ %d%s)\n",
@@ -2128,7 +2142,7 @@ int get_free_pirq(struct domain *d, int type)
 
     if ( type == MAP_PIRQ_TYPE_GSI )
     {
-        for ( i = 16; i < nr_irqs_gsi; i++ )
+        for ( i = NR_ISA_IRQS; i < nr_irqs_gsi; i++ )
             if ( is_free_pirq(d, pirq_info(d, i)) )
             {
                 pirq_get_info(d, i);
@@ -2587,7 +2601,7 @@ static void cf_check dump_irqs(unsigned char key)
 
     process_pending_softirqs();
     printk("Direct vector information:\n");
-    for ( i = FIRST_DYNAMIC_VECTOR; i < X86_NR_VECTORS; ++i )
+    for ( i = FIRST_DYNAMIC_VECTOR; i < X86_IDT_VECTORS; ++i )
         if ( direct_apic_vector[i] )
             printk("   %#02x -> %ps()\n", i, direct_apic_vector[i]);
 
@@ -2632,13 +2646,17 @@ void fixup_irqs(void)
         spin_lock(&desc->lock);
 
         vector = irq_to_vector(irq);
-        if ( vector >= FIRST_HIPRIORITY_VECTOR &&
-             vector <= LAST_HIPRIORITY_VECTOR &&
-             desc->handler == &no_irq_type )
+        if ( (vector >= FIRST_HIPRIORITY_VECTOR &&
+              vector <= LAST_HIPRIORITY_VECTOR &&
+              desc->handler == &no_irq_type) ||
+             test_bit(vector, used_vectors) )
         {
             /*
              * This can in particular happen when parking secondary threads
              * during boot and when the serial console wants to use a PCI IRQ.
+             *
+             * Globally used vectors (like the HPET broadcast IRQ ones), need
+             * to be left alone in any event.
              */
             spin_unlock(&desc->lock);
             continue;
@@ -2838,7 +2856,8 @@ int map_domain_emuirq_pirq(struct domain *d, int pirq, int emuirq)
                 radix_tree_int_to_ptr(pirq));
             break;
         default:
-            pirq_cleanup_check(info, d);
+            if ( !info->evtchn )
+                pirq_cleanup_check(info, d);
             return err;
         }
     }
@@ -2873,7 +2892,8 @@ int unmap_domain_pirq_emuirq(struct domain *d, int pirq)
     if ( info )
     {
         info->arch.hvm.emuirq = IRQ_UNBOUND;
-        pirq_cleanup_check(info, d);
+        if ( !info->evtchn )
+            pirq_cleanup_check(info, d);
     }
     if ( emuirq != IRQ_PT )
         radix_tree_delete(&d->arch.hvm.emuirq_pirq, emuirq);

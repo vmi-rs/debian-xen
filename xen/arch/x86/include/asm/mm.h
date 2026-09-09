@@ -83,28 +83,24 @@
 #define PGC_state_offlined  PG_mask(2, 6)
 #define PGC_state_free      PG_mask(3, 6)
 #define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(7)
+#define PGC_need_scrub    PG_mask(1, 7)
 #ifdef CONFIG_SHADOW_PAGING
  /* Set when a page table page has been shadowed. */
-#define _PGC_shadowed_pt  PG_shift(7)
-#define PGC_shadowed_pt   PG_mask(1, 7)
+#define _PGC_shadowed_pt  PG_shift(8)
+#define PGC_shadowed_pt   PG_mask(1, 8)
 #else
 #define PGC_shadowed_pt   0
 #endif
 
 /* Count of references to this frame. */
 #if PGC_shadowed_pt
-#define PGC_count_width   PG_shift(7)
+#define PGC_count_width   PG_shift(8)
 #else
-#define PGC_count_width   PG_shift(6)
+#define PGC_count_width   PG_shift(7)
 #endif
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
-
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
 
 #ifndef CONFIG_BIGMEM
 /*
@@ -342,7 +338,7 @@ void init_frametable(void);
 #define PDX_GROUP_SHIFT L2_PAGETABLE_SHIFT
 
 /* Convert between Xen-heap virtual addresses and page-info structures. */
-static inline struct page_info *__virt_to_page(const void *v)
+static inline struct page_info *virt_to_page(const void *v)
 {
     unsigned long va = (unsigned long)v;
 
@@ -355,7 +351,7 @@ static inline struct page_info *__virt_to_page(const void *v)
     return frame_table + ((va - DIRECTMAP_VIRT_START) >> PAGE_SHIFT);
 }
 
-static inline void *__page_to_virt(const struct page_info *pg)
+static inline void *page_to_virt(const struct page_info *pg)
 {
     ASSERT((unsigned long)pg - FRAMETABLE_VIRT_START < FRAMETABLE_SIZE);
     /*
@@ -464,6 +460,16 @@ static inline int get_page_and_type(struct page_info *page,
     ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
     ASSERT(page_get_owner(_p) == (_d))
 
+#define RAM_TYPE_CONVENTIONAL 0x00000001
+#define RAM_TYPE_RESERVED     0x00000002
+#define RAM_TYPE_UNUSABLE     0x00000004
+#define RAM_TYPE_ACPI         0x00000008
+#define RAM_TYPE_UNKNOWN      0x00000010
+/* TRUE if the whole page at @mfn is of the requested RAM type(s) above. */
+bool page_is_ram_type(unsigned long mfn, unsigned int mem_type);
+/* Returns the page type(s). */
+unsigned int page_get_ram_type(mfn_t mfn);
+
 /******************************************************************************
  * With shadow pagetables, the different kinds of address start
  * to get get confusing.
@@ -542,20 +548,18 @@ void memguard_unguard_stack(void *p);
 int subpage_mmio_ro_add(paddr_t start, size_t size);
 bool subpage_mmio_write_accept(mfn_t mfn, unsigned long gla);
 
-struct mmio_ro_emulate_ctxt {
-        unsigned long cr2;
-        /* Used only for mmcfg case */
-        unsigned int seg, bdf;
-        /* Used only for non-mmcfg case */
-        mfn_t mfn;
+/* r/o MMIO subpage access handlers. */
+struct subpage_ro_range {
+    struct list_head list;
+    mfn_t mfn;
+    void __iomem *mapped;
+    DECLARE_BITMAP(ro_elems, PAGE_SIZE / MMIO_RO_SUBPAGE_GRAN);
 };
-
-int cf_check mmio_ro_emulated_write(
-    enum x86_segment seg, unsigned long offset, void *p_data,
-    unsigned int bytes, struct x86_emulate_ctxt *ctxt);
-int cf_check mmcfg_intercept_write(
-    enum x86_segment seg, unsigned long offset, void *p_data,
-    unsigned int bytes, struct x86_emulate_ctxt *ctxt);
+bool subpage_ro_active(void);
+struct subpage_ro_range *subpage_mmio_find_page(mfn_t mfn);
+void __iomem *subpage_mmio_map_page(struct subpage_ro_range *entry);
+void subpage_mmio_write_emulate(
+    mfn_t mfn, unsigned int offset, unsigned long data, unsigned int len);
 
 int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
 
@@ -611,8 +615,15 @@ void __iomem *ioremap_wc(paddr_t pa, size_t len);
 
 extern int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm);
 
-void domain_set_alloc_bitsize(struct domain *d);
-unsigned int domain_clamp_alloc_bitsize(struct domain *d, unsigned int bits);
+#ifdef CONFIG_PV32
+#define domain_clamp_alloc_bitsize(d, bits) ({                 \
+    const struct domain *_d = (d);                             \
+                                                               \
+    ((_d && _d->arch.pv.physaddr_bitsize)                      \
+     ? min_t(unsigned int, _d->arch.pv.physaddr_bitsize, bits) \
+     : (bits));                                                \
+})
+#endif
 
 unsigned long domain_get_maximum_gpfn(struct domain *d);
 

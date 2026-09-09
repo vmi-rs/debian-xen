@@ -12,18 +12,20 @@
  * Author: Allen Kay <allen.m.kay@intel.com> -  adapted to xen from Linux
  */
 
+#include <xen/acpi.h>
+#include <xen/dmi.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/param.h>
-#include <xen/acpi.h>
-#include <xen/dmi.h>
-#include <xen/xmalloc.h>
 #include <xen/pci.h>
-#include <xen/pci_regs.h>
 #include <xen/pci_ids.h>
+#include <xen/pci_regs.h>
+#include <xen/xmalloc.h>
+
 #include <asm/e820.h>
 #include <asm/msr.h>
 #include <asm/msr-index.h>
+
 #include <public/physdev.h>
 
 #include "mmconfig.h"
@@ -150,7 +152,7 @@ static const char *__init cf_check pci_mmcfg_amd_fam10h(void)
         return NULL;
 
     address = MSR_FAM10H_MMIO_CONF_BASE;
-    if (rdmsr_safe(address, msr_content))
+    if ( rdmsr_safe(address, &msr_content) )
         return NULL;
 
     /* mmconfig is not enable */
@@ -396,10 +398,11 @@ static bool __init pci_mmcfg_reject_broken(void)
          * For firmwares prior to 2016, confirm that MMCFG is marked as
          * reserved.  For 2016 and later, also allow MMCFG being in a hole.
          */
-        if (((year < 2016 || !is_memory_hole(maddr_to_mfn(addr),
-                                             maddr_to_mfn(addr + size - 1))) &&
-             !is_mmconf_reserved(addr, size, i, cfg)) ||
-            pci_mmcfg_arch_enable(i)) {
+        if ( ((year < 2016 || !is_memory_hole(maddr_to_mfn(addr),
+                                              maddr_to_mfn(addr + size - 1))) &&
+              !is_mmconf_reserved(addr, size, i, cfg)) ||
+             pci_mmcfg_arch_enable(i) < 0 )
+        {
             pci_mmcfg_arch_disable(i);
             valid = 0;
         }
@@ -411,8 +414,6 @@ static bool __init pci_mmcfg_reject_broken(void)
 void __init acpi_mmcfg_init(void)
 {
     bool valid = true;
-
-    pci_segments_init();
 
     if ( acpi_disabled )
         return;
@@ -429,8 +430,8 @@ void __init acpi_mmcfg_init(void)
         unsigned int i;
 
         pci_mmcfg_arch_init();
-        for (i = 0; i < pci_mmcfg_config_num; ++i)
-            if (pci_mmcfg_arch_enable(i))
+        for ( i = 0; i < pci_mmcfg_config_num; ++i )
+            if ( pci_mmcfg_arch_enable(i) < 0 )
                 valid = 0;
     } else {
         acpi_table_parse(ACPI_SIG_MCFG, acpi_parse_mcfg);
@@ -470,10 +471,11 @@ int pci_mmcfg_reserved(uint64_t address, unsigned int segment,
                        segment, start_bus, end_bus, address, cfg->address);
                 return -EIO;
             }
-            if (flags & XEN_PCI_MMCFG_RESERVED)
+
+            if ( flags & XEN_PCI_MMCFG_RESERVED )
                 return pci_mmcfg_arch_enable(i);
-            pci_mmcfg_arch_disable(i);
-            return 0;
+
+            return pci_mmcfg_arch_disable(i);
         }
     }
 

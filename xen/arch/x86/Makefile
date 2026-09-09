@@ -5,8 +5,8 @@ obj-y += efi/
 obj-y += genapic/
 obj-$(CONFIG_GUEST) += guest/
 obj-$(CONFIG_HVM) += hvm/
+obj-y += lib/
 obj-y += mm/
-obj-$(CONFIG_XENOPROF) += oprofile/
 obj-$(CONFIG_PV) += pv/
 obj-y += x86_64/
 obj-y += x86_emulate/
@@ -16,8 +16,6 @@ obj-y += apic.o
 obj-y += bhb-thunk.o
 obj-y += bitops.o
 obj-bin-y += bzimage.init.o
-obj-bin-y += clear_page.o
-obj-bin-y += copy_page.o
 obj-y += cpu-policy.o
 obj-y += cpuid.o
 obj-$(CONFIG_PV) += compat.o
@@ -48,7 +46,7 @@ obj-$(CONFIG_PV) += ioport_emulate.o
 obj-y += irq.o
 obj-$(CONFIG_KEXEC) += machine_kexec.o
 obj-y += mm.o x86_64/mm.o
-obj-$(CONFIG_HVM) += monitor.o
+obj-$(CONFIG_VM_EVENT) += monitor.o
 obj-y += mpparse.o
 obj-y += nmi.o
 obj-y += numa.o
@@ -63,21 +61,21 @@ obj-y += smpboot.o
 obj-y += spec_ctrl.o
 obj-y += srat.o
 obj-y += string.o
+obj-$(CONFIG_SYSCTL) += sysctl.o
 obj-y += time.o
+obj-y += traps-setup.o
 obj-y += traps.o
 obj-$(CONFIG_INTEL) += tsx.o
-obj-y += usercopy.o
 obj-y += x86_emulate.o
 obj-$(CONFIG_TBOOT) += tboot.o
 obj-y += hpet.o
-obj-y += vm_event.o
+obj-$(CONFIG_VM_EVENT) += vm_event.o
 obj-y += xstate.o
 
 ifneq ($(CONFIG_PV_SHIM_EXCLUSIVE),y)
 obj-y += domctl.o
 obj-y += platform_hypercall.o
 obj-$(CONFIG_COMPAT) += x86_64/platform_hypercall.o
-obj-y += sysctl.o
 endif
 
 extra-y += asm-macros.i
@@ -88,11 +86,11 @@ hostprogs-y += efi/mkreloc
 
 $(obj)/efi/mkreloc: HOSTCFLAGS += -I$(srctree)/include
 
-# Allows usercopy.c to include itself
-$(obj)/usercopy.o: CFLAGS-y += -iquote .
-
 ifneq ($(CONFIG_HVM),y)
 $(obj)/x86_emulate.o: CFLAGS-y += -Wno-unused-label
+endif
+ifeq ($(CONFIG_CONDITION_COVERAGE)$(CONFIG_CC_IS_GCC),yy)
+$(obj)/x86_emulate.o: CFLAGS-y += -Wno-error=coverage-too-many-conditions
 endif
 
 efi-y := $(shell if [ ! -r $(objtree)/include/xen/compile.h -o \
@@ -107,15 +105,6 @@ else
 ifeq ($(CONFIG_PVH_GUEST),y)
 notes_phdrs = --notes
 endif
-endif
-
-ifdef CONFIG_LIVEPATCH
-all_symbols = --all-symbols
-ifdef CONFIG_FAST_SYMBOL_LOOKUP
-all_symbols = --all-symbols --sort-by-name
-endif
-else
-all_symbols =
 endif
 
 syms-warn-dup-y := --warn-dup
@@ -136,20 +125,23 @@ $(TARGET): $(TARGET)-syms $(efi-y) $(obj)/boot/mkelf32
 CFLAGS-$(XEN_BUILD_EFI) += -DXEN_BUILD_EFI
 
 $(TARGET)-syms: $(objtree)/prelink.o $(obj)/xen.lds
-	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(objtree)/common/symbols-dummy.o -o $(dot-target).0
+	$(objtree)/tools/symbols $(all_symbols) --empty > $(dot-target).0.S
+	$(MAKE) $(build)=$(@D) $(dot-target).0.o
+	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) --strip-debug \
+	      $(dot-target).0.o -o $(dot-target).0
 	$(NM) -pa --format=sysv $(dot-target).0 \
 		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
-		> $(dot-target).0.S
-	$(MAKE) $(build)=$(@D) $(dot-target).0.o
-	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(dot-target).0.o -o $(dot-target).1
-	$(NM) -pa --format=sysv $(dot-target).1 \
-		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort $(syms-warn-dup-y) \
 		> $(dot-target).1.S
 	$(MAKE) $(build)=$(@D) $(dot-target).1.o
+	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) --strip-debug \
+	    $(dot-target).1.o -o $(dot-target).1
+	$(NM) -pa --format=sysv $(dot-target).1 \
+		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort $(syms-warn-dup-y) \
+		> $(dot-target).2.S
+	$(MAKE) $(build)=$(@D) $(dot-target).2.o
+	$(call compare-symbol-tables, $(dot-target).1.o, $(dot-target).2.o)
 	$(LD) $(XEN_LDFLAGS) -T $(obj)/xen.lds $< $(build_id_linker) \
-	    $(orphan-handling-y) $(dot-target).1.o -o $@
+	    $(orphan-handling-y) $(dot-target).2.o -o $@
 	$(NM) -pa --format=sysv $@ \
 		| $(objtree)/tools/symbols --all-symbols --xensyms --sysv --sort \
 		> $@.map
@@ -204,34 +196,40 @@ note_file_option ?= $(note_file)
 
 extra-$(XEN_BUILD_PE) += efi.lds
 ifeq ($(XEN_BUILD_PE),y)
-$(TARGET).efi: $(objtree)/prelink.o $(note_file) $(obj)/efi.lds $(obj)/efi/relocs-dummy.o $(obj)/efi/mkreloc
+$(TARGET).efi: $(obj)/efi/relocs-dummy.o $(obj)/efi/relocs-empty.o $(obj)/efi/mkreloc
+$(TARGET).efi: $(objtree)/prelink.o $(note_file) $(obj)/efi.lds
 ifeq ($(CONFIG_DEBUG_INFO),y)
 	$(if $(filter --strip-debug,$(EFI_LDFLAGS)),echo,:) "Will strip debug info from $(@F)"
 endif
+	$(objtree)/tools/symbols $(all_symbols) --source-name=$(@F).S --empty \
+		> $(dot-target).0s.S
+	$(MAKE) $(build)=$(@D) .$(@F).0s.o
 	$(foreach base, $(VIRT_BASE) $(ALT_BASE), \
 	          $(LD) $(call EFI_LDFLAGS,$(base)) -T $(obj)/efi.lds $< $(relocs-dummy) \
-	                $(objtree)/common/symbols-dummy.o $(note_file_option) \
+	                $(dot-target).0s.o $(note_file_option) --strip-debug \
 	                -o $(dot-target).$(base).0 &&) :
 	$(MKRELOC) $(foreach base,$(VIRT_BASE) $(ALT_BASE),$(dot-target).$(base).0) \
-		> $(dot-target).0r.S
-	$(NM) -pa --format=sysv $(dot-target).$(VIRT_BASE).0 \
-		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
-                  --source-name=$(@F).S \
-		> $(dot-target).0s.S
-	$(MAKE) $(build)=$(@D) .$(@F).0r.o .$(@F).0s.o
-	$(foreach base, $(VIRT_BASE) $(ALT_BASE), \
-	          $(LD) $(call EFI_LDFLAGS,$(base)) -T $(obj)/efi.lds $< \
-	                $(dot-target).0r.o $(dot-target).0s.o $(note_file_option) \
-	                -o $(dot-target).$(base).1 &&) :
-	$(MKRELOC) $(foreach base,$(VIRT_BASE) $(ALT_BASE),$(dot-target).$(base).1) \
 		> $(dot-target).1r.S
-	$(NM) -pa --format=sysv $(dot-target).$(VIRT_BASE).1 \
+	$(NM) -pa --format=sysv $(dot-target).$(VIRT_BASE).0 \
 		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
                   --source-name=$(@F).S \
 		> $(dot-target).1s.S
 	$(MAKE) $(build)=$(@D) .$(@F).1r.o .$(@F).1s.o
-	$(LD) $(call EFI_LDFLAGS,$(VIRT_BASE)) -T $(obj)/efi.lds $< \
-	      $(dot-target).1r.o $(dot-target).1s.o $(orphan-handling-y) \
+	$(foreach base, $(VIRT_BASE) $(ALT_BASE), \
+	          $(LD) $(call EFI_LDFLAGS,$(base)) -T $(obj)/efi.lds $<  --strip-debug \
+	                $(dot-target).1r.o $(dot-target).1s.o $(note_file_option) \
+	                -o $(dot-target).$(base).1 &&) :
+	$(MKRELOC) $(foreach base,$(VIRT_BASE) $(ALT_BASE),$(dot-target).$(base).1) \
+		> $(dot-target).2r.S
+	$(NM) -pa --format=sysv $(dot-target).$(VIRT_BASE).1 \
+		| $(objtree)/tools/symbols $(all_symbols) --sysv --sort \
+                  --source-name=$(@F).S \
+		> $(dot-target).2s.S
+	$(MAKE) $(build)=$(@D) .$(@F).2r.o .$(@F).2s.o
+	$(call compare-symbol-tables, $(dot-target).1r.o, $(dot-target).2r.o)
+	$(call compare-symbol-tables, $(dot-target).1s.o, $(dot-target).2s.o)
+	$(LD) $(call EFI_LDFLAGS,$(VIRT_BASE)) -T $(obj)/efi.lds $< $(obj)/efi/relocs-empty.o \
+	      $(dot-target).2r.o $(dot-target).2s.o $(orphan-handling-y) \
 	      $(note_file_option) -o $@
 	$(NM) -pa --format=sysv $@ \
 		| $(objtree)/tools/symbols --all-symbols --xensyms --sysv --sort \
@@ -250,7 +248,7 @@ $(TARGET).efi: FORCE
 endif
 
 # These should already have been rebuilt when building the prerequisite of "prelink.o"
-$(obj)/efi/buildid.o $(obj)/efi/relocs-dummy.o: ;
+$(obj)/efi/buildid.o $(obj)/efi/relocs-dummy.o $(obj)/efi/relocs-empty.o: ;
 
 .PHONY: include
 include: $(objtree)/arch/x86/include/asm/asm-macros.h
@@ -261,17 +259,17 @@ $(objtree)/arch/x86/include/asm/asm-macros.h: $(obj)/asm-macros.i $(src)/Makefil
 	$(call filechk,asm-macros.h)
 
 define filechk_asm-macros.h
+    echo '#ifndef X86_MACROS_H'; \
+    echo '#define X86_MACROS_H'; \
     echo '#if 0'; \
     echo '.if 0'; \
     echo '#endif'; \
-    echo '#ifndef __ASM_MACROS_H__'; \
-    echo '#define __ASM_MACROS_H__'; \
     echo 'asm ( ".include \"$@\"" );'; \
-    echo '#endif /* __ASM_MACROS_H__ */'; \
     echo '#if 0'; \
     echo '.endif'; \
     cat $<; \
-    echo '#endif'
+    echo '#endif'; \
+    echo '#endif /* X86_MACROS_H */'
 endef
 
 $(obj)/efi.lds: AFLAGS-y += -DEFI

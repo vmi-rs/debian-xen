@@ -7,17 +7,7 @@
 #include <xen/types.h>
 #include <xen/list.h>
 
-typedef uint32_t vpci_read_t(const struct pci_dev *pdev, unsigned int reg,
-                             void *data);
-
-typedef void vpci_write_t(const struct pci_dev *pdev, unsigned int reg,
-                          uint32_t val, void *data);
-
-typedef int vpci_register_init_t(struct pci_dev *dev);
-
-#define VPCI_PRIORITY_HIGH      "1"
-#define VPCI_PRIORITY_MIDDLE    "5"
-#define VPCI_PRIORITY_LOW       "9"
+#include <asm/vpci.h>
 
 #define VPCI_ECAM_BDF(addr)     (((addr) & 0x0ffff000) >> 12)
 
@@ -29,55 +19,18 @@ typedef int vpci_register_init_t(struct pci_dev *dev);
  */
 #define VPCI_MAX_VIRT_DEV       (PCI_SLOT(~0) + 1)
 
-#define REGISTER_VPCI_INIT(x, p)                \
-  static vpci_register_init_t *const x##_entry  \
-               __used_section(".data.vpci." p) = (x)
-
 /* Assign vPCI to device by adding handlers. */
 int __must_check vpci_assign_device(struct pci_dev *pdev);
 
 /* Remove all handlers and free vpci related structures. */
 void vpci_deassign_device(struct pci_dev *pdev);
 
-/* Add/remove a register handler. */
-int __must_check vpci_add_register_mask(struct vpci *vpci,
-                                        vpci_read_t *read_handler,
-                                        vpci_write_t *write_handler,
-                                        unsigned int offset, unsigned int size,
-                                        void *data, uint32_t ro_mask,
-                                        uint32_t rw1c_mask, uint32_t rsvdp_mask,
-                                        uint32_t rsvdz_mask);
-static inline int __must_check vpci_add_register(struct vpci *vpci,
-                                                 vpci_read_t *read_handler,
-                                                 vpci_write_t *write_handler,
-                                                 unsigned int offset,
-                                                 unsigned int size, void *data)
-{
-    return vpci_add_register_mask(vpci, read_handler, write_handler, offset,
-                                  size, data, 0, 0, 0, 0);
-}
-
-int __must_check vpci_remove_register(struct vpci *vpci, unsigned int offset,
-                                      unsigned int size);
+int vpci_reinit_ext_capabilities(struct pci_dev *pdev);
 
 /* Generic read/write handlers for the PCI config space. */
 uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size);
 void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
                 uint32_t data);
-
-/* Helper to return the value passed in data. */
-uint32_t cf_check vpci_read_val(
-    const struct pci_dev *pdev, unsigned int reg, void *data);
-
-/* Passthrough handlers. */
-uint32_t cf_check vpci_hw_read8(
-    const struct pci_dev *pdev, unsigned int reg, void *data);
-uint32_t cf_check vpci_hw_read16(
-    const struct pci_dev *pdev, unsigned int reg, void *data);
-uint32_t cf_check vpci_hw_read32(
-    const struct pci_dev *pdev, unsigned int reg, void *data);
-void cf_check vpci_hw_write16(
-    const struct pci_dev *pdev, unsigned int reg, uint32_t val, void *data);
 
 /*
  * Check for pending vPCI operations on this vcpu. Returns true if the vcpu
@@ -100,6 +53,7 @@ struct vpci {
             /* Guest address. */
             uint64_t guest_addr;
             uint64_t size;
+            uint64_t resizable_sizes;
             struct rangeset *mem;
             enum {
                 VPCI_BAR_EMPTY,
@@ -183,6 +137,13 @@ struct vpci {
             struct vpci_arch_msix_entry arch;
         } entries[];
     } *msix;
+
+    /* Resizable BARs data */
+    struct vpci_rebar {
+        unsigned int offset:12;
+        unsigned int nbars:3;
+    } rebar;
+
 #ifdef CONFIG_HAS_VPCI_GUEST_SUPPORT
     /* Guest SBDF of the device. */
 #define INVALID_GUEST_SBDF ((pci_sbdf_t){ .sbdf = ~0U })
@@ -193,16 +154,13 @@ struct vpci {
 
 struct vpci_vcpu {
     /* Per-vcpu structure to store state while {un}mapping of PCI BARs. */
-    struct pci_dev *pdev;
+    const struct pci_dev *pdev;
     uint16_t cmd;
     bool rom_only : 1;
 };
 
 #ifdef __XEN__
 void vpci_dump_msi(void);
-
-/* Make sure there's a hole in the p2m for the MSIX mmio areas. */
-int vpci_make_msix_hole(const struct pci_dev *pdev);
 
 /* Arch-specific vPCI MSI helpers. */
 void vpci_msi_arch_mask(struct vpci_msi *msi, const struct pci_dev *pdev,
@@ -226,35 +184,6 @@ int __must_check vpci_msix_arch_disable_entry(struct vpci_msix_entry *entry,
 void vpci_msix_arch_init_entry(struct vpci_msix_entry *entry);
 int vpci_msix_arch_print(const struct vpci_msix *msix);
 
-/*
- * Helper functions to fetch MSIX related data. They are used by both the
- * emulated MSIX code and the BAR handlers.
- */
-static inline paddr_t vmsix_table_base(const struct vpci *vpci, unsigned int nr)
-{
-    return vpci->header.bars[vpci->msix->tables[nr] &
-                             PCI_MSIX_BIRMASK].guest_addr;
-}
-
-static inline paddr_t vmsix_table_addr(const struct vpci *vpci, unsigned int nr)
-{
-    return vmsix_table_base(vpci, nr) +
-           (vpci->msix->tables[nr] & ~PCI_MSIX_BIRMASK);
-}
-
-/*
- * Note regarding the size calculation of the PBA: the spec mentions "The last
- * QWORD will not necessarily be fully populated", so it implies that the PBA
- * size is 64-bit aligned.
- */
-static inline size_t vmsix_table_size(const struct vpci *vpci, unsigned int nr)
-{
-    return
-        (nr == VPCI_MSIX_TABLE) ? vpci->msix->max_entries * PCI_MSIX_ENTRY_SIZE
-                                : ROUNDUP(DIV_ROUND_UP(vpci->msix->max_entries,
-                                                       8), 8);
-}
-
 static inline unsigned int vmsix_entry_nr(const struct vpci_msix *msix,
                                           const struct vpci_msix_entry *entry)
 {
@@ -274,6 +203,11 @@ bool vpci_ecam_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int len,
 
 #else /* !CONFIG_HAS_VPCI */
 struct vpci_vcpu {};
+
+static inline int vpci_reinit_ext_capabilities(struct pci_dev *pdev)
+{
+    return 0;
+}
 
 static inline int vpci_assign_device(struct pci_dev *pdev)
 {

@@ -8,6 +8,8 @@
 #include <xen/guest_access.h>
 #include <xen/iocap.h>
 #include <xen/serial.h>
+#include <xen/vpci.h>
+
 #include <asm/current.h>
 #include <asm/io_apic.h>
 #include <asm/msi.h>
@@ -21,6 +23,8 @@
 int physdev_map_pirq(struct domain *d, int type, int *index, int *pirq_p,
                      struct msi_info *msi);
 int physdev_unmap_pirq(struct domain *d, int pirq);
+
+int cf_check physdev_check_pci_extcfg(struct pci_dev *pdev, void *arg);
 
 #include "x86_64/mmconfig.h"
 
@@ -160,6 +164,28 @@ int physdev_unmap_pirq(struct domain *d, int pirq)
 
     return ret;
 }
+
+int cf_check physdev_check_pci_extcfg(struct pci_dev *pdev, void *arg)
+{
+    const struct physdev_pci_mmcfg_reserved *info = arg;
+
+    ASSERT(pdev->seg == info->segment);
+    if ( pdev->bus >= info->start_bus && pdev->bus <= info->end_bus )
+    {
+        pci_check_extcfg(pdev);
+
+        /*
+         * The re-init failing doesn't mean the device becomes entirely non-
+         * functional.  In case of failure, a message was already logged.
+         * Hence don't otherwise act upon failure.
+         *
+         * FIXME: Re-visit when DomU support is added to vPCI.
+         */
+        vpci_reinit_ext_capabilities(pdev);
+    }
+
+    return 0;
+}
 #endif /* COMPAT */
 
 ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
@@ -198,7 +224,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
             /* if this is a level irq and count > 0, send another
              * notification */ 
-            if ( gsi >= NR_ISAIRQS /* ISA irqs are edge triggered */
+            if ( gsi >= NR_ISA_IRQS /* ISA irqs are edge triggered */
                     && hvm_irq->gsi_assert_count[gsi] )
                 send_guest_pirq(currd, pirq);
         }
@@ -511,6 +537,13 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         ret = pci_mmcfg_reserved(info.address, info.segment,
                                  info.start_bus, info.end_bus, info.flags);
+
+        if ( !ret )
+            ret = pci_segment_iterate(info.segment, physdev_check_pci_extcfg,
+                                      &info);
+        else if ( ret > 0 ) /* Indication of "no change". */
+            ret = 0;
+
         if ( !ret && has_vpci(currd) && (info.flags & XEN_PCI_MMCFG_RESERVED) )
         {
             /*

@@ -15,9 +15,11 @@
 #include <asm/amd.h>
 #include <asm/cpu-policy.h>
 #include <asm/debugreg.h>
+#include <asm/guest-msr.h>
 #include <asm/hvm/nestedhvm.h>
 #include <asm/hvm/viridian.h>
 #include <asm/msr.h>
+#include <asm/p2m.h>
 #include <asm/pv/domain.h>
 #include <asm/setup.h>
 #include <asm/xstate.h>
@@ -38,6 +40,78 @@ int init_vcpu_msr_policy(struct vcpu *v)
     v->arch.msrs = msrs;
 
     return 0;
+}
+
+static int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val)
+{
+    const struct domain *d = v->domain;
+    /* Optionally shift out of the way of Viridian architectural MSRs. */
+    uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
+
+    switch ( idx - base )
+    {
+    case 0: /* Write hypercall page MSR.  Read as zero. */
+        *val = 0;
+        return X86EMUL_OKAY;
+    }
+
+    return X86EMUL_EXCEPTION;
+}
+
+static int guest_wrmsr_xen(struct vcpu *v, uint32_t idx, uint64_t val)
+{
+    struct domain *d = v->domain;
+    /* Optionally shift out of the way of Viridian architectural MSRs. */
+    uint32_t base = is_viridian_domain(d) ? 0x40000200 : 0x40000000;
+
+    switch ( idx - base )
+    {
+    case 0: /* Write hypercall page */
+    {
+        void *hypercall_page;
+        unsigned long gmfn = val >> PAGE_SHIFT;
+        unsigned int page_index = val & (PAGE_SIZE - 1);
+        struct page_info *page;
+        p2m_type_t t;
+
+        if ( page_index > 0 )
+        {
+            gdprintk(XENLOG_WARNING,
+                     "wrmsr hypercall page index %#x unsupported\n",
+                     page_index);
+            return X86EMUL_EXCEPTION;
+        }
+
+        page = get_page_from_gfn(d, gmfn, &t, P2M_ALLOC);
+
+        if ( !page || !get_page_type(page, PGT_writable_page) )
+        {
+            if ( page )
+                put_page(page);
+
+            if ( p2m_is_paging(t) )
+            {
+                p2m_mem_paging_populate(d, _gfn(gmfn));
+                return X86EMUL_RETRY;
+            }
+
+            gdprintk(XENLOG_WARNING,
+                     "Bad GMFN %lx (MFN %#"PRI_mfn") to MSR %08x\n",
+                     gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN), base);
+            return X86EMUL_EXCEPTION;
+        }
+
+        hypercall_page = __map_domain_page(page);
+        init_hypercall_page(d, hypercall_page);
+        unmap_domain_page(hypercall_page);
+
+        put_page_and_type(page);
+        return X86EMUL_OKAY;
+    }
+
+    default:
+        return X86EMUL_EXCEPTION;
+    }
 }
 
 int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
@@ -65,7 +139,7 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
     case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
     case MSR_U_CET:
     case MSR_S_CET:
-    case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:
+    case MSR_PL0_SSP ... MSR_ISST:
     case MSR_AMD64_LWP_CFG:
     case MSR_AMD64_LWP_CBADDR:
     case MSR_PPIN_CTL:
@@ -95,9 +169,9 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         break;
 
     case MSR_IA32_PLATFORM_ID:
-        if ( !(cp->x86_vendor & X86_VENDOR_INTEL) ||
-             !(boot_cpu_data.x86_vendor & X86_VENDOR_INTEL) )
+        if ( boot_cpu_data.vendor != X86_VENDOR_INTEL )
             goto gp_fault;
+
         rdmsrl(MSR_IA32_PLATFORM_ID, *val);
         break;
 
@@ -115,10 +189,8 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
          * from Xen's last microcode load, which can be forwarded straight to
          * the guest.
          */
-        if ( !(cp->x86_vendor & (X86_VENDOR_INTEL | X86_VENDOR_AMD)) ||
-             !(boot_cpu_data.x86_vendor &
-               (X86_VENDOR_INTEL | X86_VENDOR_AMD)) ||
-             rdmsr_safe(MSR_AMD_PATCHLEVEL, *val) )
+        if ( !(boot_cpu_data.vendor & (X86_VENDOR_INTEL | X86_VENDOR_AMD)) ||
+             rdmsr_safe(MSR_AMD_PATCHLEVEL, val) )
             goto gp_fault;
         break;
 
@@ -166,7 +238,7 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
             goto gp_fault;
 
         *val = 0;
-        if ( likely(!is_cpufreq_controller(d)) || rdmsr_safe(msr, *val) == 0 )
+        if ( likely(!is_cpufreq_controller(d)) || rdmsr_safe(msr, val) == 0 )
             break;
         goto gp_fault;
 
@@ -232,7 +304,7 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
             goto gp_fault;
         if ( !is_hardware_domain(d) )
             return X86EMUL_UNHANDLEABLE;
-        if ( rdmsr_safe(msr, *val) )
+        if ( rdmsr_safe(msr, val) )
             goto gp_fault;
         if ( msr == MSR_K8_SYSCFG )
             *val &= (SYSCFG_TOM2_FORCE_WB | SYSCFG_MTRR_TOM2_EN |
@@ -248,7 +320,7 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
     case MSR_FAM10H_MMIO_CONF_BASE:
         if ( !is_hardware_domain(d) ||
              !(cp->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) ||
-             rdmsr_safe(msr, *val) )
+             rdmsr_safe(msr, val) )
             goto gp_fault;
 
         break;
@@ -369,7 +441,7 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
     case MSR_U_CET:
     case MSR_S_CET:
-    case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:
+    case MSR_PL0_SSP ... MSR_ISST:
     case MSR_AMD64_LWP_CFG:
     case MSR_AMD64_LWP_CBADDR:
     case MSR_PPIN_CTL:

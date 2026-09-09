@@ -7,15 +7,7 @@
 #ifndef __X86_CONFIG_H__
 #define __X86_CONFIG_H__
 
-#define LONG_BYTEORDER 3
 #define CONFIG_PAGING_LEVELS 4
-
-#define BYTES_PER_LONG (1 << LONG_BYTEORDER)
-#define BITS_PER_LONG (BYTES_PER_LONG << 3)
-#define BITS_PER_BYTE 8
-#define POINTER_ALIGN BYTES_PER_LONG
-
-#define BITS_PER_LLONG 64
 
 #define BITS_PER_XEN_ULONG BITS_PER_LONG
 
@@ -40,7 +32,7 @@
 #define OPT_CONSOLE_STR "vga"
 
 /* Linkage for x86 */
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define CODE_FILL 0x90
 #endif
 
@@ -56,11 +48,6 @@
 
 /* Primary shadow stack is slot 5 of 8, immediately under the primary stack. */
 #define PRIMARY_SHSTK_SLOT 5
-
-/* Total size of syscall and emulation stubs. */
-#define STUB_BUF_SHIFT (L1_CACHE_SHIFT > 7 ? L1_CACHE_SHIFT : 7)
-#define STUB_BUF_SIZE  (1 << STUB_BUF_SHIFT)
-#define STUBS_PER_PAGE (PAGE_SIZE / STUB_BUF_SIZE)
 
 /* Return value for zero-size _xmalloc(), distinguished from NULL. */
 #define ZERO_BLOCK_PTR ((void *)0xBAD0BAD0BAD0BAD0UL)
@@ -208,13 +195,13 @@
 #endif
 #define DIRECTMAP_VIRT_END      (DIRECTMAP_VIRT_START + DIRECTMAP_SIZE)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #ifdef CONFIG_PV32
 
 /* This is not a fixed value, just a lower limit. */
-#define __HYPERVISOR_COMPAT_VIRT_START 0xF5800000
-#define HYPERVISOR_COMPAT_VIRT_START(d) ((d)->arch.hv_compat_vstart)
+#define __HYPERVISOR_COMPAT_VIRT_START 0xF5800000U
+#define HYPERVISOR_COMPAT_VIRT_START(d) ((d)->arch.pv.hv_compat_vstart)
 
 #else /* !CONFIG_PV32 */
 
@@ -250,7 +237,7 @@
 #define __OS          "q"  /* Operation Suffix */
 #define __OP          "r"  /* Operand Prefix */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern unsigned long xen_phys_start;
 #endif
 

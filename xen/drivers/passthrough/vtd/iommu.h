@@ -266,7 +266,7 @@ struct dma_pte {
 #define DMA_PTE_PROT (DMA_PTE_READ | DMA_PTE_WRITE)
 #define DMA_PTE_SP   (1 << 7)
 #define DMA_PTE_SNP  (1 << 11)
-#define DMA_PTE_CONTIG_MASK  (0xfull << PADDR_BITS)
+#define DMA_PTE_CONTIG_MASK  (0xfULL << PADDR_BITS)
 #define dma_clear_pte(p)    do {(p).val = 0;} while(0)
 #define dma_set_pte_readable(p) do {(p).val |= DMA_PTE_READ;} while(0)
 #define dma_set_pte_writable(p) do {(p).val |= DMA_PTE_WRITE;} while(0)
@@ -484,6 +484,7 @@ struct vtd_iommu {
     spinlock_t register_lock; /* protect iommu register handling */
     u64 root_maddr; /* root entry machine address */
     nodeid_t node;
+    bool flush_dev_iotlb;
     struct msi_desc msi;
     struct acpi_drhd_unit *drhd;
 
@@ -501,8 +502,7 @@ struct vtd_iommu {
                                     bool non_present_entry_flush);
         int __must_check (*iotlb)(struct vtd_iommu *iommu, u16 did, u64 addr,
                                   unsigned int size_order, u64 type,
-                                  bool flush_non_present_entry,
-                                  bool flush_dev_iotlb);
+                                  bool flush_non_present_entry);
     } flush;
 
     struct list_head ats_devices;

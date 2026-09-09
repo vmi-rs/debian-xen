@@ -15,7 +15,7 @@
 
 #include <asm/hvm/io.h>
 #include <asm/hvm/vmx/vmcs.h>
-#include <asm/hvm/svm/vmcb.h>
+#include <asm/hvm/svm-types.h>
 
 #ifdef CONFIG_MEM_SHARING
 struct mem_sharing_domain
@@ -95,13 +95,10 @@ struct hvm_domain {
     struct list_head       pinned_cacheattr_ranges;
 
     /* VRAM dirty support.  Protect with the domain paging lock. */
-    struct sh_dirty_vram *dirty_vram;
-
-    /* If one of vcpus of this domain is in no_fill_mode or
-     * mtrr/pat between vcpus is not the same, set is_in_uc_mode
-     */
-    spinlock_t             uc_lock;
-    bool                   is_in_uc_mode;
+    union {
+        struct sh_dirty_vram *sh;
+        struct hap_dirty_vram *hap;
+    } dirty_vram;
 
     bool                   is_s3_suspended;
 
@@ -111,7 +108,9 @@ struct hvm_domain {
     /* hypervisor intercepted msix table */
     struct list_head       msixtbl_list;
 
+#ifdef CONFIG_VIRIDIAN
     struct viridian_domain *viridian;
+#endif
 
     /*
      * TSC value that VCPUs use to calculate their tsc_offset value.

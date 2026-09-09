@@ -4,7 +4,7 @@
 #ifndef __ASM_X86_PROCESSOR_H
 #define __ASM_X86_PROCESSOR_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <xen/types.h>
 #include <xen/smp.h>
 #include <xen/percpu.h>
@@ -75,18 +75,10 @@
                      (_AC(X86_MT_UC,  ULL) << 0x30) | \
                      (_AC(X86_MT_UC,  ULL) << 0x38))
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 struct domain;
 struct vcpu;
-
-struct x86_cpu_id {
-    uint16_t vendor;
-    uint16_t family;
-    uint16_t model;
-    uint16_t feature;   /* bit index */
-    const void *driver_data;
-};
 
 extern struct cpuinfo_x86 cpu_data[];
 #define current_cpu_data cpu_data[smp_processor_id()]
@@ -104,14 +96,13 @@ extern unsigned int hap_paddr_bits;
 /* Maximum width of virtual addresses supported by the hardware. */
 extern unsigned int vaddr_bits;
 
-extern const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id table[]);
-
 extern void identify_cpu(struct cpuinfo_x86 *c);
 extern void setup_clear_cpu_cap(unsigned int cap);
 extern void setup_force_cpu_cap(unsigned int cap);
 extern bool is_forced_cpu_cap(unsigned int cap);
 extern void print_cpu_info(unsigned int cpu);
 extern void init_intel_cacheinfo(struct cpuinfo_x86 *c);
+extern void intel_init_arat(void);
 
 #define cpu_to_core(_cpu)   (cpu_data[_cpu].cpu_core_id)
 #define cpu_to_socket(_cpu) (cpu_data[_cpu].phys_proc_id)
@@ -336,43 +327,6 @@ struct tss_page {
 };
 DECLARE_PER_CPU(struct tss_page, tss_page);
 
-#define IST_NONE 0UL
-#define IST_MCE  1UL
-#define IST_NMI  2UL
-#define IST_DB   3UL
-#define IST_DF   4UL
-#define IST_MAX  4UL
-
-/* Set the Interrupt Stack Table used by a particular IDT entry. */
-static inline void set_ist(idt_entry_t *idt, unsigned int ist)
-{
-    /* IST is a 3 bit field, 32 bits into the IDT entry. */
-    ASSERT(ist <= IST_MAX);
-
-    /* Typically used on a live idt.  Disuade any clever optimisations. */
-    ACCESS_ONCE(idt->ist) = ist;
-}
-
-static inline void enable_each_ist(idt_entry_t *idt)
-{
-    set_ist(&idt[X86_EXC_DF],  IST_DF);
-    set_ist(&idt[X86_EXC_NMI], IST_NMI);
-    set_ist(&idt[X86_EXC_MC],  IST_MCE);
-    set_ist(&idt[X86_EXC_DB],  IST_DB);
-}
-
-static inline void disable_each_ist(idt_entry_t *idt)
-{
-    set_ist(&idt[X86_EXC_DF],  IST_NONE);
-    set_ist(&idt[X86_EXC_NMI], IST_NONE);
-    set_ist(&idt[X86_EXC_MC],  IST_NONE);
-    set_ist(&idt[X86_EXC_DB],  IST_NONE);
-}
-
-#define IDT_ENTRIES 256
-extern idt_entry_t idt_table[];
-extern idt_entry_t *idt_tables[];
-
 DECLARE_PER_CPU(root_pgentry_t *, root_pgt);
 
 /* vCPU of the currently loaded page-tables. */
@@ -380,20 +334,14 @@ DECLARE_PER_CPU(struct vcpu *, pgtable_vcpu);
 
 extern void write_ptbase(struct vcpu *v);
 
-/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
-static always_inline void rep_nop(void)
-{
-    asm volatile ( "rep;nop" : : : "memory" );
-}
+/* PAUSE (encoding: REP NOP) is a good thing to insert into busy-wait loops. */
+#define cpu_relax() asm volatile ( "pause" ::: "memory" )
 
-#define cpu_relax() rep_nop()
-
-void show_code(const struct cpu_user_regs *regs);
-void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs);
 void show_registers(const struct cpu_user_regs *regs);
 #define dump_execution_state() run_in_exception_handler(show_execution_state)
 void show_page_walk(unsigned long addr);
 void noreturn fatal_trap(const struct cpu_user_regs *regs, bool show_remote);
+void show_execution_state_nmi(const cpumask_t *mask, bool show_all);
 
 extern void mtrr_ap_init(void);
 extern void mtrr_bp_init(void);
@@ -447,22 +395,6 @@ static inline void enable_nmis(void)
 
 void nocall sysenter_entry(void);
 
-struct stubs {
-    union {
-        void(*func)(void);
-        unsigned long addr;
-    };
-    unsigned long mfn;
-};
-
-DECLARE_PER_CPU(struct stubs, stubs);
-void init_stubs(void);
-
-void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
-                             uint32_t subleaf, struct cpuid_leaf *res);
-int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val);
-int guest_wrmsr_xen(struct vcpu *v, uint32_t idx, uint64_t val);
-
 static inline uint8_t get_cpu_family(uint32_t raw, uint8_t *model,
                                      uint8_t *stepping)
 {
@@ -507,7 +439,7 @@ enum ap_boot_method {
 };
 extern enum ap_boot_method ap_boot_method;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __ASM_X86_PROCESSOR_H */
 

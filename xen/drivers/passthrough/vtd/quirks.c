@@ -30,6 +30,7 @@
 #include <xen/pci_regs.h>
 #include <xen/keyhandler.h>
 #include <asm/msi.h>
+#include <asm/intel-family.h>
 #include <asm/irq.h>
 #include <asm/pci.h>
 
@@ -530,10 +531,10 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     /* Sandybridge-EP (Romley) */
     case 0x3c00: /* host bridge */
     case 0x3c01 ... 0x3c0b: /* root ports */
-        pos = pci_find_ext_capability(pdev->sbdf, PCI_EXT_CAP_ID_ERR);
+        pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
         if ( !pos )
         {
-            pos = pci_find_ext_capability(pdev->sbdf, PCI_EXT_CAP_ID_VNDR);
+            pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_VNDR);
             while ( pos )
             {
                 val = pci_conf_read32(pdev->sbdf, pos + PCI_VNDR_HEADER);
@@ -542,7 +543,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
                     pos += PCI_VNDR_HEADER;
                     break;
                 }
-                pos = pci_find_next_ext_capability(pdev->sbdf, pos,
+                pos = pci_find_next_ext_capability(pdev, pos,
                                                    PCI_EXT_CAP_ID_VNDR);
             }
             ff = 0;
@@ -630,9 +631,7 @@ void __init quirk_iommu_caps(struct vtd_iommu *iommu)
      * model because the client parts don't expose their IOMMUs as PCI devices
      * we could match with a Device ID.
      */
-    if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
-         boot_cpu_data.x86 == 6 &&
-         (boot_cpu_data.x86_model == 0x2a ||
-          boot_cpu_data.x86_model == 0x2d) )
+    if ( boot_cpu_data.vfm == INTEL_SANDYBRIDGE ||
+         boot_cpu_data.vfm == INTEL_SANDYBRIDGE_X )
         iommu->cap &= ~(0xful << 34);
 }

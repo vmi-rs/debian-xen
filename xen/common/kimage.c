@@ -66,7 +66,7 @@
 static int kimage_is_destination_range(struct kexec_image *image,
                                        paddr_t start, paddr_t end);
 static struct page_info *kimage_alloc_page(struct kexec_image *image,
-                                           paddr_t dest);
+                                           paddr_t destination);
 
 static struct page_info *kimage_alloc_zeroed_page(unsigned memflags)
 {
@@ -491,11 +491,12 @@ static void kimage_terminate(struct kexec_image *image)
  * Call unmap_domain_page(ptr) after the loop exits.
  */
 #define for_each_kimage_entry(image, ptr, entry)                        \
-    for ( ptr = map_domain_page(_mfn(paddr_to_pfn(image->head)));       \
-          (entry = *ptr) && !(entry & IND_DONE);                        \
-          ptr = (entry & IND_INDIRECTION) ?                             \
-              (unmap_domain_page(ptr), map_domain_page(_mfn(paddr_to_pfn(entry)))) \
-              : ptr + 1 )
+    for ( (ptr) = map_domain_page(_mfn(paddr_to_pfn((image)->head)));   \
+          (entry = *(ptr)) && !((entry) & IND_DONE);                    \
+          (ptr) = (((entry) & IND_INDIRECTION)                          \
+                   ? (unmap_domain_page(ptr),                           \
+                      map_domain_page(_mfn(paddr_to_pfn(entry))))       \
+                   : (ptr) + 1) )
 
 static void kimage_free_entry(kimage_entry_t entry)
 {

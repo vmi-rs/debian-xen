@@ -41,11 +41,11 @@
  * Start addr          | End addr         | Slot       | area description
  * ============================================================================
  *                   .....                 L2 511          Unused
- *  0xffffffffc0a00000  0xffffffffc0bfffff L2 511          Fixmap
+ *  0xffffffffc1800000  0xffffffffc19fffff L2 511          Fixmap
  *                   ..... ( 2 MB gap )
- *  0xffffffffc0400000  0xffffffffc07fffff L2 511          FDT
+ *  0xffffffffc1200000  0xffffffffc15fffff L2 511          FDT
  *                   ..... ( 2 MB gap )
- *  0xffffffffc0000000  0xffffffffc01fffff L2 511          Xen
+ *  0xffffffffc0000000  0xffffffffc0ffffff L2 511          Xen
  *                   .....                 L2 510          Unused
  *  0x3200000000        0x7f7fffffff       L2 200-509      Direct map
  *                   .....                 L2 199          Unused
@@ -78,7 +78,7 @@
 
 #define GAP_SIZE                MB(2)
 
-#define XEN_VIRT_SIZE           MB(2)
+#define XEN_VIRT_SIZE           MB(16)
 
 #define BOOT_FDT_VIRT_START     (XEN_VIRT_START + XEN_VIRT_SIZE + GAP_SIZE)
 #define BOOT_FDT_VIRT_SIZE      MB(4)
@@ -119,20 +119,11 @@
 #define HYPERVISOR_VIRT_START XEN_VIRT_START
 
 #if defined(CONFIG_RISCV_64)
-# define LONG_BYTEORDER 3
 # define ELFSIZE 64
 # define MAX_VIRT_CPUS 128u
 #else
 # error "Unsupported RISCV variant"
 #endif
-
-#define BYTES_PER_LONG (1 << LONG_BYTEORDER)
-#define BITS_PER_LONG  (BYTES_PER_LONG << 3)
-#define POINTER_ALIGN  BYTES_PER_LONG
-
-#define BITS_PER_LLONG 64
-
-#define BITS_PER_BYTE 8
 
 /* xen_ulong_t is always 64 bits */
 #define BITS_PER_XEN_ULONG 64
@@ -146,18 +137,31 @@
 #define INVALID_VCPU_ID MAX_VIRT_CPUS
 
 /* Linkage for RISCV */
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define CODE_FILL /* empty */
 #endif
 
 #define SMP_CACHE_BYTES (1 << 6)
 
-#define STACK_SIZE PAGE_SIZE
+#define STACK_SIZE (PAGE_SIZE << 3)
 
 #define IDENT_AREA_SIZE 64
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern unsigned long phys_offset; /* = load_start - XEN_VIRT_START */
+#endif
+
+/*
+ * KERNEL_LOAD_ADDR_ALIGNMENT is defined based on paragraph of
+ * "Kernel location" of boot.rst:
+ * https://docs.kernel.org/arch/riscv/boot.html#kernel-location
+ */
+#if defined(CONFIG_RISCV_32)
+#define KERNEL_LOAD_ADDR_ALIGNMENT MB(4)
+#elif defined(CONFIG_RISCV_64)
+#define KERNEL_LOAD_ADDR_ALIGNMENT MB(2)
+#else
+#error "Define KERNEL_LOAD_ADDR_ALIGNMENT"
 #endif
 
 #endif /* ASM__RISCV__CONFIG_H */

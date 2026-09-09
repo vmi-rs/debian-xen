@@ -216,18 +216,20 @@ void disable_lapic_nmi_watchdog(void)
 {
     if (nmi_active <= 0)
         return;
-    switch (boot_cpu_data.x86_vendor) {
+    switch ( boot_cpu_data.vendor )
+    {
     case X86_VENDOR_AMD:
-        wrmsr(MSR_K7_EVNTSEL0, 0, 0);
+        wrmsrns(MSR_K7_EVNTSEL0, 0);
         break;
     case X86_VENDOR_INTEL:
-        switch (boot_cpu_data.x86) {
+        switch ( boot_cpu_data.family )
+        {
         case 6:
-            wrmsr(MSR_P6_EVNTSEL(0), 0, 0);
+            wrmsrns(MSR_P6_EVNTSEL(0), 0);
             break;
         case 15:
-            wrmsr(MSR_P4_IQ_CCCR0, 0, 0);
-            wrmsr(MSR_P4_CRU_ESCR0, 0, 0);
+            wrmsr(MSR_P4_IQ_CCCR0, 0);
+            wrmsr(MSR_P4_CRU_ESCR0, 0);
             break;
         }
         break;
@@ -282,7 +284,7 @@ static void clear_msr_range(unsigned int base, unsigned int n)
     unsigned int i;
 
     for (i = 0; i < n; i++)
-        wrmsr(base+i, 0, 0);
+        wrmsrns(base + i, 0);
 }
 
 static inline void write_watchdog_counter(const char *descr)
@@ -308,11 +310,11 @@ static void setup_k7_watchdog(void)
         | K7_EVNTSEL_USR
         | K7_NMI_EVENT;
 
-    wrmsr(MSR_K7_EVNTSEL0, evntsel, 0);
+    wrmsrns(MSR_K7_EVNTSEL0, evntsel);
     write_watchdog_counter("K7_PERFCTR0");
     apic_write(APIC_LVTPC, APIC_DM_NMI);
     evntsel |= K7_EVNTSEL_ENABLE;
-    wrmsr(MSR_K7_EVNTSEL0, evntsel, 0);
+    wrmsrns(MSR_K7_EVNTSEL0, evntsel);
 }
 
 static void setup_p6_watchdog(unsigned counter)
@@ -338,11 +340,11 @@ static void setup_p6_watchdog(unsigned counter)
         | P6_EVNTSEL_USR
         | counter;
 
-    wrmsr(MSR_P6_EVNTSEL(0), evntsel, 0);
+    wrmsrns(MSR_P6_EVNTSEL(0), evntsel);
     write_watchdog_counter("P6_PERFCTR0");
     apic_write(APIC_LVTPC, APIC_DM_NMI);
     evntsel |= P6_EVNTSEL0_ENABLE;
-    wrmsr(MSR_P6_EVNTSEL(0), evntsel, 0);
+    wrmsrns(MSR_P6_EVNTSEL(0), evntsel);
 }
 
 static void setup_p4_watchdog(void)
@@ -362,7 +364,7 @@ static void setup_p4_watchdog(void)
         clear_msr_range(0x3F1, 2);
     /* MSR 0x3F0 seems to have a default value of 0xFC00, but current
        docs doesn't fully define it, so leave it alone for now. */
-    if (boot_cpu_data.x86_model >= 0x3) {
+    if (boot_cpu_data.model >= 0x3) {
         /* MSR_P4_IQ_ESCR0/1 (0x3ba/0x3bb) removed */
         clear_msr_range(0x3A0, 26);
         clear_msr_range(0x3BC, 3);
@@ -387,16 +389,17 @@ void setup_apic_nmi_watchdog(void)
     if ( nmi_watchdog == NMI_NONE )
         return;
 
-    switch ( boot_cpu_data.x86_vendor )
+    switch ( boot_cpu_data.vendor )
     {
     case X86_VENDOR_AMD:
         setup_k7_watchdog();
         break;
 
     case X86_VENDOR_INTEL:
-        switch (boot_cpu_data.x86) {
+        switch ( boot_cpu_data.family )
+        {
         case 6:
-            setup_p6_watchdog((boot_cpu_data.x86_model < 14) 
+            setup_p6_watchdog((boot_cpu_data.model < 14)
                               ? P6_EVENT_CPU_CLOCKS_NOT_HALTED
                               : CORE_EVENT_CPU_CLOCKS_NOT_HALTED);
             break;
