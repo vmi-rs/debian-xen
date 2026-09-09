@@ -1,0 +1,135 @@
+name: Build Debian packages
+
+on:
+  push:
+    branches:
+      - 'vmi/**'
+    tags:
+      - 'debian/**'
+  pull_request:
+    branches:
+      - 'vmi/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build amd64 .debs (trixie)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trust the checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install dpkg-dev
+        run: apt-get install --yes --no-install-recommends dpkg-dev
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-archives-trixie-amd64-${{ hashFiles('debian/control') }}
+          restore-keys: |
+            apt-archives-trixie-amd64-
+
+      - name: Install build dependencies
+        run: apt-get build-dep --yes .
+
+      - name: Build binary packages
+        env:
+          DEB_BUILD_OPTIONS: nocheck
+        run: dpkg-buildpackage -us -uc -b -Jauto
+
+      - name: Collect build output
+        run: |
+          mkdir -p out
+          mv ../*.deb ../*.buildinfo ../*.changes out/
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xen-debs-amd64-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish apt repository
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: xen-debs-amd64-${{ github.sha }}
+          path: incoming
+
+      - name: Install reprepro
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends reprepro gnupg
+
+      - name: Import signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 -p "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Build the apt repository
+        env:
+          KEY_ID: ${{ vars.APT_SIGNING_KEY_ID }}
+        run: |
+          mkdir -p repo/conf
+          cat > repo/conf/distributions <<EOF
+          Origin: VMI Xen
+          Label: VMI Xen
+          Codename: trixie
+          Architectures: amd64
+          Components: main
+          Description: VMI Xen packages for Debian trixie
+          SignWith: ${KEY_ID}
+          EOF
+          reprepro --basedir repo includedeb trixie incoming/*.deb
+          gpg --batch --export --armor "$KEY_ID" > repo/pubkey.asc
+          cat > repo/index.html <<EOF
+          <!doctype html>
+          <title>VMI Xen apt repository</title>
+          <pre>
+          echo "deb [signed-by=/usr/share/keyrings/vmi-xen.gpg] https://vmi-rs.github.io/debian-xen trixie main" | \
+            sudo tee /etc/apt/sources.list.d/vmi-xen.list
+          curl -fsSL https://vmi-rs.github.io/debian-xen/pubkey.asc | \
+            sudo gpg --dearmor -o /usr/share/keyrings/vmi-xen.gpg
+          sudo apt-get update
+          </pre>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
